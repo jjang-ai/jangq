@@ -27,6 +27,7 @@ def write_mxq_model(
     mxq_config: dict,
     tokenizer_files: dict[str, str | dict] | None = None,
     importance_data: dict[str, np.ndarray] | None = None,
+    passthrough_tensors: dict[str, np.ndarray] | None = None,
     max_shard_bytes: int = 5 * 1024 ** 3,  # 5 GB per shard
 ) -> None:
     """
@@ -34,7 +35,7 @@ def write_mxq_model(
 
     Args:
         output_dir: output directory path
-        quantized_tensors: dict of tensor_name → QuantizedTensor
+        quantized_tensors: dict of tensor_name -> QuantizedTensor
         model_config: HuggingFace model config dict
         mxq_config: MXQ quantization config dict
         tokenizer_files: dict of filename → content (str or dict for JSON)
@@ -68,6 +69,11 @@ def write_mxq_model(
         all_tensors[f"{name}.zeros"] = qt.zeros
         all_tensors[f"{name}.bit_map"] = qt.bit_map
         all_tensors[f"{name}.block_offsets"] = qt.block_offsets
+
+    # Add non-quantized tensors (norms, biases, etc.)
+    if passthrough_tensors:
+        for name, tensor in passthrough_tensors.items():
+            all_tensors[name] = tensor
 
     # Shard tensors into files
     shards = _shard_tensors(all_tensors, max_shard_bytes)

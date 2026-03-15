@@ -18,7 +18,7 @@ from safetensors import safe_open
 from .format.spec import DEFAULT_BLOCK_SIZE
 from .format.writer import write_mxq_model
 from .architectures import detect_architecture, get_layer_config, get_skip_tensors, summarize_architecture
-from .calibrate import calibrate_from_weights
+from .calibrate import calibrate_from_weights, _load_bf16_tensor
 from .allocate import allocate_bits_greedy, summarize_allocation
 from .quantize import quantize_tensor, QuantizedTensor
 
@@ -181,6 +181,41 @@ def convert_model(
             base_name = base_name[:-7]
         quantized_tensors[base_name] = qt
 
+    # Step 4b: Collect non-quantized tensors (norms, biases)
+    print("  Collecting non-quantized tensors...")
+    passthrough = {}
+    quantized_bases = set(quantized_tensors.keys())
+
+    for sf_path in weight_files:
+        with safe_open(str(sf_path), framework="numpy") as f:
+            for tensor_name in f.keys():
+                base = tensor_name.replace(".weight", "")
+                # Skip tensors we already quantized
+                if base in quantized_bases:
+                    continue
+
+                # Include: norm weights, biases, small tensors
+                is_norm = ("norm" in tensor_name.lower())
+                is_bias = tensor_name.endswith(".bias")
+                shape = f.get_slice(tensor_name).get_shape()
+                is_small = len(shape) == 1  # 1D tensors (norms, biases)
+
+                if is_norm or is_bias or is_small:
+                    try:
+                        tensor = f.get_tensor(tensor_name)
+                    except TypeError:
+                        tensor = _load_bf16_tensor(sf_path, tensor_name, shape)
+
+                    # Store as float16 for GPU compatibility
+                    if tensor.dtype == np.float32:
+                        tensor = tensor.astype(np.float16)
+                    elif tensor.dtype != np.float16:
+                        tensor = tensor.astype(np.float16)
+
+                    passthrough[tensor_name] = tensor
+
+    print(f"  Found {len(passthrough)} non-quantized tensors (norms, biases)")
+
     # Step 5: Write MXQ model
     print(f"\n  [5/5] Writing MXQ model...")
 
@@ -239,6 +274,7 @@ def convert_model(
         mxq_config=mxq_config,
         tokenizer_files=tokenizer_files,
         importance_data=importance_data,
+        passthrough_tensors=passthrough,
     )
 
     results = {
