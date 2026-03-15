@@ -129,6 +129,7 @@ def quantize_block_mse(
 def _quantize_blocks_vectorized(
     blocks: np.ndarray,
     bits: int,
+    use_mse_optimal: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Vectorized quantization of many blocks at the same bit width.
@@ -136,6 +137,7 @@ def _quantize_blocks_vectorized(
     Args:
         blocks: (n_blocks, block_size) float32 array
         bits: bit width for ALL these blocks
+        use_mse_optimal: if True, search for optimal clipping ratio
 
     Returns:
         (quantized_ints, scales, zeros) — all arrays over n_blocks
@@ -149,24 +151,63 @@ def _quantize_blocks_vectorized(
 
     # Handle constant blocks
     const_mask = (w_max == w_min)
-    w_range = w_max - w_min
-    w_range[const_mask] = 1.0  # avoid div by zero
 
-    # Compute scale and zero point
-    scale = w_range / n_levels  # (n_blocks,)
-    zero_point = np.round(-w_min / scale)  # (n_blocks,)
-    zero_point = np.clip(zero_point, 0, n_levels)
+    if use_mse_optimal and bits <= 4:
+        # MSE-optimal clipping: search for best clipping ratio
+        # This finds the clip range that minimizes reconstruction error,
+        # not just the full min/max range. Crucial at low bit widths
+        # where outliers waste quantization levels.
+        best_q = np.zeros((n_blocks, block_size), dtype=np.uint8)
+        best_scale = np.ones(n_blocks, dtype=np.float32)
+        best_zero = np.zeros(n_blocks, dtype=np.float32)
+        best_mse = np.full(n_blocks, np.inf, dtype=np.float64)
 
-    # Quantize all blocks at once: (n_blocks, block_size)
-    q = np.round(blocks / scale[:, None] + zero_point[:, None])
-    q = np.clip(q, 0, n_levels).astype(np.uint8)
+        for clip_ratio in np.linspace(0.7, 1.0, 15):
+            c_min = w_min * clip_ratio
+            c_max = w_max * clip_ratio
 
-    # Zero out constant blocks
-    scale[const_mask] = 1.0
-    zero_point[const_mask] = 0.0
-    q[const_mask] = 0
+            c_range = c_max - c_min
+            c_range[c_range == 0] = 1.0
 
-    return q, scale.astype(np.float32), zero_point.astype(np.float32)
+            scale = c_range / n_levels
+            zero = np.round(-c_min / scale)
+            zero = np.clip(zero, 0, n_levels)
+
+            q = np.round(blocks / scale[:, None] + zero[:, None])
+            q = np.clip(q, 0, n_levels)
+            dq = (q - zero[:, None]) * scale[:, None]
+
+            mse = np.mean((blocks - dq) ** 2, axis=1)
+
+            # Update where this ratio is better
+            improved = mse < best_mse
+            best_mse[improved] = mse[improved]
+            best_q[improved] = q[improved].astype(np.uint8)
+            best_scale[improved] = scale[improved]
+            best_zero[improved] = zero[improved]
+
+        best_scale[const_mask] = 1.0
+        best_zero[const_mask] = 0.0
+        best_q[const_mask] = 0
+
+        return best_q, best_scale, best_zero
+    else:
+        # Standard min/max RTN (fast, used for 6+ bit)
+        w_range = w_max - w_min
+        w_range[const_mask] = 1.0
+
+        scale = w_range / n_levels
+        zero_point = np.round(-w_min / scale)
+        zero_point = np.clip(zero_point, 0, n_levels)
+
+        q = np.round(blocks / scale[:, None] + zero_point[:, None])
+        q = np.clip(q, 0, n_levels).astype(np.uint8)
+
+        scale[const_mask] = 1.0
+        zero_point[const_mask] = 0.0
+        q[const_mask] = 0
+
+        return q, scale.astype(np.float32), zero_point.astype(np.float32)
 
 
 def quantize_tensor(
@@ -229,7 +270,8 @@ def quantize_tensor(
         if len(group_blocks) == 0:
             continue
 
-        q, s, z = _quantize_blocks_vectorized(group_blocks, bits)
+        q, s, z = _quantize_blocks_vectorized(group_blocks, bits,
+                                                use_mse_optimal=(method == "mse"))
         all_q[mask] = q
         scales[mask] = s
         zeros[mask] = z
