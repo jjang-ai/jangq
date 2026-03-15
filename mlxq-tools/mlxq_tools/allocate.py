@@ -46,45 +46,83 @@ LAYER_PRIORS = {
     "down_proj": 2,       # MLP down — slightly more sensitive
 }
 
-# Cross-layer bit profiles — validated by experiment 028
-# These assign PREFERRED bits per layer type, not just minimums.
-# The key insight: attention is 12% of params but controls quality,
-# MLP is 88% and tolerates aggressive quantization.
-MXQ_PROFILES = {
-    # name: {layer_pattern: preferred_bits}
-    "mxq-2.5": {
-        "embed_tokens": 4,
-        "lm_head": 6,
-        "q_proj": 6, "k_proj": 6,      # attention: 6-bit (critical)
-        "v_proj": 4, "o_proj": 4,       # attention out: 4-bit
-        "gate_proj": 2, "up_proj": 2,   # MLP: 2-bit (88% of params)
-        "down_proj": 2,
+# MLXQ Quantization Profiles
+#
+# Named: MQ{bits}_{size}  where bits = avg bit width, size = S/M/L
+#   S = Small  — smallest model, most compression, attention at minimum viable
+#   M = Medium — balanced quality/size, attention boosted for coherence
+#   L = Large  — best quality at this bit level, attention at high precision
+#
+# The key insight (experiment 028): attention is ~12% of params but
+# controls output quality (prevents repetition loops, maintains coherence).
+# MLP is ~88% of params and tolerates aggressive quantization.
+#
+# Example HuggingFace names:
+#   dealignai/Qwen2.5-72B-MQ4M
+#   dealignai/Qwen2.5-72B-MQ3M
+#   dealignai/Qwen2.5-72B-MQ2M
+#
+MLXQ_PROFILES = {
+    # ── MQ2: 2-bit MLP ─────────────────────────────────────────────
+    # Maximum compression. 70B fits in 32GB. Needs 7B+ models.
+    "MQ2S": {  # ~2.5 avg — Small: tightest, attention at 6-bit
+        "embed_tokens": 4, "lm_head": 6,
+        "q_proj": 6, "k_proj": 6, "v_proj": 6, "o_proj": 6,
+        "gate_proj": 2, "up_proj": 2, "down_proj": 2,
     },
-    "mxq-3": {
-        "embed_tokens": 4,
-        "lm_head": 6,
-        "q_proj": 6, "k_proj": 6,
-        "v_proj": 4, "o_proj": 4,
-        "gate_proj": 3, "up_proj": 3,   # MLP: 3-bit
-        "down_proj": 3,
+    "MQ2M": {  # ~2.7 avg — Medium: attention at 8-bit for better coherence
+        "embed_tokens": 4, "lm_head": 8,
+        "q_proj": 8, "k_proj": 8, "v_proj": 8, "o_proj": 8,
+        "gate_proj": 2, "up_proj": 2, "down_proj": 2,
     },
-    "mxq-3.5": {
-        "embed_tokens": 4,
-        "lm_head": 6,
-        "q_proj": 6, "k_proj": 6,
-        "v_proj": 6, "o_proj": 4,
-        "gate_proj": 3, "up_proj": 3,
-        "down_proj": 3,
+
+    # ── MQ3: 3-bit MLP ─────────────────────────────────────────────
+    # Sweet spot for quality/compression. Proven to beat uniform 4-bit.
+    "MQ3S": {  # ~3.1 avg — Small: attention at 4-bit (same as MLP neighbor)
+        "embed_tokens": 4, "lm_head": 6,
+        "q_proj": 4, "k_proj": 4, "v_proj": 4, "o_proj": 4,
+        "gate_proj": 3, "up_proj": 3, "down_proj": 3,
     },
-    "mxq-4": {
-        "embed_tokens": 4,
-        "lm_head": 8,
-        "q_proj": 8, "k_proj": 6,
-        "v_proj": 6, "o_proj": 4,
-        "gate_proj": 3, "up_proj": 3,
-        "down_proj": 4,
+    "MQ3M": {  # ~3.4 avg — Medium: attention at 6-bit (validated sweet spot)
+        "embed_tokens": 4, "lm_head": 6,
+        "q_proj": 6, "k_proj": 6, "v_proj": 6, "o_proj": 6,
+        "gate_proj": 3, "up_proj": 3, "down_proj": 3,
+    },
+    "MQ3L": {  # ~3.6 avg — Large: attention at 8-bit for maximum coherence
+        "embed_tokens": 4, "lm_head": 8,
+        "q_proj": 8, "k_proj": 8, "v_proj": 8, "o_proj": 8,
+        "gate_proj": 3, "up_proj": 3, "down_proj": 3,
+    },
+
+    # ── MQ4: 4-bit MLP ─────────────────────────────────────────────
+    # High quality. Beats uniform 4-bit on hard prompts.
+    "MQ4S": {  # ~4.1 avg — Small: attention at 5-bit (proven direct win)
+        "embed_tokens": 4, "lm_head": 6,
+        "q_proj": 5, "k_proj": 5, "v_proj": 5, "o_proj": 5,
+        "gate_proj": 4, "up_proj": 4, "down_proj": 4,
+    },
+    "MQ4M": {  # ~4.2 avg — Medium: attention at 6-bit
+        "embed_tokens": 4, "lm_head": 6,
+        "q_proj": 6, "k_proj": 6, "v_proj": 6, "o_proj": 6,
+        "gate_proj": 4, "up_proj": 4, "down_proj": 4,
+    },
+    "MQ4L": {  # ~4.5 avg — Large: attention at 8-bit, same size as uniform 4
+        "embed_tokens": 4, "lm_head": 8,
+        "q_proj": 8, "k_proj": 8, "v_proj": 8, "o_proj": 8,
+        "gate_proj": 4, "up_proj": 4, "down_proj": 4,
+    },
+
+    # ── MQ6: 6-bit MLP ─────────────────────────────────────────────
+    # Near-lossless. For when quality matters more than size.
+    "MQ6M": {  # ~6.2 avg — near-lossless
+        "embed_tokens": 6, "lm_head": 8,
+        "q_proj": 8, "k_proj": 8, "v_proj": 8, "o_proj": 8,
+        "gate_proj": 6, "up_proj": 6, "down_proj": 6,
     },
 }
+
+# Backward compat
+MXQ_PROFILES = MLXQ_PROFILES
 
 
 def classify_layer(tensor_name: str) -> tuple[str, Optional[int], int]:
@@ -309,15 +347,16 @@ def allocate_bits_profile(
 
     Args:
         tensor_names: tensor name for each block
-        profile: one of "mxq-2.5", "mxq-3", "mxq-3.5", "mxq-4"
+        profile: e.g. "MQ3M", "MQ4S", "MQ2M" (case-insensitive)
 
     Returns:
         uint8 array of bit widths per block
     """
-    if profile not in MXQ_PROFILES:
-        raise ValueError(f"Unknown profile '{profile}'. Available: {list(MXQ_PROFILES.keys())}")
+    profile = profile.upper()
+    if profile not in MLXQ_PROFILES:
+        raise ValueError(f"Unknown profile '{profile}'. Available: {list(MLXQ_PROFILES.keys())}")
 
-    layer_bits = MXQ_PROFILES[profile]
+    layer_bits = MLXQ_PROFILES[profile]
     n_blocks = len(tensor_names)
     bits = np.full(n_blocks, 4, dtype=np.int32)  # default 4-bit
 
