@@ -130,6 +130,9 @@ public final class MXQMetalDevice: @unchecked Sendable {
             "mxq_silu_mul",
             "mxq_add",
             "mxq_embedding",
+            "mxq_embedding_dequant",
+            "mxq_attention_decode",
+            "mxq_attention_prefill",
         ]
 
         for name in kernelNames {

@@ -238,17 +238,14 @@ public final class MXQInferenceEngine {
                             hiddenSize: config.hiddenSize)
 
         // LM Head projection → logits
-        if let lmHead = model.lmHead {
-            try dispatchDequantGEMV(cmdBuffer: cmdBuffer,
-                                     input: normBuffer,
-                                     weight: lmHead,
-                                     output: logitsBuffer,
-                                     K: config.hiddenSize,
-                                     N: config.vocabSize)
-        } else {
-            // Tied embeddings: logits = norm_output × embed_tokens^T
-            // TODO: implement tied embedding matmul
-        }
+        // For tied embeddings, use the embedding table as lm_head
+        let lmHeadWeight = model.lmHead ?? model.embedTokens
+        try dispatchDequantGEMV(cmdBuffer: cmdBuffer,
+                                 input: normBuffer,
+                                 weight: lmHeadWeight,
+                                 output: logitsBuffer,
+                                 K: config.hiddenSize,
+                                 N: config.vocabSize)
 
         // Submit and wait
         cmdBuffer.commit()
@@ -270,11 +267,27 @@ public final class MXQInferenceEngine {
             throw MXQError.inferenceError("Failed to create compute encoder")
         }
 
-        // For MXQ-quantized embeddings, we need to dequantize the row
-        // For now, since embed_tokens is quantized, use the dequant kernel
-        // to extract a single row
-        // TODO: implement efficient single-row dequant for embedding lookup
+        let embed = model.embedTokens
+        let pipeline = try metalDevice.pipeline(for: "mxq_embedding_dequant")
+        encoder.setComputePipelineState(pipeline)
 
+        encoder.setBuffer(embed.qweight, offset: 0, index: 0)
+        encoder.setBuffer(embed.scales, offset: 0, index: 1)
+        encoder.setBuffer(embed.zeros, offset: 0, index: 2)
+        encoder.setBuffer(embed.bitMap, offset: 0, index: 3)
+        encoder.setBuffer(embed.blockOffsets, offset: 0, index: 4)
+        encoder.setBuffer(hiddenBuffer, offset: 0, index: 5)
+
+        var tid = UInt32(tokenId)
+        var hidden = UInt32(config.hiddenSize)
+        var blocksPerRow = UInt32((config.hiddenSize + 63) / 64)  // ceil(hidden / block_size)
+        encoder.setBytes(&tid, length: 4, index: 6)
+        encoder.setBytes(&hidden, length: 4, index: 7)
+        encoder.setBytes(&blocksPerRow, length: 4, index: 8)
+
+        let gridSize = MTLSize(width: config.hiddenSize, height: 1, depth: 1)
+        let tgSize = MTLSize(width: min(config.hiddenSize, 256), height: 1, depth: 1)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
         encoder.endEncoding()
     }
 
@@ -384,19 +397,39 @@ public final class MXQInferenceEngine {
     }
 
     private func dispatchAttention(cmdBuffer: MTLCommandBuffer, layer: Int) throws {
-        // TODO: Full multi-head attention with GQA
-        // For now, this is a placeholder that copies Q to attnOutBuffer
-        // This needs a proper attention kernel for production use
-
-        guard let blitEncoder = cmdBuffer.makeBlitCommandEncoder() else {
-            throw MXQError.inferenceError("Failed to create blit encoder")
+        guard let encoder = cmdBuffer.makeComputeCommandEncoder() else {
+            throw MXQError.inferenceError("Failed to create compute encoder")
         }
 
-        let bytes = config.hiddenSize * MemoryLayout<Float16>.stride
-        blitEncoder.copy(from: qBuffer, sourceOffset: 0,
-                         to: attnOutBuffer, destinationOffset: 0,
-                         size: min(bytes, qBuffer.length))
-        blitEncoder.endEncoding()
+        let pipeline = try metalDevice.pipeline(for: "mxq_attention_decode")
+        encoder.setComputePipelineState(pipeline)
+
+        let nHeads = config.numAttentionHeads
+        let kvHeads = config.kvHeads
+        let headDim = config.headDim
+
+        encoder.setBuffer(qBuffer, offset: 0, index: 0)
+        encoder.setBuffer(kvCacheKeys[layer][0], offset: 0, index: 1)
+        encoder.setBuffer(kvCacheValues[layer][0], offset: 0, index: 2)
+        encoder.setBuffer(attnOutBuffer, offset: 0, index: 3)
+
+        var nh = UInt32(nHeads)
+        var nkv = UInt32(kvHeads)
+        var hd = UInt32(headDim)
+        var sl = UInt32(max(currentPosition + 1, 1))  // seq_len = filled positions
+        var scale = 1.0 / sqrt(Float(headDim))        // 1/sqrt(d_k)
+
+        encoder.setBytes(&nh, length: 4, index: 4)
+        encoder.setBytes(&nkv, length: 4, index: 5)
+        encoder.setBytes(&hd, length: 4, index: 6)
+        encoder.setBytes(&sl, length: 4, index: 7)
+        encoder.setBytes(&scale, length: 4, index: 8)
+
+        // One threadgroup per head, 256 threads per threadgroup
+        let gridSize = MTLSize(width: nHeads, height: 1, depth: 1)
+        let tgSize = MTLSize(width: 256, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: tgSize)
+        encoder.endEncoding()
     }
 
     private func dispatchSiLUMul(cmdBuffer: MTLCommandBuffer,
