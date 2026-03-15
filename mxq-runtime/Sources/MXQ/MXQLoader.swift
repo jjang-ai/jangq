@@ -51,7 +51,7 @@ public struct TransformerLayerWeights: @unchecked Sendable {
 /// Complete loaded model ready for inference.
 public struct MXQModel: @unchecked Sendable {
     public let config: MXQModelConfig
-    public let embedTokens: MTLBuffer       // embedding weight (may be quantized)
+    public let embedTokens: MXQWeight        // embedding weight (quantized)
     public let finalNorm: MTLBuffer          // final RMSNorm weight
     public let lmHead: MXQWeight?            // output head (nil if tied with embeddings)
     public let layers: [TransformerLayerWeights]
@@ -59,7 +59,7 @@ public struct MXQModel: @unchecked Sendable {
 
     /// Total GPU memory used by this model.
     public var memoryBytes: Int {
-        var total = embedTokens.length + finalNorm.length
+        var total = embedTokens.qweight.length + finalNorm.length
         if let lm = lmHead {
             total += lm.qweight.length + lm.scales.length + lm.zeros.length
                    + lm.bitMap.length + lm.blockOffsets.length
@@ -104,9 +104,9 @@ public func loadModel(url: URL, device: MTLDevice) throws -> MXQModel {
     let shards = try loadSafetensorsShards(from: url)
     let allTensors = buildTensorIndex(shards: shards)
 
-    // 3. Load embedding
-    let embedTokens = try loadFloat16Tensor(named: "model.embed_tokens.weight",
-                                             from: allTensors, device: device)
+    // 3. Load embedding (quantized in MXQ format)
+    let embedTokens = try loadMXQWeight(named: "model.embed_tokens",
+                                         from: allTensors, device: device)
 
     // 4. Load final norm
     let finalNorm = try loadFloat16Tensor(named: "model.norm.weight",

@@ -2500,8 +2500,8 @@ relocations:
   - { offset: 0xD0EF8, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandVAA17ParsableArgumentsA2aDPxycfCTW', symObjAddr: 0x2770, symBinAddr: 0x100067A08, symSize: 0x3C }
   - { offset: 0xD0F0C, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandVSeAASe4fromxs7Decoder_p_tKcfCTW', symObjAddr: 0x2818, symBinAddr: 0x100067AB0, symSize: 0x6C }
   - { offset: 0xD104B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndent_WZ', symObjAddr: 0x0, symBinAddr: 0x100068910, symSize: 0x4 }
-  - { offset: 0xD106F, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndentSivpZ', symObjAddr: 0xEEE0, symBinAddr: 0x1001200F0, symSize: 0x0 }
-  - { offset: 0xD1089, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV16labelColumnWidthSivpZ', symObjAddr: 0xEEE8, symBinAddr: 0x1001200F8, symSize: 0x0 }
+  - { offset: 0xD106F, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndentSivpZ', symObjAddr: 0xEEE0, symBinAddr: 0x1001205D0, symSize: 0x0 }
+  - { offset: 0xD1089, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV16labelColumnWidthSivpZ', symObjAddr: 0xEEE8, symBinAddr: 0x1001205D8, symSize: 0x0 }
   - { offset: 0xD1097, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndent_WZ', symObjAddr: 0x0, symBinAddr: 0x100068910, symSize: 0x4 }
   - { offset: 0xD10B1, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndentSivau', symObjAddr: 0x4, symBinAddr: 0x100068914, symSize: 0xC }
   - { offset: 0xD17F4, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV16labelColumnWidth_WZ', symObjAddr: 0x1C, symBinAddr: 0x10006892C, symSize: 0x4 }

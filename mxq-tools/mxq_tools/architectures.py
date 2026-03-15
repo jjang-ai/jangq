@@ -212,6 +212,38 @@ MLA_LAYER_CONFIGS = {
     ),
 }
 
+# GatedDeltaNet (Linear Attention / SSM hybrid in Qwen 3.5)
+GATED_DELTANET_CONFIGS = {
+    "delta_net.beta_proj": LayerQuantConfig(
+        min_bits=4, preferred_bits=4, importance_weight=2.0,
+        description="DeltaNet beta projection — controls state update rate"
+    ),
+    "delta_net.out_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=4, importance_weight=1.3,
+        description="DeltaNet output projection"
+    ),
+    "delta_net.q_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=4, importance_weight=1.5,
+        description="DeltaNet query projection"
+    ),
+    "delta_net.k_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=4, importance_weight=1.4,
+        description="DeltaNet key projection"
+    ),
+    "delta_net.v_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=3, importance_weight=1.2,
+        description="DeltaNet value projection"
+    ),
+}
+
+# Sliding Window Attention specific
+SLIDING_WINDOW_CONFIGS = {
+    "attention_sinks": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Attention sink weights — keep full precision (critical for long context)"
+    ),
+}
+
 
 def detect_architecture(model_path: str | Path) -> ArchConfig:
     """
@@ -298,6 +330,32 @@ def _classify_architecture(
     # --- Hybrid SSM + Attention (Jamba, Zamba, Nemotron-H) ---
     if model_type in ("jamba", "zamba", "zamba2") or "Jamba" in arch_str:
         layers = {**TRANSFORMER_LAYER_CONFIGS, **MAMBA_LAYER_CONFIGS}
+        return ArchConfig(
+            arch_type=ArchType.HYBRID_SSM,
+            attention_type=AttentionType.GQA,
+            model_type=model_type,
+            layer_configs=layers,
+            has_ssm_layers=True,
+        )
+
+    # --- Qwen 3.5 Hybrid (GatedDeltaNet + Full Attention + MoE) ---
+    # Qwen 3.5 uses alternating attention and GatedDeltaNet layers
+    has_deltanet = config.get("attn_type_list") is not None or "delta_net" in model_type.lower()
+    if has_deltanet:
+        layers = {**TRANSFORMER_LAYER_CONFIGS, **GATED_DELTANET_CONFIGS}
+        num_experts = config.get("num_local_experts", config.get("num_experts", 0))
+        if num_experts > 1:
+            layers.update(MOE_LAYER_CONFIGS)
+            return ArchConfig(
+                arch_type=ArchType.HYBRID_MOE_SSM,
+                attention_type=AttentionType.GQA,
+                model_type=model_type,
+                layer_configs=layers,
+                has_ssm_layers=True,
+                has_moe_layers=True,
+                num_experts=num_experts,
+                num_experts_per_tok=config.get("num_experts_per_tok", 2),
+            )
         return ArchConfig(
             arch_type=ArchType.HYBRID_SSM,
             attention_type=AttentionType.GQA,
