@@ -341,6 +341,17 @@ public final class MXQInferenceEngine {
                                      N: config.numAttentionHeads * config.headDim)
         }, buffer: qBuffer)
 
+        // Dump q_proj weight metadata for verification
+        let qw = layer.qProj
+        print("  DEBUG q_proj weight: qweight=\(qw.qweight.length)B, " +
+              "scales=\(qw.scales.length)B, blocks=\(qw.numBlocks)")
+
+        // Read first block metadata from GPU
+        let bitsPtr = qw.bitMap.contents().bindMemory(to: UInt8.self, capacity: 4)
+        let scalesPtr = qw.scales.contents().bindMemory(to: Float16.self, capacity: 4)
+        let zerosPtr = qw.zeros.contents().bindMemory(to: Float16.self, capacity: 4)
+        print("  DEBUG q_proj block0: bits=\(bitsPtr[0]), scale=\(Float(scalesPtr[0])), zero=\(Float(zerosPtr[0]))")
+
         // 5. K projection
         try step("k_proj", { cmd in
             try dispatchDequantGEMV(cmdBuffer: cmd, input: normBuffer,
