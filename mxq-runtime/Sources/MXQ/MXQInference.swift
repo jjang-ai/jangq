@@ -260,6 +260,67 @@ public final class MXQInferenceEngine {
         currentPosition = 0
     }
 
+    /// Dump the first N float16 values from a buffer (for debugging).
+    public func dumpBuffer(_ buffer: MTLBuffer, name: String, count: Int = 8) {
+        let ptr = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+        var values: [Float] = []
+        for i in 0..<min(count, buffer.length / 2) {
+            values.append(Float(ptr[i]))
+        }
+        let formatted = values.map { String(format: "%.4f", $0) }.joined(separator: ", ")
+        print("  DEBUG \(name)[\(count)]: [\(formatted)]")
+    }
+
+    /// Run embedding only and dump results (for verifying GPU vs CPU).
+    public func debugEmbedding(tokenId: Int) throws {
+        guard let cmdBuffer = metalDevice.commandQueue.makeCommandBuffer() else {
+            throw MXQError.inferenceError("Failed to create command buffer")
+        }
+
+        try dispatchEmbedding(cmdBuffer: cmdBuffer, tokenId: tokenId)
+        cmdBuffer.commit()
+        cmdBuffer.waitUntilCompleted()
+
+        dumpBuffer(hiddenBuffer, name: "embed[\(tokenId)]")
+    }
+
+    /// Run one full layer and dump intermediate values.
+    public func debugForwardOneLayer(tokenId: Int) throws {
+        guard let cmdBuffer = metalDevice.commandQueue.makeCommandBuffer() else {
+            throw MXQError.inferenceError("Failed to create command buffer")
+        }
+
+        // Embedding
+        try dispatchEmbedding(cmdBuffer: cmdBuffer, tokenId: tokenId)
+        cmdBuffer.commit()
+        cmdBuffer.waitUntilCompleted()
+        dumpBuffer(hiddenBuffer, name: "embed")
+
+        // RMSNorm
+        guard let cmd2 = metalDevice.commandQueue.makeCommandBuffer() else {
+            throw MXQError.inferenceError("Failed to create command buffer")
+        }
+        let layer = model.layers[0]
+        try dispatchRMSNorm(cmdBuffer: cmd2, input: hiddenBuffer,
+                            gamma: layer.inputNorm, output: normBuffer,
+                            hiddenSize: config.hiddenSize)
+        cmd2.commit()
+        cmd2.waitUntilCompleted()
+        dumpBuffer(normBuffer, name: "norm0")
+
+        // Q projection
+        guard let cmd3 = metalDevice.commandQueue.makeCommandBuffer() else {
+            throw MXQError.inferenceError("Failed to create command buffer")
+        }
+        try dispatchDequantGEMV(cmdBuffer: cmd3, input: normBuffer,
+                                 weight: layer.qProj, output: qBuffer,
+                                 K: config.hiddenSize,
+                                 N: config.numAttentionHeads * config.headDim)
+        cmd3.commit()
+        cmd3.waitUntilCompleted()
+        dumpBuffer(qBuffer, name: "q_proj")
+    }
+
     // MARK: - Kernel Dispatch Helpers
 
     private func dispatchEmbedding(cmdBuffer: MTLCommandBuffer, tokenId: Int) throws {

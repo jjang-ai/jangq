@@ -19,7 +19,7 @@ struct MXQCLI: ParsableCommand {
         GPUs with custom Metal kernels for maximum performance.
         """,
         version: "0.1.0",
-        subcommands: [Info.self, Run.self]
+        subcommands: [Info.self, Run.self, Debug.self]
     )
 }
 
@@ -176,5 +176,40 @@ struct Run: ParsableCommand {
         print("  ─────────────────────────────────")
         print("  Generated \(generatedTokens.count) tokens")
         print()
+    }
+}
+
+// MARK: - Debug Command
+
+struct Debug: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Debug: verify GPU kernel outputs vs expected values"
+    )
+
+    @Argument(help: "Path to MXQ model directory")
+    var modelPath: String
+
+    func run() throws {
+        let url = URL(fileURLWithPath: modelPath)
+
+        print("\n  MXQ Debug Mode")
+        print("  ──────────────────────────────────")
+
+        let metalDevice = try MXQMetalDevice()
+        print("  GPU: \(metalDevice.deviceInfo)")
+
+        let model = try loadModel(url: url, device: metalDevice.device)
+        let engine = try MXQInferenceEngine(model: model, metalDevice: metalDevice, maxSeqLen: 128)
+
+        print("\n  Testing embedding dequant (token 0)...")
+        try engine.debugEmbedding(tokenId: 0)
+
+        print("\n  Expected (from CPU): [-0.0070, 0.0420, 0.0070, 0.0000, -0.0280, 0.0000, 0.0000, -0.0210]")
+
+        print("\n  Testing one forward layer...")
+        engine.reset()
+        try engine.debugForwardOneLayer(tokenId: 0)
+
+        print("\n  Debug complete.\n")
     }
 }
