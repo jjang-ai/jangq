@@ -3,6 +3,7 @@ mxq_tools/__init__.py
 mxq_tools/__main__.py
 mxq_tools/allocate.py
 mxq_tools/architectures.py
+mxq_tools/awq.py
 mxq_tools/calibrate.py
 mxq_tools/convert.py
 mxq_tools/gptq.py

@@ -31,6 +31,8 @@ def convert_model(
     calibration_method: str = "weights",
     quantization_method: str = "mse",
     imatrix_path: Optional[str | Path] = None,
+    use_awq: bool = False,
+    awq_alpha: float = 0.25,
 ) -> dict:
     """
     Convert a HuggingFace model to MXQ format.
@@ -60,6 +62,7 @@ def convert_model(
     print(f"  Block size: {block_size}")
     print(f"  Calibration: {calibration_method}")
     print(f"  Quantization: {quantization_method}")
+    print(f"  AWQ scaling: {'yes (alpha=' + str(awq_alpha) + ')' if use_awq else 'no'}")
     print(f"{'='*60}\n")
 
     # Step 1: Detect architecture
@@ -78,6 +81,17 @@ def convert_model(
     else:
         from .calibrate import calibrate_with_activations
         importance_data = calibrate_with_activations(model_path, block_size=block_size)
+
+    # Step 2b: AWQ activation norms (optional)
+    awq_norms = {}
+    if use_awq:
+        print("\n  [2b] Collecting AWQ activation norms...")
+        try:
+            from .awq import collect_activation_norms_mlx
+            awq_norms = collect_activation_norms_mlx(str(model_path))
+        except ImportError:
+            print("  WARNING: MLX not available, skipping AWQ scaling")
+            use_awq = False
 
     # Step 3: Load weights and allocate bits
     print("\n  [3/5] Allocating bits...")
@@ -158,6 +172,7 @@ def convert_model(
     print(f"\n  [4/5] Quantizing ({quantization_method})...")
     quantized_tensors = {}
     non_quantized_tensors = {}
+    passthrough = {}  # non-quantized tensors (norms, biases, AWQ scales)
     offset = 0
 
     for tensor_name, shape, n_blocks, sf_path in tqdm(all_tensors_info, desc="  Quantizing"):
@@ -173,17 +188,48 @@ def convert_model(
         bit_alloc = global_bit_alloc[offset:offset + n_blocks]
         offset += n_blocks
 
-        # Quantize
+        # Apply AWQ scaling if enabled
+        awq_scales = None
+        if use_awq:
+            # Find matching activation norms for this tensor
+            parts = tensor_name.split(".")
+            # Extract layer index
+            layer_key = None
+            for i, part in enumerate(parts):
+                if part == "layers" and i + 1 < len(parts):
+                    try:
+                        layer_idx = int(parts[i + 1])
+                        layer_key = f"layers.{layer_idx}.attn_input"
+                    except ValueError:
+                        pass
+                    break
+
+            if layer_key and layer_key in awq_norms:
+                from .awq import compute_awq_scales, apply_awq_scaling
+                in_features = shape[1] if len(shape) == 2 else shape[-1]
+                norms = awq_norms[layer_key]
+                if len(norms) == in_features:
+                    awq_scales = compute_awq_scales(norms, alpha=awq_alpha)
+                    weights = apply_awq_scaling(weights, awq_scales)
+
+        # Quantize (weights are AWQ-scaled if enabled)
         qt = quantize_tensor(weights, bit_alloc, block_size, method=quantization_method)
+
+        # If AWQ was applied, we need to reverse it after dequant at runtime.
+        # Store the AWQ scales as a companion tensor.
+        # The runtime will: dequant(block) / awq_scales[cols]
 
         base_name = tensor_name
         if base_name.endswith(".weight"):
             base_name = base_name[:-7]
         quantized_tensors[base_name] = qt
 
+        if awq_scales is not None:
+            # Store AWQ scales as a passthrough tensor
+            passthrough[f"{base_name}.awq_scales"] = awq_scales.astype(np.float16)
+
     # Step 4b: Collect non-quantized tensors (norms, biases)
     print("  Collecting non-quantized tensors...")
-    passthrough = {}
     quantized_bases = set(quantized_tensors.keys())
 
     for sf_path in weight_files:
