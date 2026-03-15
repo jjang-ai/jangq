@@ -3,3 +3,6 @@ models/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+.DS_Store
+mxq-runtime/.build/
+mxq-runtime/.swiftpm/
