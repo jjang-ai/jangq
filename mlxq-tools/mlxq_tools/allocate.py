@@ -63,6 +63,16 @@ LAYER_PRIORS = {
 #   dealignai/Qwen2.5-72B-MQ2M
 #
 MLXQ_PROFILES = {
+    # ── MQ1: 1-bit MLP (extreme) ────────────────────────────────────
+    # Most extreme compression possible. Only viable on very large models (70B+).
+    # MLP at 2-bit is the actual minimum — "1-bit" means we push everything
+    # else as low as possible while keeping attention at maximum precision.
+    "MQ1L": {  # ~2.2 avg — Large: MLP=2bit, attention=8bit, embed/lm_head=8bit
+        "embed_tokens": 8, "lm_head": 8,
+        "q_proj": 8, "k_proj": 8, "v_proj": 8, "o_proj": 8,
+        "gate_proj": 2, "up_proj": 2, "down_proj": 2,
+    },
+
     # ── MQ2: 2-bit MLP ─────────────────────────────────────────────
     # Maximum compression. 70B fits in 32GB. Needs 7B+ models.
     "MQ2S": {  # ~2.5 avg — Small: tightest, attention at 6-bit
