@@ -1,0 +1,17 @@
+pyproject.toml
+mxq_tools/__init__.py
+mxq_tools/__main__.py
+mxq_tools/allocate.py
+mxq_tools/pack.py
+mxq_tools/quantize.py
+mxq_tools.egg-info/PKG-INFO
+mxq_tools.egg-info/SOURCES.txt
+mxq_tools.egg-info/dependency_links.txt
+mxq_tools.egg-info/entry_points.txt
+mxq_tools.egg-info/requires.txt
+mxq_tools.egg-info/top_level.txt
+mxq_tools/format/__init__.py
+mxq_tools/format/reader.py
+mxq_tools/format/spec.py
+mxq_tools/format/writer.py
+tests/test_pack.py

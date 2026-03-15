@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: mxq-tools
+Version: 0.1.0
+Summary: MXQ: Mixed-Precision Importance Quantization for Apple Silicon
+Author-email: Eric Jang <eric@vmlx.net>
+License-Expression: Apache-2.0
+Project-URL: Homepage, https://github.com/dealignai/mxq
+Project-URL: Documentation, https://github.com/dealignai/mxq
+Project-URL: Repository, https://github.com/dealignai/mxq
+Keywords: quantization,llm,apple-silicon,mlx,metal
+Requires-Python: >=3.11
+Requires-Dist: safetensors>=0.4
+Requires-Dist: numpy>=1.24
+Requires-Dist: tqdm>=4.60
+Requires-Dist: huggingface_hub>=0.20
+Provides-Extra: mlx
+Requires-Dist: mlx>=0.22; extra == "mlx"
+Requires-Dist: mlx-lm>=0.20; extra == "mlx"
+Provides-Extra: torch
+Requires-Dist: torch>=2.0; extra == "torch"
+Provides-Extra: eval
+Requires-Dist: datasets>=2.14; extra == "eval"
+Requires-Dist: lm-eval>=0.4; extra == "eval"
+Provides-Extra: all
+Requires-Dist: mxq-tools[eval,mlx]; extra == "all"

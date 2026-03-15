@@ -1,0 +1,2 @@
+[console_scripts]
+mxq-tools = mxq_tools.__main__:main
