@@ -1,3 +1,0 @@
-module MXQ {
-    header "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/include/MXQ-Swift.h"
-}

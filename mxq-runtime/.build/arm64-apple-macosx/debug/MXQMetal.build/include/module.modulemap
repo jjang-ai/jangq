@@ -1,3 +1,0 @@
-module MXQMetal {
-    header "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/include/MXQMetal-Swift.h"
-}

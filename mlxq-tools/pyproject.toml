@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlxq-tools"
+version = "0.1.0"
+description = "MLXQ: Mixed-Precision Importance Quantization for Apple Silicon"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    {name = "Eric Jang", email = "eric@vmlx.net"},
+]
+keywords = ["quantization", "llm", "apple-silicon", "mlx", "metal"]
+dependencies = [
+    "safetensors>=0.4",
+    "numpy>=1.24",
+    "tqdm>=4.60",
+    "huggingface_hub>=0.20",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx>=0.22", "mlx-lm>=0.20"]
+torch = ["torch>=2.0"]
+eval = ["datasets>=2.14", "lm-eval>=0.4"]
+all = ["mlxq-tools[mlx,eval]"]
+
+[project.scripts]
+mlxq-tools = "mlxq_tools.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/dealignai/mlxq"
+Documentation = "https://github.com/dealignai/mlxq"
+Repository = "https://github.com/dealignai/mlxq"
+
+[tool.setuptools.packages.find]
+include = ["mlxq_tools*"]
