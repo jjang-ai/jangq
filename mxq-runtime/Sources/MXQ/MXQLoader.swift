@@ -1,5 +1,5 @@
 /*
- * MXQ Model Loader
+ * MLXQ Model Loader
  * Created by Eric Jang (eric@vmlx.net)
  *
  * Loads an MXQ model directory into GPU memory for inference.

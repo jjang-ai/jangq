@@ -1,5 +1,5 @@
 /*
- * MXQ CLI — Mixed-Precision Inference Engine for Apple Silicon
+ * MLXQ CLI — Mixed-Precision Inference Engine for Apple Silicon
  * Created by Eric Jang (eric@vmlx.net)
  */
 
@@ -10,8 +10,8 @@ import MXQ
 @main
 struct MXQCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "mxq",
-        abstract: "MXQ — Mixed-Precision Inference Engine for Apple Silicon",
+        commandName: "mlxq",
+        abstract: "MLXQ — Mixed-Precision Quantization for MLX on Apple Silicon",
         discussion: """
         Created by Eric Jang (eric@vmlx.net)
 
@@ -39,7 +39,7 @@ struct Info: ParsableCommand {
 
         print("""
 
-          MXQ Model Info
+          MLXQ Model Info
           ──────────────────────────────────
           Source: \(config.quant.sourceModelName)
           Format: MXQ v\(config.quant.formatVersion)
@@ -96,7 +96,7 @@ struct Run: ParsableCommand {
         print("""
 
           ╔══════════════════════════════════════════════════════╗
-          ║  MXQ Runtime v0.1.0                                  ║
+          ║  MLXQ Runtime v0.1.0                                  ║
           ║  Mixed-Precision Inference for Apple Silicon          ║
           ║  Created by Eric Jang (eric@vmlx.net)                ║
           ╚══════════════════════════════════════════════════════╝
@@ -212,7 +212,7 @@ struct Debug: ParsableCommand {
     func run() throws {
         let url = URL(fileURLWithPath: modelPath)
 
-        print("\n  MXQ Debug Mode")
+        print("\n  MLXQ Debug Mode")
         print("  ──────────────────────────────────")
 
         let metalDevice = try MXQMetalDevice()

@@ -46,6 +46,46 @@ LAYER_PRIORS = {
     "down_proj": 2,       # MLP down — slightly more sensitive
 }
 
+# Cross-layer bit profiles — validated by experiment 028
+# These assign PREFERRED bits per layer type, not just minimums.
+# The key insight: attention is 12% of params but controls quality,
+# MLP is 88% and tolerates aggressive quantization.
+MXQ_PROFILES = {
+    # name: {layer_pattern: preferred_bits}
+    "mxq-2.5": {
+        "embed_tokens": 4,
+        "lm_head": 6,
+        "q_proj": 6, "k_proj": 6,      # attention: 6-bit (critical)
+        "v_proj": 4, "o_proj": 4,       # attention out: 4-bit
+        "gate_proj": 2, "up_proj": 2,   # MLP: 2-bit (88% of params)
+        "down_proj": 2,
+    },
+    "mxq-3": {
+        "embed_tokens": 4,
+        "lm_head": 6,
+        "q_proj": 6, "k_proj": 6,
+        "v_proj": 4, "o_proj": 4,
+        "gate_proj": 3, "up_proj": 3,   # MLP: 3-bit
+        "down_proj": 3,
+    },
+    "mxq-3.5": {
+        "embed_tokens": 4,
+        "lm_head": 6,
+        "q_proj": 6, "k_proj": 6,
+        "v_proj": 6, "o_proj": 4,
+        "gate_proj": 3, "up_proj": 3,
+        "down_proj": 3,
+    },
+    "mxq-4": {
+        "embed_tokens": 4,
+        "lm_head": 8,
+        "q_proj": 8, "k_proj": 6,
+        "v_proj": 6, "o_proj": 4,
+        "gate_proj": 3, "up_proj": 3,
+        "down_proj": 4,
+    },
+}
+
 
 def classify_layer(tensor_name: str) -> tuple[str, Optional[int], int]:
     """
@@ -252,6 +292,40 @@ def allocate_bits_dp(
         new = _next_bit_width(old)
         bits[best_idx] = new
         total += new - old
+
+    return bits.astype(np.uint8)
+
+
+def allocate_bits_profile(
+    tensor_names: list[str],
+    profile: str = "mxq-3",
+) -> np.ndarray:
+    """
+    Profile-based bit allocation — assigns bits by layer type.
+
+    This is the proven MXQ strategy (experiment 028): give attention
+    layers more bits (6-8) and MLP layers fewer bits (2-3). The quality
+    improvement comes from the attention/MLP sensitivity asymmetry.
+
+    Args:
+        tensor_names: tensor name for each block
+        profile: one of "mxq-2.5", "mxq-3", "mxq-3.5", "mxq-4"
+
+    Returns:
+        uint8 array of bit widths per block
+    """
+    if profile not in MXQ_PROFILES:
+        raise ValueError(f"Unknown profile '{profile}'. Available: {list(MXQ_PROFILES.keys())}")
+
+    layer_bits = MXQ_PROFILES[profile]
+    n_blocks = len(tensor_names)
+    bits = np.full(n_blocks, 4, dtype=np.int32)  # default 4-bit
+
+    for i, name in enumerate(tensor_names):
+        for pattern, preferred in layer_bits.items():
+            if pattern in name:
+                bits[i] = preferred
+                break
 
     return bits.astype(np.uint8)
 

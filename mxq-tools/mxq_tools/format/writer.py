@@ -1,5 +1,5 @@
 """
-MXQ Format Writer — Write quantized models to .mxq format.
+MLXQ Format Writer — Write quantized models to .mxq format.
 Created by Eric Jang (eric@vmlx.net)
 """
 

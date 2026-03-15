@@ -1,4 +1,4 @@
-# MXQ Format Specification v1.0
+# MLXQ Format Specification v1.0
 
 > Mixed-Precision Importance Quantization for Apple Silicon
 > Created by Eric Jang (eric@vmlx.net)

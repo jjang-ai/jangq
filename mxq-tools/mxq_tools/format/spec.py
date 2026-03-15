@@ -1,5 +1,5 @@
 """
-MXQ Format Specification — Constants and Validation
+MLXQ Format Specification — Constants and Validation
 Created by Eric Jang (eric@vmlx.net)
 """
 

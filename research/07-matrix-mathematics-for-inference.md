@@ -576,7 +576,7 @@ for each a_i:
 Rounding error: O(epsilon * max|a_i|)    // independent of N!
 ```
 
-**Why this matters for MXQ:**
+**Why this matters for MLXQ:**
 
 During calibration, we accumulate activation statistics across potentially thousands of samples. For a channel with 8192 values accumulated over 1000 samples, the standard fp32 sum has error ~ 8,192,000 * 1.19e-7 ~ 0.97. Using Kahan summation reduces this to ~ 1.19e-7, which is negligible. The cost is one extra addition and three extra subtractions per accumulation step -- roughly 4x the arithmetic cost, but summation is never the bottleneck (matmuls are).
 
@@ -920,7 +920,7 @@ y = x * (dequantize(W_frozen_quantized) + A * B)
   = x * dequantize(W_frozen_quantized) + (x * A) * B
 ```
 
-This is complementary to MXQ: a model could be quantized with MXQ for efficient inference, and then LoRA-adapted for specific tasks with the LoRA weights stored separately at full precision.
+This is complementary to MLXQ: a model could be quantized with MXQ for efficient inference, and then LoRA-adapted for specific tasks with the LoRA weights stored separately at full precision.
 
 ---
 
@@ -1337,7 +1337,7 @@ Block A: 3.83 bits (rounds to 4)
 Block B: 2.17 bits (rounds to 2)
 ```
 
-This is precisely the scenario in MXQ: MLP gate projections have low variance but high sensitivity (through the gating mechanism), while MLP up projections have higher variance but lower sensitivity. The sensitivity-weighted allocation gives gate projections more bits than raw variance alone would suggest.
+This is precisely the scenario in MLXQ: MLP gate projections have low variance but high sensitivity (through the gating mechanism), while MLP up projections have higher variance but lower sensitivity. The sensitivity-weighted allocation gives gate projections more bits than raw variance alone would suggest.
 
 ---
 

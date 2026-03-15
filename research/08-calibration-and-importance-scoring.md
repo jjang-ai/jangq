@@ -945,7 +945,7 @@ For a 70B model (L=80, d_out=8192, d_in=8192, group_size=128, block_size=64):
 This is completely impractical for routine use.
 ```
 
-**Practical use in MXQ:** Sensitivity analysis is used only for validation:
+**Practical use in MLXQ:** Sensitivity analysis is used only for validation:
 1. Run on a small model (1B-7B parameters) to validate that AWQ/Hessian scoring produces the same ranking as sensitivity analysis
 2. Spot-check specific layers where AWQ/Hessian scores seem suspicious
 3. Never run on the full model as part of the calibration pipeline
@@ -1039,7 +1039,7 @@ where:
 
 This approach says: "Start with the AWQ ranking, but adjust it upward for blocks where the Hessian says the loss is extra-sensitive, and downward for blocks where the Hessian says the loss is insensitive." The advantage is that AWQ provides the overall ranking (which is usually correct) while Hessian provides targeted corrections for edge cases.
 
-**The practical recommendation for MXQ:**
+**The practical recommendation for MLXQ:**
 
 ```
 For calibration speed and quality:

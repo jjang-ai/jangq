@@ -1,6 +1,6 @@
 # Apple Metal GPU Computing for ML Inference
 
-> Research document for MXQ — Mixed-Precision Importance Quantization
+> Research document for MLXQ — Mixed-Precision Importance Quantization
 > Covers everything needed to design and implement Metal compute kernels for variable bit-width quantized matrix multiplication on Apple Silicon.
 
 ---
@@ -1599,7 +1599,7 @@ let buffer = device.makeBuffer(bytesNoCopy: mappedData,
                                 })
 ```
 
-This is the preferred approach for MXQ:
+This is the preferred approach for MLXQ:
 - Zero memory overhead — the buffer IS the file's page cache
 - OS handles paging — only pages accessed by the GPU are loaded from disk
 - First access to each page incurs a page fault (~microseconds), but subsequent accesses hit the page cache

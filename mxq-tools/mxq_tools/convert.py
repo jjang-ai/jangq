@@ -1,5 +1,5 @@
 """
-MXQ Convert — End-to-end model quantization pipeline.
+MLXQ Convert — End-to-end model quantization pipeline.
 Created by Eric Jang (eric@vmlx.net)
 
 Takes a HuggingFace model directory and produces a complete .mxq model.
@@ -19,7 +19,7 @@ from .format.spec import DEFAULT_BLOCK_SIZE
 from .format.writer import write_mxq_model
 from .architectures import detect_architecture, get_layer_config, get_skip_tensors, summarize_architecture
 from .calibrate import calibrate_from_weights, _load_bf16_tensor
-from .allocate import allocate_bits_greedy, summarize_allocation
+from .allocate import allocate_bits_greedy, allocate_bits_profile, summarize_allocation
 from .quantize import quantize_tensor, QuantizedTensor
 
 
@@ -33,6 +33,7 @@ def convert_model(
     imatrix_path: Optional[str | Path] = None,
     use_awq: bool = False,
     awq_alpha: float = 0.25,
+    profile: Optional[str] = None,
 ) -> dict:
     """
     Convert a HuggingFace model to MXQ format.
@@ -53,7 +54,7 @@ def convert_model(
     output_path = Path(output_path)
 
     print(f"\n{'='*60}")
-    print(f"  MXQ Convert")
+    print(f"  MLXQ Convert")
     print(f"  Created by Eric Jang (eric@vmlx.net)")
     print(f"{'='*60}")
     print(f"  Source: {model_path}")
@@ -151,13 +152,19 @@ def convert_model(
     n_layers = max(layer_indices) + 1 if layer_indices else 1
 
     # Run bit allocation
-    global_bit_alloc = allocate_bits_greedy(
-        global_importance,
-        target_bits,
-        all_tensor_names_for_alloc,
-        n_layers=n_layers,
-        block_size=block_size,
-    )
+    if profile:
+        # Profile-based allocation (proven strategy: attn-high, MLP-low)
+        print(f"  Using profile: {profile}")
+        global_bit_alloc = allocate_bits_profile(all_tensor_names_for_alloc, profile)
+    else:
+        # Greedy importance-based allocation
+        global_bit_alloc = allocate_bits_greedy(
+            global_importance,
+            target_bits,
+            all_tensor_names_for_alloc,
+            n_layers=n_layers,
+            block_size=block_size,
+        )
 
     alloc_summary = summarize_allocation(global_bit_alloc, all_tensor_names_for_alloc)
     actual_bits = alloc_summary["average_bits"]

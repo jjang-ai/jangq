@@ -1665,7 +1665,7 @@ viable for the first time.
 
 ### 7.8 Relevance to MXQ
 
-QuIP#'s incoherence processing is potentially very valuable for MXQ:
+QuIP#'s incoherence processing is potentially very valuable for MLXQ:
 
 1. **Combining rotation with mixed precision**: MXQ could apply Hadamard rotation before
    quantization, then allocate bits per block on the rotated weights. Since the rotated

@@ -403,17 +403,17 @@ MXQ reads `rms_norm_eps` from `config.json` and uses it. For Qwen2 models this i
 
 ### 9b. Attention Scale
 
-Both use `1/sqrt(head_dim)`. MXQ: `1.0 / sqrt(Float(headDim))`. MLX: `head_dim ** -0.5`. **Equivalent.**
+Both use `1/sqrt(head_dim)`. MLXQ: `1.0 / sqrt(Float(headDim))`. MLX: `head_dim ** -0.5`. **Equivalent.**
 
 ### 9c. SwiGLU Activation
 
 MLX: `silu(gate) * up` (compiled with `mx.compile`).
-MXQ: `silu_g = g / (1 + exp(-g)); output = silu_g * u` in Metal. **Equivalent formula.**
+MLXQ: `silu_g = g / (1 + exp(-g)); output = silu_g * u` in Metal. **Equivalent formula.**
 
 ### 9d. Tied Embeddings for LM Head
 
 MLX: `embed_tokens.as_linear(out)` -- uses the embedding weight matrix transposed as a linear layer.
-MXQ: `lmHeadWeight = model.lmHead ?? model.embedTokens` -- uses the raw embedding table with `dispatchDequantGEMV`.
+MLXQ: `lmHeadWeight = model.lmHead ?? model.embedTokens` -- uses the raw embedding table with `dispatchDequantGEMV`.
 
 Both should compute `hidden @ embed_weight.T`. Need to verify MXQ's GEMV kernel transposes correctly for tied embeddings. The embedding table has shape `(vocab_size, hidden_size)`, and we need `output[v] = sum_d(hidden[d] * embed[v][d])`. MXQ's GEMV computes `output[n] = sum_k(input[k] * weight[n][k])` which is correct if `weight` has shape `(N, K) = (vocab_size, hidden_size)`.
 
@@ -424,7 +424,7 @@ MLX processes the entire prompt at once (up to 2048 tokens per chunk) with causa
 ### 9f. KV Cache Layout
 
 MLX: `(B, n_kv_heads, seq, head_dim)` -- heads before sequence.
-MXQ: `(seq, n_kv_heads, head_dim)` -- sequence before heads (no batch dim).
+MLXQ: `(seq, n_kv_heads, head_dim)` -- sequence before heads (no batch dim).
 
 Both layouts are valid; the attention kernel just needs to index correctly. MXQ's attention kernel indexes as:
 ```metal

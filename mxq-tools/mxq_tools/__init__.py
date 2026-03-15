@@ -1,5 +1,5 @@
 """
-MXQ Tools — Mixed-Precision Importance Quantization for Apple Silicon
+MLXQ Tools — Mixed-Precision Importance Quantization for Apple Silicon
 Created by Eric Jang (eric@vmlx.net)
 
 Calibrate, quantize, and evaluate MXQ models.

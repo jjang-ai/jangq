@@ -1,4 +1,4 @@
-# Experiment 007: First MXQ Model Quantization
+# Experiment 007: First MLXQ Model Quantization
 
 **Date**: 2026-03-14
 **Author**: Eric Jang (eric@vmlx.net)

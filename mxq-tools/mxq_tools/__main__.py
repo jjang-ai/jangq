@@ -1,5 +1,5 @@
 """
-MXQ Tools CLI — Mixed-Precision Importance Quantization for Apple Silicon
+MLXQ Tools CLI — Mixed-Precision Importance Quantization for Apple Silicon
 Created by Eric Jang (eric@vmlx.net)
 """
 
@@ -11,7 +11,7 @@ from . import __version__
 
 BANNER = f"""
   ╔══════════════════════════════════════════════════════╗
-  ║  MXQ Tools v{__version__:<43s}║
+  ║  MLXQ Tools v{__version__:<43s}║
   ║  Mixed-Precision Importance Quantization             ║
   ║  for Apple Silicon                                   ║
   ║                                                      ║
@@ -102,7 +102,7 @@ def cmd_estimate(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="mxq-tools",
-        description="MXQ: Mixed-Precision Importance Quantization for Apple Silicon",
+        description="MLXQ: Mixed-Precision Importance Quantization for Apple Silicon",
     )
     parser.add_argument("--version", action="version", version=f"mxq-tools {__version__}")
     subparsers = parser.add_subparsers(dest="command")

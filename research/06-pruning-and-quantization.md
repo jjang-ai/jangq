@@ -637,7 +637,7 @@ This captures both selection frequency (how often the expert is chosen, reflecte
 
 **Results**: REAP achieves near-lossless compression on code generation tasks even when pruning 50% of experts from trillion-parameter models. Published pruned models include DeepSeek-V3.2, Qwen3-Coder-480B, and Kimi-K2 on HuggingFace under Cerebras.
 
-**Relevance to MXQ's dense-model pruning**: REAP itself targets MoE expert pruning, which is a different problem than weight-level pruning in dense models. However, REAP's core principle -- combining routing/selection information with output magnitude for saliency -- is conceptually similar to Wanda's |w| * ||x|| metric. For MXQ:
+**Relevance to MXQ's dense-model pruning**: REAP itself targets MoE expert pruning, which is a different problem than weight-level pruning in dense models. However, REAP's core principle -- combining routing/selection information with output magnitude for saliency -- is conceptually similar to Wanda's |w| * ||x|| metric. For MLXQ:
 
 - **For MoE models**: REAP-style expert pruning is complementary to weight-level pruning + quantization. First prune unnecessary experts (structural compression), then apply MXQ (pruning + quantization) to the remaining experts' weights.
 - **For dense models**: REAP's gating * activation-norm saliency concept can inspire per-block pruning metrics where the "gating" signal is replaced by the block's contribution to the layer output norm.

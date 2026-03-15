@@ -533,7 +533,7 @@ $$\min_{\hat{W}} \; \text{tr}\!\left((W - \hat{W})^T H (W - \hat{W})\right) \qua
 
 The greedy column-by-column approach with Hessian-based error compensation gives an approximate solution. The correction step is derived from the optimality condition: given that $w_i$ has been rounded (with error $\delta_i$), the optimal adjustment to the remaining weights is the one that minimizes the total Hessian-weighted error.
 
-**Why this matters for MXQ:** MXQ can use GPTQ-style optimal rounding within each block during the quantization phase. The Hessian is estimated from the calibration data collected in Phase 1. This is especially valuable for 2-bit and 3-bit blocks where the rounding error per weight is large.
+**Why this matters for MLXQ:** MXQ can use GPTQ-style optimal rounding within each block during the quantization phase. The Hessian is estimated from the calibration data collected in Phase 1. This is especially valuable for 2-bit and 3-bit blocks where the rounding error per weight is large.
 
 ### 4.3 AdaRound (Learning the Rounding)
 
@@ -699,7 +699,7 @@ Compare with uniform 2-bit symmetric: $c \in \{-3s, -s, +s, +3s\}$ which, with o
 
 The Lloyd-Max quantizer achieves MSE of $0.1175\sigma^2$ for 2-bit Gaussian, while uniform achieves $0.1188\sigma^2$ with optimal clipping -- only 1.1% worse. At 2-bit, uniform is nearly as good as non-uniform for Gaussian sources. The gap widens for non-Gaussian (heavy-tailed) distributions.
 
-**Relevance to MXQ:** MXQ uses uniform quantization for Metal kernel efficiency, but the small optimality gap for Gaussian weights means this is not a significant sacrifice. The per-block scaling is more impactful than non-uniform grids.
+**Relevance to MLXQ:** MXQ uses uniform quantization for Metal kernel efficiency, but the small optimality gap for Gaussian weights means this is not a significant sacrifice. The per-block scaling is more impactful than non-uniform grids.
 
 ### 5.5 Why Mixed-Precision Is Information-Theoretically Optimal
 

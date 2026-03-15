@@ -11,7 +11,7 @@
 
 ## Results
 
-| | Reference (MLX bf16) | MXQ Runtime |
+| | Reference (MLX bf16) | MLXQ Runtime |
 |---|---|---|
 | First token | `2` (id 17) | `pecting` (wrong) |
 | Top logit | 14.3125 | unknown |

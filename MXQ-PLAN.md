@@ -1,4 +1,4 @@
-# MXQ — Mixed-Precision Importance Quantization for Apple Silicon
+# MLXQ — Mixed-Precision Importance Quantization for Apple Silicon
 
 > The GGUF of Apple Silicon. Open format, open runtime, anyone can use it.
 > Like GGUF is to llama.cpp, MXQ is to the MXQ runtime.
@@ -50,7 +50,7 @@ MXQ Offline Pipeline (Python):
 
                               ↓
 
-MXQ Runtime (Swift + Metal):
+MLXQ Runtime (Swift + Metal):
 
   [Load .mxq] --> [Metal Kernels] --> [Inference] --> [Output]
   (mmap, zero-copy)  (dequant+matmul)   (transformer)   (tokens)
@@ -986,7 +986,7 @@ Metal kernel skips pruned blocks entirely (no memory load, no compute).
 
 ```
 mxq/
-  MXQ-PLAN.md                          # This document
+  MLXQ-PLAN.md                          # This document
   FORMAT.md                            # Public format specification
   LICENSE                              # Open source license
 

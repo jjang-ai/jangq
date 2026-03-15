@@ -1,5 +1,5 @@
 """
-MXQ Format Reader — Load quantized models from .mxq format.
+MLXQ Format Reader — Load quantized models from .mxq format.
 Created by Eric Jang (eric@vmlx.net)
 """
 

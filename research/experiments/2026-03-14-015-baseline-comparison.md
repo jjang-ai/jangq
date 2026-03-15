@@ -21,7 +21,7 @@ Prompt: "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
 Output: "2+2=4\nassistant\n2+2=4"
 ```
 
-### MXQ Runtime (our quantized model)
+### MLXQ Runtime (our quantized model)
 ```
 Prompt: Same chat template, identical token IDs (verified)
 Output: "pecting, 证<作之告-C...hsfp-8-d12+^ c."

@@ -24,7 +24,7 @@
 ### CLI Output (first successful run)
 
 ```
-MXQ Model Info
+MLXQ Model Info
 ──────────────────────────────────
 Source: Qwen2.5-0.5B
 Format: MXQ v1.0

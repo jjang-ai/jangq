@@ -1,9 +1,9 @@
 {
   "builtTestProducts" : [
     {
-      "binaryPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.xctest/Contents/MacOS/MXQRuntimePackageTests",
+      "binaryPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.xctest/Contents/MacOS/MLXQRuntimePackageTests",
       "packagePath" : "/Users/eric/mxq/mxq-runtime",
-      "productName" : "MXQRuntimePackageTests"
+      "productName" : "MLXQRuntimePackageTests"
     }
   ],
   "copyCommands" : {
@@ -15,8 +15,8 @@
     }
   },
   "generatedSourceTargetSet" : [
-    "GenerateManual",
-    "GenerateDoccReference"
+    "GenerateDoccReference",
+    "GenerateManual"
   ],
   "pluginDescriptions" : [
     {
@@ -1463,6 +1463,107 @@
       "tempsPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/ArgumentParserToolInfo.build",
       "wholeModuleOptimization" : false
     },
+    "C.MLXQRuntimePackageTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/sources",
+      "importPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules/MXQTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "MLXQRuntimePackageTests",
+      "moduleOutputPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules/MLXQRuntimePackageTests.swiftmodule",
+      "objects" : [
+        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx15.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j16",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/include/MLXQRuntimePackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "mxq_runtime"
+      ],
+      "outputFileMapPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules/MLXQRuntimePackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build",
+      "wholeModuleOptimization" : false
+    },
     "C.MXQ-arm64-apple-macosx26.0-debug.module" : {
       "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
       "fileList" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/sources",
@@ -1835,107 +1936,6 @@
         "/Users/eric/mxq/mxq-runtime/Sources/MXQMetal/MXQMetalDevice.swift"
       ],
       "tempsPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build",
-      "wholeModuleOptimization" : false
-    },
-    "C.MXQRuntimePackageTests-arm64-apple-macosx26.0-debug.module" : {
-      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
-      "fileList" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/sources",
-      "importPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules",
-      "inputs" : [
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.derived/runner.swift"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules/MXQTests.swiftmodule"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/sources"
-        }
-      ],
-      "isLibrary" : true,
-      "moduleName" : "MXQRuntimePackageTests",
-      "moduleOutputPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules/MXQRuntimePackageTests.swiftmodule",
-      "objects" : [
-        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/runner.swift.o"
-      ],
-      "otherArguments" : [
-        "-target",
-        "arm64-apple-macosx15.0",
-        "-incremental",
-        "-enable-batch-mode",
-        "-serialize-diagnostics",
-        "-index-store-path",
-        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/index/store",
-        "-Onone",
-        "-enable-testing",
-        "-Xfrontend",
-        "-enable-cross-import-overlays",
-        "-j16",
-        "-DSWIFT_PACKAGE",
-        "-DDEBUG",
-        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
-        "-module-cache-path",
-        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/ModuleCache",
-        "-parseable-output",
-        "-parse-as-library",
-        "-emit-objc-header",
-        "-emit-objc-header-path",
-        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/include/MXQRuntimePackageTests-Swift.h",
-        "-plugin-path",
-        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
-        "-sdk",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
-        "-F",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
-        "-F",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
-        "-I",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
-        "-L",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
-        "-g",
-        "-Xcc",
-        "-isysroot",
-        "-Xcc",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
-        "-Xcc",
-        "-F",
-        "-Xcc",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
-        "-Xcc",
-        "-F",
-        "-Xcc",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
-        "-Xcc",
-        "-fPIC",
-        "-Xcc",
-        "-g",
-        "-package-name",
-        "mxq_runtime"
-      ],
-      "outputFileMapPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/output-file-map.json",
-      "outputs" : [
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/runner.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules/MXQRuntimePackageTests.swiftmodule"
-        }
-      ],
-      "prepareForIndexing" : false,
-      "sources" : [
-        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.derived/runner.swift"
-      ],
-      "tempsPath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build",
       "wholeModuleOptimization" : false
     },
     "C.MXQTests-arm64-apple-macosx26.0-debug.module" : {
@@ -3269,6 +3269,72 @@
       "-driver-use-frontend-path",
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
     ],
+    "MLXQRuntimePackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "MLXQRuntimePackageTests",
+      "-package-name",
+      "mxq_runtime",
+      "-c",
+      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.derived/runner.swift",
+      "-I",
+      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx15.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j16",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/include/MLXQRuntimePackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "mxq_runtime",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
     "MXQ" : [
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
       "-module-name",
@@ -3441,72 +3507,6 @@
       "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/include/MXQMetal-Swift.h",
       "-swift-version",
       "6",
-      "-plugin-path",
-      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
-      "-sdk",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
-      "-F",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
-      "-F",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
-      "-I",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
-      "-L",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
-      "-g",
-      "-Xcc",
-      "-isysroot",
-      "-Xcc",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
-      "-Xcc",
-      "-F",
-      "-Xcc",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
-      "-Xcc",
-      "-F",
-      "-Xcc",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
-      "-Xcc",
-      "-fPIC",
-      "-Xcc",
-      "-g",
-      "-package-name",
-      "mxq_runtime",
-      "-driver-use-frontend-path",
-      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
-    ],
-    "MXQRuntimePackageTests" : [
-      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
-      "-module-name",
-      "MXQRuntimePackageTests",
-      "-package-name",
-      "mxq_runtime",
-      "-c",
-      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.derived/runner.swift",
-      "-I",
-      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/Modules",
-      "-target",
-      "arm64-apple-macosx15.0",
-      "-incremental",
-      "-enable-batch-mode",
-      "-serialize-diagnostics",
-      "-index-store-path",
-      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/index/store",
-      "-Onone",
-      "-enable-testing",
-      "-Xfrontend",
-      "-enable-cross-import-overlays",
-      "-j16",
-      "-DSWIFT_PACKAGE",
-      "-DDEBUG",
-      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
-      "-module-cache-path",
-      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/ModuleCache",
-      "-parseable-output",
-      "-parse-as-library",
-      "-emit-objc-header",
-      "-emit-objc-header-path",
-      "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/include/MXQRuntimePackageTests-Swift.h",
       "-plugin-path",
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
       "-sdk",
@@ -3775,6 +3775,11 @@
     "ArgumentParserToolInfo" : [
 
     ],
+    "MLXQRuntimePackageTests" : [
+      "MXQTests",
+      "MXQ",
+      "MXQMetal"
+    ],
     "MXQ" : [
       "MXQMetal"
     ],
@@ -3786,11 +3791,6 @@
     ],
     "MXQMetal" : [
 
-    ],
-    "MXQRuntimePackageTests" : [
-      "MXQTests",
-      "MXQ",
-      "MXQMetal"
     ],
     "MXQTests" : [
       "MXQ",
@@ -3809,14 +3809,14 @@
 
   },
   "testEntryPointCommands" : {
-    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.derived/runner.swift" : {
+    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.derived/runner.swift" : {
       "inputs" : [
 
       ],
       "outputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.derived/runner.swift"
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.derived/runner.swift"
         }
       ]
     }
@@ -4283,6 +4283,74 @@
       ],
       "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/ArgumentParserToolInfo.build/sources"
     },
+    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/sources"
+    },
+    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQSampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQTokenizer.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/MXQError.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/MXQMetalDevice.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQTests.build/MXQTests.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MLXQRuntimePackageTests.product/Objects.LinkFileList"
+    },
     "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/sources" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
@@ -4352,74 +4420,6 @@
         }
       ],
       "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/sources"
-    },
-    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/sources" : {
-      "alwaysOutOfDate" : false,
-      "inputs" : [
-        {
-          "kind" : "virtual",
-          "name" : "<sources-file-list>"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.derived/runner.swift"
-        }
-      ],
-      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/sources"
-    },
-    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.product/Objects.LinkFileList" : {
-      "alwaysOutOfDate" : false,
-      "inputs" : [
-        {
-          "kind" : "virtual",
-          "name" : "<link-file-list>"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQSampler.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQTokenizer.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/MXQError.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/MXQMetalDevice.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.build/runner.swift.o"
-        },
-        {
-          "kind" : "file",
-          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQTests.build/MXQTests.swift.o"
-        }
-      ],
-      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQRuntimePackageTests.product/Objects.LinkFileList"
     },
     "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQTests.build/sources" : {
       "alwaysOutOfDate" : false,
@@ -5931,7 +5931,7 @@
       ],
       "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/generate_manual.build/sources"
     },
-    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mxq-entitlement.plist" : {
+    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mlxq-entitlement.plist" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -5943,9 +5943,9 @@
           "name" : "<com.apple.security.get-task-allow>"
         }
       ],
-      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mxq-entitlement.plist"
+      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mlxq-entitlement.plist"
     },
-    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mxq.product/Objects.LinkFileList" : {
+    "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mlxq.product/Objects.LinkFileList" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -6201,7 +6201,7 @@
           "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQMetal.build/MXQMetalDevice.swift.o"
         }
       ],
-      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mxq.product/Objects.LinkFileList"
+      "outputFilePath" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/mlxq.product/Objects.LinkFileList"
     },
     "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
       "alwaysOutOfDate" : true,

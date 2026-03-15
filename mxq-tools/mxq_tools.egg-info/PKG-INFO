@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: mxq-tools
 Version: 0.1.0
-Summary: MXQ: Mixed-Precision Importance Quantization for Apple Silicon
+Summary: MLXQ: Mixed-Precision Importance Quantization for Apple Silicon
 Author-email: Eric Jang <eric@vmlx.net>
 License-Expression: Apache-2.0
 Project-URL: Homepage, https://github.com/dealignai/mxq

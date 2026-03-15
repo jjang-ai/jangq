@@ -68,7 +68,7 @@ The improvement depends on:
 
 ## Significance for MXQ
 
-This PROVES the core thesis of MXQ:
+This PROVES the core thesis of MLXQ:
 1. Variable bit allocation across layers provides real quality advantage
 2. The improvement is measurable and consistent
 3. It works with standard quantization (no GPTQ needed for the proof)

@@ -1,5 +1,5 @@
 /*
- * MXQ Model Configuration
+ * MLXQ Model Configuration
  * Created by Eric Jang (eric@vmlx.net)
  *
  * Parses config.json and mxq_config.json to determine model

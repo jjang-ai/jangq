@@ -1,16 +1,16 @@
 // swift-tools-version: 6.0
-// MXQ Runtime — Swift + Metal Inference Engine for Apple Silicon
+// MLXQ Runtime — Swift + Metal Inference Engine for Apple Silicon
 // Created by Eric Jang (eric@vmlx.net)
 
 import PackageDescription
 
 let package = Package(
-    name: "MXQRuntime",
+    name: "MLXQRuntime",
     platforms: [
         .macOS(.v15),
     ],
     products: [
-        .executable(name: "mxq", targets: ["MXQCLI"]),
+        .executable(name: "mlxq", targets: ["MXQCLI"]),
         .library(name: "MXQ", targets: ["MXQ"]),
     ],
     dependencies: [

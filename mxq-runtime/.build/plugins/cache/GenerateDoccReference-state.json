@@ -65,7 +65,7 @@
     "NVM_DIR" : "/Users/eric/.nvm",
     "NVM_INC" : "/Users/eric/.nvm/versions/node/v25.2.1/include/node",
     "NoDefaultCurrentDirectoryInExePath" : "1",
-    "OLDPWD" : "/Users/eric/mxq",
+    "OLDPWD" : "/Users/eric/mxq/mxq-runtime",
     "OPENCLAW_STATE_DIR" : "/Users/eric/.openclaw",
     "OSLogRateLimit" : "64",
     "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE" : "delta",
@@ -87,7 +87,7 @@
     "__CFBundleIdentifier" : "com.apple.Terminal",
     "__CF_USER_TEXT_ENCODING" : "0x1F5:0x0:0x0"
   },
-  "inputHash" : "a8650b74a082b6c4430bd05a99af2777c65cf72cbb39097f32d39ac71ba69700",
+  "inputHash" : "dadfcd6e3dd20b5f437b24f7896ab93bb77fd98a447388057d6568a3dde75b1a",
   "output" : "",
   "result" : {
     "exit" : {
