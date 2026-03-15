@@ -142,14 +142,33 @@ struct Run: ParsableCommand {
         print("  Generating...")
         print("  ─────────────────────────────────")
 
-        // Prefill: process prompt tokens
-        for tokenId in tokens {
+        // Prefill: process prompt tokens (all but last)
+        for tokenId in tokens.dropLast() {
             _ = try engine.forward(tokenId: tokenId)
         }
 
-        // Decode: generate tokens one at a time
+        // Process last prompt token and get logits for first generated token
+        engine.debugLayers = true  // dump per-layer norms for last prefill token
         var generatedTokens: [Int] = []
         var lastLogits = try engine.forward(tokenId: tokens.last ?? 0)
+        engine.debugLayers = false
+
+        // Dump top logits for debugging
+        let logitsPtr = lastLogits.contents().bindMemory(
+            to: Float16.self, capacity: model.config.model.vocabSize)
+        var topVal: Float = -Float.infinity
+        var topIdx = 0
+        for i in 0..<model.config.model.vocabSize {
+            let v = Float(logitsPtr[i])
+            if v > topVal { topVal = v; topIdx = i }
+        }
+        print("  Top logit: token \(topIdx) = \(topVal)")
+        let decodedTop = tokenizer.decodeToken(topIdx)
+        print("  Top token: '\(decodedTop)'")
+        // Also dump first 8 logits for comparison with reference
+        let first8 = (0..<8).map { Float(logitsPtr[$0]) }
+        print("  Logits[:8]: \(first8.map { String(format: "%.4f", $0) })")
+        print()
 
         for _ in 0..<maxTokens {
             let nextToken = sampler.sample(

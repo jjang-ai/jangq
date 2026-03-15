@@ -95,12 +95,21 @@ public final class MXQInferenceEngine {
         print("  KV cache memory: \(String(format: "%.1f", kvMB)) MB")
     }
 
+    /// Enable to print per-layer hidden state norms during forward pass.
+    public var debugLayers: Bool = false
+
+    /// Helper to get a fresh command buffer.
+    private func makeCmd() throws -> MTLCommandBuffer {
+        guard let cmd = metalDevice.commandQueue.makeCommandBuffer() else {
+            throw MXQError.inferenceError("Failed to create command buffer")
+        }
+        return cmd
+    }
+
     /// Run a single-token forward pass (for autoregressive generation).
     /// Returns logits buffer (vocab_size float16 values).
     public func forward(tokenId: Int) throws -> MTLBuffer {
-        guard let cmdBuffer = metalDevice.commandQueue.makeCommandBuffer() else {
-            throw MXQError.inferenceError("Failed to create command buffer")
-        }
+        var cmdBuffer = try makeCmd()
 
         // Embedding lookup
         try dispatchEmbedding(cmdBuffer: cmdBuffer, tokenId: tokenId)
@@ -244,6 +253,21 @@ public final class MXQInferenceEngine {
             // Save for next layer's residual
             try dispatchCopy(cmdBuffer: cmdBuffer, from: hiddenBuffer, to: residualBuffer,
                              bytes: config.hiddenSize * MemoryLayout<Float16>.stride)
+
+            // Debug: dump per-layer hidden state norm
+            if debugLayers {
+                cmdBuffer.commit()
+                cmdBuffer.waitUntilCompleted()
+                let ptr = hiddenBuffer.contents().bindMemory(to: Float16.self,
+                                                              capacity: config.hiddenSize)
+                var sumSq: Float = 0
+                for i in 0..<config.hiddenSize { sumSq += Float(ptr[i]) * Float(ptr[i]) }
+                let norm = sqrt(sumSq)
+                let first4 = (0..<4).map { String(format: "%.4f", Float(ptr[$0])) }.joined(separator: ", ")
+                print("  L\(String(format: "%02d", layerIdx)): norm=\(String(format: "%8.2f", norm))  [\(first4)]")
+
+                cmdBuffer = try makeCmd()
+            }
         }
 
         // Final RMSNorm
