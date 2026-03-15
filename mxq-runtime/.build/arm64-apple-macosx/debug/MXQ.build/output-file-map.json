@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/master.swiftdeps"
+  },
+  "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQ.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.dia"
+  },
+  "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQConfig.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.dia"
+  },
+  "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQLoader.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.dia"
+  },
+  "/Users/eric/mxq/mxq-runtime/Sources/MXQ/SafetensorsReader.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.dia"
+  }
+}

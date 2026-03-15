@@ -1,0 +1,26 @@
+{
+  "": {
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/master.swiftdeps"
+  },
+  "/Users/eric/mxq/mxq-runtime/.build/index-build/checkouts/swift-argument-parser/Tools/generate-docc-reference/Extensions/ArgumentParser+Markdown.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/ArgumentParser+Markdown.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/ArgumentParser+Markdown.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/ArgumentParser+Markdown~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/ArgumentParser+Markdown.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/ArgumentParser+Markdown.dia"
+  },
+  "/Users/eric/mxq/mxq-runtime/.build/index-build/checkouts/swift-argument-parser/Tools/generate-docc-reference/Extensions/Process+SimpleAPI.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/Process+SimpleAPI.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/Process+SimpleAPI.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/Process+SimpleAPI~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/Process+SimpleAPI.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/Process+SimpleAPI.dia"
+  },
+  "/Users/eric/mxq/mxq-runtime/.build/index-build/checkouts/swift-argument-parser/Tools/generate-docc-reference/GenerateDoccReference.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/GenerateDoccReference.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/GenerateDoccReference.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/GenerateDoccReference~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/GenerateDoccReference.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/index-build/arm64-apple-macosx/debug/generate_docc_reference.build/GenerateDoccReference.dia"
+  }
+}
