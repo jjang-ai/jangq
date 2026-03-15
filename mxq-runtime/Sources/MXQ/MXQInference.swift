@@ -585,11 +585,13 @@ public final class MXQInferenceEngine {
         var hd = UInt32(headDim)
         var po = UInt32(posOffset)
         var theta = config.ropeBase
+        var trad: UInt32 = 0  // Non-traditional RoPE (Qwen, GPT-NeoX style)
         encoder.setBytes(&sl, length: 4, index: 1)
         encoder.setBytes(&nh, length: 4, index: 2)
         encoder.setBytes(&hd, length: 4, index: 3)
         encoder.setBytes(&po, length: 4, index: 4)
         encoder.setBytes(&theta, length: 4, index: 5)
+        encoder.setBytes(&trad, length: 4, index: 6)
 
         let halfDim = headDim / 2
         let gridSize = MTLSize(width: halfDim, height: nHeads, depth: seqLen)

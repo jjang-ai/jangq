@@ -58,6 +58,17 @@ kernel void mxq_rms_norm(
 // where θ = position / (10000 ^ (2i / dim))
 //
 
+// RoPE supports two dimension pairing modes:
+//   Traditional:     pairs (2i, 2i+1) — used by LLaMA, Mistral
+//   Non-traditional: pairs (i, i+half_dim) — used by Qwen, GPT-NeoX
+//
+// The rotation math is identical; only the index mapping differs.
+// Most modern models use non-traditional (the default here).
+//
+// The `traditional` flag selects the mode:
+//   traditional=0 → non-traditional: pairs (i, i+half_dim)
+//   traditional=1 → traditional: pairs (2i, 2i+1)
+
 kernel void mxq_rope(
     device half*         qk       [[buffer(0)]],  // Q or K tensor (seq, n_heads, head_dim)
     constant uint&       seq_len  [[buffer(1)]],
@@ -65,6 +76,7 @@ kernel void mxq_rope(
     constant uint&       head_dim [[buffer(3)]],
     constant uint&       pos_offset [[buffer(4)]],  // for KV cache position
     constant float&      theta_base [[buffer(5)]],  // base frequency (10000.0)
+    constant uint&       traditional [[buffer(6)]],  // 0=non-traditional, 1=traditional
     uint3                gid      [[thread_position_in_grid]]
 ) {
     uint pos = gid.z;         // sequence position
@@ -81,10 +93,19 @@ kernel void mxq_rope(
     float cos_val = cos(angle);
     float sin_val = sin(angle);
 
-    // Index into the QK tensor
+    // Index into the QK tensor — depends on RoPE mode
     uint base_idx = pos * n_heads * head_dim + head * head_dim;
-    uint idx0 = base_idx + pair * 2;
-    uint idx1 = base_idx + pair * 2 + 1;
+    uint idx0, idx1;
+
+    if (traditional != 0) {
+        // Traditional: pairs (0,1), (2,3), (4,5), ...
+        idx0 = base_idx + pair * 2;
+        idx1 = base_idx + pair * 2 + 1;
+    } else {
+        // Non-traditional (default): pairs (0,half), (1,half+1), ...
+        idx0 = base_idx + pair;
+        idx1 = base_idx + pair + half_dim;
+    }
 
     float v0 = float(qk[idx0]);
     float v1 = float(qk[idx1]);
