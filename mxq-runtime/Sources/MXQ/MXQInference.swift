@@ -110,7 +110,8 @@ public final class MXQInferenceEngine {
                          bytes: config.hiddenSize * MemoryLayout<Float16>.stride)
 
         // Process each transformer layer
-        for layerIdx in 0..<config.numHiddenLayers {
+        let numLayers = config.numHiddenLayers  // TODO: was config.numHiddenLayers
+        for layerIdx in 0..<numLayers {
             let layer = model.layers[layerIdx]
 
             // 1. Input LayerNorm
