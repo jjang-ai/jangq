@@ -151,16 +151,16 @@ public final class MXQTokenizer {
     }
 
     /// Encode a chat message with the Qwen chat template.
+    /// Default system prompt matches Qwen's chat template: "You are a helpful assistant."
     public func encodeChatPrompt(system: String? = nil, user: String) -> [Int] {
         var tokens: [Int] = []
 
-        // System message
-        if let system = system {
-            if let imStart = imStartId { tokens.append(imStart) }
-            tokens.append(contentsOf: encode("system\n\(system)"))
-            if let imEnd = imEndId { tokens.append(imEnd) }
-            tokens.append(contentsOf: encode("\n"))
-        }
+        // System message (Qwen defaults to "You are a helpful assistant.")
+        let systemMsg = system ?? "You are a helpful assistant."
+        if let imStart = imStartId { tokens.append(imStart) }
+        tokens.append(contentsOf: encode("system\n\(systemMsg)"))
+        if let imEnd = imEndId { tokens.append(imEnd) }
+        tokens.append(contentsOf: encode("\n"))
 
         // User message
         if let imStart = imStartId { tokens.append(imStart) }

@@ -127,6 +127,7 @@ struct Run: ParsableCommand {
         // 5. Tokenize prompt
         let tokens = tokenizer.encodeChatPrompt(system: system, user: prompt)
         print("  Prompt tokens: \(tokens.count)")
+        print("  Token IDs: \(tokens)")
         print()
 
         // 6. Generate

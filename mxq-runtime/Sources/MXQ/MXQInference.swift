@@ -120,13 +120,18 @@ public final class MXQInferenceEngine {
                                 output: normBuffer,
                                 hiddenSize: config.hiddenSize)
 
-            // 2. Q/K/V projections (dequant + GEMV)
+            // 2. Q/K/V projections (dequant + GEMV + bias)
             try dispatchDequantGEMV(cmdBuffer: cmdBuffer,
                                      input: normBuffer,
                                      weight: layer.qProj,
                                      output: qBuffer,
                                      K: config.hiddenSize,
                                      N: config.numAttentionHeads * config.headDim)
+            if let qBias = layer.qBias {
+                try dispatchAddInPlace(cmdBuffer: cmdBuffer,
+                                        buffer: qBuffer, bias: qBias,
+                                        count: config.numAttentionHeads * config.headDim)
+            }
 
             try dispatchDequantGEMV(cmdBuffer: cmdBuffer,
                                      input: normBuffer,
@@ -134,6 +139,11 @@ public final class MXQInferenceEngine {
                                      output: kBuffer,
                                      K: config.hiddenSize,
                                      N: config.kvHeads * config.headDim)
+            if let kBias = layer.kBias {
+                try dispatchAddInPlace(cmdBuffer: cmdBuffer,
+                                        buffer: kBuffer, bias: kBias,
+                                        count: config.kvHeads * config.headDim)
+            }
 
             try dispatchDequantGEMV(cmdBuffer: cmdBuffer,
                                      input: normBuffer,
@@ -141,6 +151,11 @@ public final class MXQInferenceEngine {
                                      output: vBuffer,
                                      K: config.hiddenSize,
                                      N: config.kvHeads * config.headDim)
+            if let vBias = layer.vBias {
+                try dispatchAddInPlace(cmdBuffer: cmdBuffer,
+                                        buffer: vBuffer, bias: vBias,
+                                        count: config.kvHeads * config.headDim)
+            }
 
             // 3. RoPE on Q and K
             try dispatchRoPE(cmdBuffer: cmdBuffer,
@@ -284,41 +299,151 @@ public final class MXQInferenceEngine {
         dumpBuffer(hiddenBuffer, name: "embed[\(tokenId)]")
     }
 
-    /// Run one full layer and dump intermediate values.
+    /// Run one full forward layer step by step, dumping intermediate values.
     public func debugForwardOneLayer(tokenId: Int) throws {
-        guard let cmdBuffer = metalDevice.commandQueue.makeCommandBuffer() else {
-            throw MXQError.inferenceError("Failed to create command buffer")
-        }
-
-        // Embedding
-        try dispatchEmbedding(cmdBuffer: cmdBuffer, tokenId: tokenId)
-        cmdBuffer.commit()
-        cmdBuffer.waitUntilCompleted()
-        dumpBuffer(hiddenBuffer, name: "embed")
-
-        // RMSNorm
-        guard let cmd2 = metalDevice.commandQueue.makeCommandBuffer() else {
-            throw MXQError.inferenceError("Failed to create command buffer")
-        }
         let layer = model.layers[0]
-        try dispatchRMSNorm(cmdBuffer: cmd2, input: hiddenBuffer,
-                            gamma: layer.inputNorm, output: normBuffer,
-                            hiddenSize: config.hiddenSize)
-        cmd2.commit()
-        cmd2.waitUntilCompleted()
-        dumpBuffer(normBuffer, name: "norm0")
 
-        // Q projection
-        guard let cmd3 = metalDevice.commandQueue.makeCommandBuffer() else {
-            throw MXQError.inferenceError("Failed to create command buffer")
+        // Helper to run one kernel and dump
+        func step(_ name: String, _ block: (MTLCommandBuffer) throws -> Void,
+                  buffer: MTLBuffer, count: Int = 8) throws {
+            guard let cmd = metalDevice.commandQueue.makeCommandBuffer() else {
+                throw MXQError.inferenceError("Failed to create command buffer")
+            }
+            try block(cmd)
+            cmd.commit()
+            cmd.waitUntilCompleted()
+            dumpBuffer(buffer, name: name, count: count)
         }
-        try dispatchDequantGEMV(cmdBuffer: cmd3, input: normBuffer,
-                                 weight: layer.qProj, output: qBuffer,
-                                 K: config.hiddenSize,
-                                 N: config.numAttentionHeads * config.headDim)
-        cmd3.commit()
-        cmd3.waitUntilCompleted()
-        dumpBuffer(qBuffer, name: "q_proj")
+
+        // 1. Embedding
+        try step("embed", { cmd in
+            try dispatchEmbedding(cmdBuffer: cmd, tokenId: tokenId)
+        }, buffer: hiddenBuffer)
+
+        // 2. Copy to residual
+        try step("residual", { cmd in
+            try dispatchCopy(cmdBuffer: cmd, from: hiddenBuffer, to: residualBuffer,
+                             bytes: config.hiddenSize * MemoryLayout<Float16>.stride)
+        }, buffer: residualBuffer)
+
+        // 3. RMSNorm
+        try step("norm0", { cmd in
+            try dispatchRMSNorm(cmdBuffer: cmd, input: hiddenBuffer,
+                                gamma: layer.inputNorm, output: normBuffer,
+                                hiddenSize: config.hiddenSize)
+        }, buffer: normBuffer)
+
+        // 4. Q projection
+        try step("q_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: normBuffer,
+                                     weight: layer.qProj, output: qBuffer,
+                                     K: config.hiddenSize,
+                                     N: config.numAttentionHeads * config.headDim)
+        }, buffer: qBuffer)
+
+        // 5. K projection
+        try step("k_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: normBuffer,
+                                     weight: layer.kProj, output: kBuffer,
+                                     K: config.hiddenSize,
+                                     N: config.kvHeads * config.headDim)
+        }, buffer: kBuffer)
+
+        // 6. V projection
+        try step("v_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: normBuffer,
+                                     weight: layer.vProj, output: vBuffer,
+                                     K: config.hiddenSize,
+                                     N: config.kvHeads * config.headDim)
+        }, buffer: vBuffer)
+
+        // 7. RoPE on Q
+        try step("q_rope", { cmd in
+            try dispatchRoPE(cmdBuffer: cmd, qk: qBuffer, seqLen: 1,
+                             nHeads: config.numAttentionHeads,
+                             headDim: config.headDim, posOffset: currentPosition)
+        }, buffer: qBuffer)
+
+        // 8. RoPE on K
+        try step("k_rope", { cmd in
+            try dispatchRoPE(cmdBuffer: cmd, qk: kBuffer, seqLen: 1,
+                             nHeads: config.kvHeads,
+                             headDim: config.headDim, posOffset: currentPosition)
+        }, buffer: kBuffer)
+
+        // 9. Store KV cache
+        try step("kv_store", { cmd in
+            try storeKVCache(cmdBuffer: cmd, layer: 0)
+        }, buffer: kvCacheKeys[0][0], count: 4)
+
+        // 10. Attention
+        try step("attn_out", { cmd in
+            try dispatchAttention(cmdBuffer: cmd, layer: 0)
+        }, buffer: attnOutBuffer)
+
+        // 11. O projection
+        try step("o_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: attnOutBuffer,
+                                     weight: layer.oProj, output: normBuffer,
+                                     K: config.hiddenSize,
+                                     N: config.hiddenSize)
+        }, buffer: normBuffer)
+
+        // 12. Residual add
+        try step("residual_add1", { cmd in
+            try dispatchAdd(cmdBuffer: cmd, a: residualBuffer, b: normBuffer,
+                            output: hiddenBuffer, count: config.hiddenSize)
+        }, buffer: hiddenBuffer)
+
+        // 13. Post-attention norm
+        try step("post_norm", { cmd in
+            try dispatchCopy(cmdBuffer: cmd, from: hiddenBuffer, to: residualBuffer,
+                             bytes: config.hiddenSize * MemoryLayout<Float16>.stride)
+        }, buffer: residualBuffer)
+
+        try step("mlp_norm", { cmd in
+            try dispatchRMSNorm(cmdBuffer: cmd, input: hiddenBuffer,
+                                gamma: layer.postAttnNorm, output: normBuffer,
+                                hiddenSize: config.hiddenSize)
+        }, buffer: normBuffer)
+
+        // 14. Gate + Up
+        try step("gate_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: normBuffer,
+                                     weight: layer.gateProj, output: gateBuffer,
+                                     K: config.hiddenSize,
+                                     N: config.intermediateSize)
+        }, buffer: gateBuffer)
+
+        try step("up_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: normBuffer,
+                                     weight: layer.upProj, output: upBuffer,
+                                     K: config.hiddenSize,
+                                     N: config.intermediateSize)
+        }, buffer: upBuffer)
+
+        // 15. SiLU * mul
+        try step("silu_mul", { cmd in
+            try dispatchSiLUMul(cmdBuffer: cmd, gate: gateBuffer, up: upBuffer,
+                                output: mlpBuffer, count: config.intermediateSize)
+        }, buffer: mlpBuffer)
+
+        // 16. Down projection
+        try step("down_proj", { cmd in
+            try dispatchDequantGEMV(cmdBuffer: cmd, input: mlpBuffer,
+                                     weight: layer.downProj, output: normBuffer,
+                                     K: config.intermediateSize,
+                                     N: config.hiddenSize)
+        }, buffer: normBuffer)
+
+        // 17. Residual add 2
+        try step("layer_out", { cmd in
+            try dispatchAdd(cmdBuffer: cmd, a: residualBuffer, b: normBuffer,
+                            output: hiddenBuffer, count: config.hiddenSize)
+        }, buffer: hiddenBuffer)
+
+        currentPosition += 1
+        print("  Layer 0 complete. All intermediate values above.")
     }
 
     // MARK: - Kernel Dispatch Helpers
@@ -490,6 +615,39 @@ public final class MXQInferenceEngine {
         let gridSize = MTLSize(width: nHeads, height: 1, depth: 1)
         let tgSize = MTLSize(width: 256, height: 1, depth: 1)
         encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: tgSize)
+        encoder.endEncoding()
+    }
+
+    /// Add bias to buffer in-place: buffer[i] += bias[i]
+    private func dispatchAddInPlace(cmdBuffer: MTLCommandBuffer,
+                                     buffer: MTLBuffer, bias: MTLBuffer,
+                                     count: Int) throws {
+        guard let encoder = cmdBuffer.makeComputeCommandEncoder() else {
+            throw MXQError.inferenceError("Failed to create compute encoder")
+        }
+
+        // Use mxq_add: output = a + b, with output == buffer (in-place via temp)
+        // Actually we need in-place add. Let's use a simple approach:
+        // Read buffer into temp, add bias, write back.
+        // But we can just use mxq_add with buffer as both input a and output,
+        // since Metal processes all threads before writing.
+        // Wait — that's not safe. Let's dispatch mxq_add with buffer as 'a',
+        // bias as 'b', and a temp buffer as output, then copy back.
+        // Actually, the simplest correct approach: Metal guarantees that
+        // dispatchThreads processes independently per thread, and reading
+        // buffer[i] before writing buffer[i] in the same dispatch is safe
+        // as long as each thread reads/writes only its own index.
+        // So we CAN use buffer as both a and output.
+
+        let pipeline = try metalDevice.pipeline(for: "mxq_add")
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(buffer, offset: 0, index: 0)
+        encoder.setBuffer(bias, offset: 0, index: 1)
+        encoder.setBuffer(buffer, offset: 0, index: 2)  // output = buffer (in-place)
+
+        let gridSize = MTLSize(width: count, height: 1, depth: 1)
+        let tgSize = MTLSize(width: min(count, 256), height: 1, depth: 1)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
         encoder.endEncoding()
     }
 

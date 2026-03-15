@@ -22,9 +22,9 @@ targets:
   "generate-manual-arm64-apple-macosx26.0-debug-tool.module": ["<generate-manual-arm64-apple-macosx26.0-debug-tool.module>"]
   "generate-manual-arm64-apple-macosx26.0-debug.exe": ["<generate-manual-arm64-apple-macosx26.0-debug.exe>"]
   "generate-manual-arm64-apple-macosx26.0-debug.module": ["<generate-manual-arm64-apple-macosx26.0-debug.module>"]
-  "main": ["<MXQ-arm64-apple-macosx26.0-debug.module>","<MXQCLI-arm64-apple-macosx26.0-debug.module>","<MXQMetal-arm64-apple-macosx26.0-debug.module>","<generate-docc-reference-arm64-apple-macosx26.0-debug-tool.exe>","<generate-docc-reference-arm64-apple-macosx26.0-debug.exe>","<generate-manual-arm64-apple-macosx26.0-debug-tool.exe>","<generate-manual-arm64-apple-macosx26.0-debug.exe>","<mxq-arm64-apple-macosx26.0-debug.exe>"]
+  "main": ["<MXQ-arm64-apple-macosx26.0-debug.module>","<MXQCLI-arm64-apple-macosx26.0-debug.module>","<MXQMetal-arm64-apple-macosx26.0-debug.module>","<mxq-arm64-apple-macosx26.0-debug.exe>"]
   "mxq-arm64-apple-macosx26.0-debug.exe": ["<mxq-arm64-apple-macosx26.0-debug.exe>"]
-  "test": ["<MXQ-arm64-apple-macosx26.0-debug.module>","<MXQCLI-arm64-apple-macosx26.0-debug.module>","<MXQMetal-arm64-apple-macosx26.0-debug.module>","<MXQRuntimePackageTests-arm64-apple-macosx26.0-debug.test>","<MXQTests-arm64-apple-macosx26.0-debug.module>","<generate-docc-reference-arm64-apple-macosx26.0-debug-tool.exe>","<generate-docc-reference-arm64-apple-macosx26.0-debug.exe>","<generate-manual-arm64-apple-macosx26.0-debug-tool.exe>","<generate-manual-arm64-apple-macosx26.0-debug.exe>","<mxq-arm64-apple-macosx26.0-debug.exe>"]
+  "test": ["<MXQ-arm64-apple-macosx26.0-debug.module>","<MXQCLI-arm64-apple-macosx26.0-debug.module>","<MXQMetal-arm64-apple-macosx26.0-debug.module>","<MXQRuntimePackageTests-arm64-apple-macosx26.0-debug.test>","<MXQTests-arm64-apple-macosx26.0-debug.module>","<mxq-arm64-apple-macosx26.0-debug.exe>"]
 default: "main"
 nodes:
   "/Users/eric/mxq/mxq-runtime/Sources/MXQ/":

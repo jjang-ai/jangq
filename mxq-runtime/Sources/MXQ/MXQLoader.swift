@@ -38,6 +38,11 @@ public struct TransformerLayerWeights: @unchecked Sendable {
     public let vProj: MXQWeight
     public let oProj: MXQWeight
 
+    // Attention biases (Qwen uses biases on Q/K/V)
+    public let qBias: MTLBuffer?
+    public let kBias: MTLBuffer?
+    public let vBias: MTLBuffer?
+
     // MLP
     public let gateProj: MXQWeight
     public let upProj: MXQWeight
@@ -125,6 +130,14 @@ public func loadModel(url: URL, device: MTLDevice) throws -> MXQModel {
     for i in 0..<modelConfig.numHiddenLayers {
         let prefix = "model.layers.\(i)"
 
+        // Load biases if they exist (Qwen uses Q/K/V biases)
+        let qBias = try? loadFloat16Tensor(named: "\(prefix).self_attn.q_proj.bias",
+                                            from: allTensors, device: device)
+        let kBias = try? loadFloat16Tensor(named: "\(prefix).self_attn.k_proj.bias",
+                                            from: allTensors, device: device)
+        let vBias = try? loadFloat16Tensor(named: "\(prefix).self_attn.v_proj.bias",
+                                            from: allTensors, device: device)
+
         let layer = try TransformerLayerWeights(
             index: i,
             qProj: loadMXQWeight(named: "\(prefix).self_attn.q_proj",
@@ -135,6 +148,9 @@ public func loadModel(url: URL, device: MTLDevice) throws -> MXQModel {
                                   from: allTensors, device: device),
             oProj: loadMXQWeight(named: "\(prefix).self_attn.o_proj",
                                   from: allTensors, device: device),
+            qBias: qBias,
+            kBias: kBias,
+            vBias: vBias,
             gateProj: loadMXQWeight(named: "\(prefix).mlp.gate_proj",
                                      from: allTensors, device: device),
             upProj: loadMXQWeight(named: "\(prefix).mlp.up_proj",

@@ -532,8 +532,8 @@ relocations:
   - { offset: 0xB9CF9, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser12ArrayWrapperVyxGAA0cD8ProtocolA2aEP12currentIndexSivgTW', symObjAddr: 0x7250, symBinAddr: 0x10000FACC, symSize: 0x24 }
   - { offset: 0xB9D0D, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser12ArrayWrapperVyxGAA0cD8ProtocolA2aEP7getNextypSgyFTW', symObjAddr: 0x7274, symBinAddr: 0x10000FAF0, symSize: 0x14 }
   - { offset: 0xB9F99, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV7OptionsV8rawValueSuvg', symObjAddr: 0x0, symBinAddr: 0x100014EA4, symSize: 0x4 }
-  - { offset: 0xB9FBD, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV7OptionsV10isOptionalAGvpZ', symObjAddr: 0x1EAE0, symBinAddr: 0x100159AC8, symSize: 0x0 }
-  - { offset: 0xBA7DD, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV7OptionsV11isRepeatingAGvpZ', symObjAddr: 0x1EAE8, symBinAddr: 0x100159AD0, symSize: 0x0 }
+  - { offset: 0xB9FBD, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV7OptionsV10isOptionalAGvpZ', symObjAddr: 0x1EAE0, symBinAddr: 0x100161AD8, symSize: 0x0 }
+  - { offset: 0xBA7DD, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV7OptionsV11isRepeatingAGvpZ', symObjAddr: 0x1EAE8, symBinAddr: 0x100161AE0, symSize: 0x0 }
   - { offset: 0xBA7EB, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV12defaultValueSSSgvpfi', symObjAddr: 0x5E4, symBinAddr: 0x100015488, symSize: 0xC }
   - { offset: 0xBA803, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DefinitionV4HelpV10discussionAA0A10DiscussionOSgvpfi', symObjAddr: 0x820, symBinAddr: 0x1000156C4, symSize: 0x14 }
   - { offset: 0xBA81B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10DiscussionOSgWOy', symObjAddr: 0x880, symBinAddr: 0x100015724, symSize: 0x70 }
@@ -1133,9 +1133,9 @@ relocations:
   - { offset: 0xC0D01, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser07LenientB0V5parseAA12ParsedValuesVyKF6$deferL0_yyF', symObjAddr: 0xCBC8, symBinAddr: 0x10002D2B0, symSize: 0x90 }
   - { offset: 0xC0D54, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser07LenientB0V5parseAA12ParsedValuesVyKFSbAA15ParsableCommand_pXpXEfU0_', symObjAddr: 0xCD30, symBinAddr: 0x10002D3B4, symSize: 0x180 }
   - { offset: 0xC0FDB, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV14RepresentationO21__derived_enum_equalsySbAE_AEtFZ', symObjAddr: 0x0, symBinAddr: 0x10002E828, symSize: 0xE8 }
-  - { offset: 0xC0FFF, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV7defaultACvpZ', symObjAddr: 0x4A30, symBinAddr: 0x100159AD8, symSize: 0x0 }
-  - { offset: 0xC1211, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV6hiddenACvpZ', symObjAddr: 0x4A31, symBinAddr: 0x100159AD9, symSize: 0x0 }
-  - { offset: 0xC122B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV7privateACvpZ', symObjAddr: 0x4A32, symBinAddr: 0x100159ADA, symSize: 0x0 }
+  - { offset: 0xC0FFF, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV7defaultACvpZ', symObjAddr: 0x4A30, symBinAddr: 0x100161AE8, symSize: 0x0 }
+  - { offset: 0xC1211, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV6hiddenACvpZ', symObjAddr: 0x4A31, symBinAddr: 0x100161AE9, symSize: 0x0 }
+  - { offset: 0xC122B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV7privateACvpZ', symObjAddr: 0x4A32, symBinAddr: 0x100161AEA, symSize: 0x0 }
   - { offset: 0xC1239, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV14RepresentationOAESHAAWl', symObjAddr: 0x1E0, symBinAddr: 0x10002EA08, symSize: 0x68 }
   - { offset: 0xC124D, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV7default_WZ', symObjAddr: 0x2CC, symBinAddr: 0x10002EAF4, symSize: 0x20 }
   - { offset: 0xC1267, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser0A10VisibilityV7defaultACvau', symObjAddr: 0x2F0, symBinAddr: 0x10002EB18, symSize: 0x50 }
@@ -1795,8 +1795,8 @@ relocations:
   - { offset: 0xC8B43, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser14CompletionKindV6customyACSaySSGAE_SiSStYaYbcFZ', symObjAddr: 0x3D0, symBinAddr: 0x100049888, symSize: 0x4C }
   - { offset: 0xC8B83, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser14CompletionKindV6customyACSaySSGAEcFZ', symObjAddr: 0x41C, symBinAddr: 0x1000498D4, symSize: 0x4C }
   - { offset: 0xC8CA6, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV8rawValueSSvg', symObjAddr: 0x0, symBinAddr: 0x10004A40C, symSize: 0x30 }
-  - { offset: 0xC8CCA, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV11_requestingAA5MutexVyACSgGvpZ', symObjAddr: 0xD3A0, symBinAddr: 0x100159AE0, symSize: 0x0 }
-  - { offset: 0xC8CFE, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV18_requestingVersionAA5MutexVySSSgGvpZ', symObjAddr: 0xD3A8, symBinAddr: 0x100159AE8, symSize: 0x0 }
+  - { offset: 0xC8CCA, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV11_requestingAA5MutexVyACSgGvpZ', symObjAddr: 0xD3A0, symBinAddr: 0x100161AF0, symSize: 0x0 }
+  - { offset: 0xC8CFE, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV18_requestingVersionAA5MutexVySSSgGvpZ', symObjAddr: 0xD3A8, symBinAddr: 0x100161AF8, symSize: 0x0 }
   - { offset: 0xC8ECB, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV11_requesting_WZ', symObjAddr: 0x8F8, symBinAddr: 0x10004ACC4, symSize: 0x50 }
   - { offset: 0xC8EE5, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV11_requestingAA5MutexVyACSgGvau', symObjAddr: 0x948, symBinAddr: 0x10004AD14, symSize: 0x50 }
   - { offset: 0xC8F0A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15CompletionShellV18_requestingVersion_WZ', symObjAddr: 0xA88, symBinAddr: 0x10004AE54, symSize: 0x50 }
@@ -1938,9 +1938,9 @@ relocations:
   - { offset: 0xCAB2B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser14EnumerableFlagPAAE4help3forAA0A4HelpVSgx_tFZ', symObjAddr: 0x30, symBinAddr: 0x100051B50, symSize: 0x6C }
   - { offset: 0xCAB76, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser14EnumerableFlagPAAs23CustomStringConvertibleRzSYRzrlE11descriptionSSvg', symObjAddr: 0x9C, symBinAddr: 0x100051BBC, symSize: 0x98 }
   - { offset: 0xCAD18, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15ValidationErrorV7messageSSvg', symObjAddr: 0x0, symBinAddr: 0x100051C54, symSize: 0x30 }
-  - { offset: 0xCAD3C, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV7successACvpZ', symObjAddr: 0x7250, symBinAddr: 0x100159AF0, symSize: 0x0 }
-  - { offset: 0xCAE6D, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV7failureACvpZ', symObjAddr: 0x7254, symBinAddr: 0x100159AF4, symSize: 0x0 }
-  - { offset: 0xCAE87, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV17validationFailureACvpZ', symObjAddr: 0x7258, symBinAddr: 0x100159AF8, symSize: 0x0 }
+  - { offset: 0xCAD3C, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV7successACvpZ', symObjAddr: 0x7250, symBinAddr: 0x100161B00, symSize: 0x0 }
+  - { offset: 0xCAE6D, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV7failureACvpZ', symObjAddr: 0x7254, symBinAddr: 0x100161B04, symSize: 0x0 }
+  - { offset: 0xCAE87, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV17validationFailureACvpZ', symObjAddr: 0x7258, symBinAddr: 0x100161B08, symSize: 0x0 }
   - { offset: 0xCAF3C, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser15ValidationErrorVWOh', symObjAddr: 0x10C, symBinAddr: 0x100051D60, symSize: 0x28 }
   - { offset: 0xCAF50, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV7success_WZ', symObjAddr: 0x250, symBinAddr: 0x100051EA4, symSize: 0x20 }
   - { offset: 0xCAF6A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8ExitCodeV7successACvau', symObjAddr: 0x270, symBinAddr: 0x100051EC4, symSize: 0x50 }
@@ -2405,7 +2405,7 @@ relocations:
   - { offset: 0xD056A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11JSONEncoderOMa', symObjAddr: 0x8D0, symBinAddr: 0x100065CF4, symSize: 0x14 }
   - { offset: 0xD0592, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11JSONEncoderO6encodeySSxSERzlFZ', symObjAddr: 0x408, symBinAddr: 0x100065854, symSize: 0x3BC }
   - { offset: 0xD0747, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandV13configuration_WZ', symObjAddr: 0x0, symBinAddr: 0x100065D08, symSize: 0x14C }
-  - { offset: 0xD076B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandV13configurationAA0D13ConfigurationVvpZ', symObjAddr: 0xB130, symBinAddr: 0x100159B00, symSize: 0x0 }
+  - { offset: 0xD076B, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandV13configurationAA0D13ConfigurationVvpZ', symObjAddr: 0xB130, symBinAddr: 0x100161B10, symSize: 0x0 }
   - { offset: 0xD0779, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandV13configuration_WZ', symObjAddr: 0x0, symBinAddr: 0x100065D08, symSize: 0x14C }
   - { offset: 0xD0793, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandV13configurationAA0D13ConfigurationVvau', symObjAddr: 0x14C, symBinAddr: 0x100065E54, symSize: 0x50 }
   - { offset: 0xD0BC3, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandV11subcommandsSaySSGvpfP', symObjAddr: 0x338, symBinAddr: 0x100065ECC, symSize: 0xAC }
@@ -2500,8 +2500,8 @@ relocations:
   - { offset: 0xD15F1, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandVAA17ParsableArgumentsA2aDPxycfCTW', symObjAddr: 0x2770, symBinAddr: 0x100067A08, symSize: 0x3C }
   - { offset: 0xD1605, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser11HelpCommandVSeAASe4fromxs7Decoder_p_tKcfCTW', symObjAddr: 0x2818, symBinAddr: 0x100067AB0, symSize: 0x6C }
   - { offset: 0xD1744, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndent_WZ', symObjAddr: 0x0, symBinAddr: 0x100068910, symSize: 0x4 }
-  - { offset: 0xD1768, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndentSivpZ', symObjAddr: 0xEEE0, symBinAddr: 0x100125860, symSize: 0x0 }
-  - { offset: 0xD1782, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV16labelColumnWidthSivpZ', symObjAddr: 0xEEE8, symBinAddr: 0x100125868, symSize: 0x0 }
+  - { offset: 0xD1768, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndentSivpZ', symObjAddr: 0xEEE0, symBinAddr: 0x10012A1E0, symSize: 0x0 }
+  - { offset: 0xD1782, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV16labelColumnWidthSivpZ', symObjAddr: 0xEEE8, symBinAddr: 0x10012A1E8, symSize: 0x0 }
   - { offset: 0xD1790, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndent_WZ', symObjAddr: 0x0, symBinAddr: 0x100068910, symSize: 0x4 }
   - { offset: 0xD17AA, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV10helpIndentSivau', symObjAddr: 0x4, symBinAddr: 0x100068914, symSize: 0xC }
   - { offset: 0xD1EED, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13HelpGeneratorV16labelColumnWidth_WZ', symObjAddr: 0x1C, symBinAddr: 0x10006892C, symSize: 0x4 }
@@ -3346,7 +3346,7 @@ relocations:
   - { offset: 0xDCA7F, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13ParentCommandVyxGAA13ParsedWrapperA2aEP12_parsedValueAA0E0Oy0H0QzGvgTW', symObjAddr: 0x14BC, symBinAddr: 0x10009038C, symSize: 0x14 }
   - { offset: 0xDCA93, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser13ParentCommandVyxGAA13ParsedWrapperA2aEP12_parsedValuexAA0E0Oy0H0QzG_tcfCTW', symObjAddr: 0x14D0, symBinAddr: 0x1000903A0, symSize: 0x20 }
   - { offset: 0xDCC15, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser23_WrappedParsableCommandV12_commandNameSSvgZ', symObjAddr: 0x0, symBinAddr: 0x100090C50, symSize: 0x300 }
-  - { offset: 0xDCC3A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser24directlyInitializedErrorSSvp', symObjAddr: 0x110C0, symBinAddr: 0x100159B98, symSize: 0x0 }
+  - { offset: 0xDCC3A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser24directlyInitializedErrorSSvp', symObjAddr: 0x110C0, symBinAddr: 0x100161BA8, symSize: 0x0 }
   - { offset: 0xDCEEC, size: 0x8, addend: 0x0, symName: '_$ss16PartialRangeUpToVySS5IndexVGAByxGSXsWl', symObjAddr: 0x458, symBinAddr: 0x100090F50, symSize: 0x74 }
   - { offset: 0xDCF00, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser23_WrappedParsableCommandV7optionsxvpAA0D9ArgumentsRzlACyxGTK', symObjAddr: 0x7B4, symBinAddr: 0x100091088, symSize: 0x128 }
   - { offset: 0xDCF26, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser23_WrappedParsableCommandV7optionsxvpAA0D9ArgumentsRzlACyxGTk', symObjAddr: 0x8DC, symBinAddr: 0x1000911B0, symSize: 0x94 }
@@ -3637,12 +3637,12 @@ relocations:
   - { offset: 0xE0784, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser18InternalParseErrorOwui', symObjAddr: 0x1364, symBinAddr: 0x10009CA24, symSize: 0x60 }
   - { offset: 0xE0798, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser18InternalParseErrorOMa', symObjAddr: 0x13C4, symBinAddr: 0x10009CA84, symSize: 0x14 }
   - { offset: 0xE0882, size: 0x8, addend: 0x0, symName: '_$ss11CommandLineO14ArgumentParserE16_staticArguments_WZ', symObjAddr: 0x0, symBinAddr: 0x10009CA98, symSize: 0x1C }
-  - { offset: 0xE08A6, size: 0x8, addend: 0x0, symName: '_$ss11CommandLineO14ArgumentParserE16_staticArgumentsSaySSGvpZ', symObjAddr: 0x9C90, symBinAddr: 0x100159BA8, symSize: 0x0 }
-  - { offset: 0xE08C0, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV5shellAGvpZ', symObjAddr: 0x9C98, symBinAddr: 0x100159BB0, symSize: 0x0 }
-  - { offset: 0xE0BF0, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV7columnsAGvpZ', symObjAddr: 0x9CA8, symBinAddr: 0x100159BC0, symSize: 0x0 }
-  - { offset: 0xE0C0A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV5linesAGvpZ', symObjAddr: 0x9CB8, symBinAddr: 0x100159BD0, symSize: 0x0 }
-  - { offset: 0xE0C24, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV9shellNameAGvpZ', symObjAddr: 0x9CC8, symBinAddr: 0x100159BE0, symSize: 0x0 }
-  - { offset: 0xE0C3E, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV12shellVersionAGvpZ', symObjAddr: 0x9CD8, symBinAddr: 0x100159BF0, symSize: 0x0 }
+  - { offset: 0xE08A6, size: 0x8, addend: 0x0, symName: '_$ss11CommandLineO14ArgumentParserE16_staticArgumentsSaySSGvpZ', symObjAddr: 0x9C90, symBinAddr: 0x100161BB8, symSize: 0x0 }
+  - { offset: 0xE08C0, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV5shellAGvpZ', symObjAddr: 0x9C98, symBinAddr: 0x100161BC0, symSize: 0x0 }
+  - { offset: 0xE0BF0, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV7columnsAGvpZ', symObjAddr: 0x9CA8, symBinAddr: 0x100161BD0, symSize: 0x0 }
+  - { offset: 0xE0C0A, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV5linesAGvpZ', symObjAddr: 0x9CB8, symBinAddr: 0x100161BE0, symSize: 0x0 }
+  - { offset: 0xE0C24, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV9shellNameAGvpZ', symObjAddr: 0x9CC8, symBinAddr: 0x100161BF0, symSize: 0x0 }
+  - { offset: 0xE0C3E, size: 0x8, addend: 0x0, symName: '_$s14ArgumentParser8PlatformO11EnvironmentO3KeyV12shellVersionAGvpZ', symObjAddr: 0x9CD8, symBinAddr: 0x100161C00, symSize: 0x0 }
   - { offset: 0xE0C4C, size: 0x8, addend: 0x0, symName: '_$ss11CommandLineO14ArgumentParserE16_staticArguments_WZ', symObjAddr: 0x0, symBinAddr: 0x10009CA98, symSize: 0x1C }
   - { offset: 0xE0C66, size: 0x8, addend: 0x0, symName: '_$ss11CommandLineO14ArgumentParserE16_staticArgumentsSaySSGvau', symObjAddr: 0x1C, symBinAddr: 0x10009CAB4, symSize: 0x50 }
   - { offset: 0xE0C84, size: 0x8, addend: 0x0, symName: '_$ss11CommandLineO14ArgumentParserE16_staticArgumentsSaySSGvgZ', symObjAddr: 0x6C, symBinAddr: 0x10009CB04, symSize: 0x2C }
