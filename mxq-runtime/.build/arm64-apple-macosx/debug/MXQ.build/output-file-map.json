@@ -16,6 +16,13 @@
     "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swiftdeps",
     "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.dia"
   },
+  "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQInference.swift": {
+    "dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.d",
+    "object": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o",
+    "swiftmodule": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference~partial.swiftmodule",
+    "swift-dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swiftdeps",
+    "diagnostics": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.dia"
+  },
   "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQLoader.swift": {
     "dependencies": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.d",
     "object": "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swift.o",

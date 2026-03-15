@@ -15,8 +15,8 @@
     }
   },
   "generatedSourceTargetSet" : [
-    "GenerateManual",
-    "GenerateDoccReference"
+    "GenerateDoccReference",
+    "GenerateManual"
   ],
   "pluginDescriptions" : [
     {
@@ -1478,6 +1478,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQInference.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQLoader.swift"
         },
         {
@@ -1503,6 +1507,7 @@
       "objects" : [
         "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQ.swift.o",
         "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swift.o",
+        "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o",
         "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swift.o",
         "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/SafetensorsReader.swift.o"
       ],
@@ -1573,6 +1578,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQLoader.swift.o"
         },
         {
@@ -1588,6 +1597,7 @@
       "sources" : [
         "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQ.swift",
         "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQConfig.swift",
+        "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQInference.swift",
         "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQLoader.swift",
         "/Users/eric/mxq/mxq-runtime/Sources/MXQ/SafetensorsReader.swift"
       ],
@@ -3248,6 +3258,7 @@
       "-c",
       "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQ.swift",
       "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQConfig.swift",
+      "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQInference.swift",
       "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQLoader.swift",
       "/Users/eric/mxq/mxq-runtime/Sources/MXQ/SafetensorsReader.swift",
       "-I",
@@ -4267,6 +4278,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQInference.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/eric/mxq/mxq-runtime/Sources/MXQ/MXQLoader.swift"
         },
         {
@@ -4336,6 +4351,10 @@
         {
           "kind" : "file",
           "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o"
         },
         {
           "kind" : "file",
@@ -6110,6 +6129,10 @@
         {
           "kind" : "file",
           "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/eric/mxq/mxq-runtime/.build/arm64-apple-macosx/debug/MXQ.build/MXQInference.swift.o"
         },
         {
           "kind" : "file",
