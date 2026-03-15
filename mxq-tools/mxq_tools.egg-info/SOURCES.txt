@@ -2,6 +2,9 @@ pyproject.toml
 mxq_tools/__init__.py
 mxq_tools/__main__.py
 mxq_tools/allocate.py
+mxq_tools/architectures.py
+mxq_tools/calibrate.py
+mxq_tools/convert.py
 mxq_tools/pack.py
 mxq_tools/quantize.py
 mxq_tools.egg-info/PKG-INFO
@@ -14,4 +17,6 @@ mxq_tools/format/__init__.py
 mxq_tools/format/reader.py
 mxq_tools/format/spec.py
 mxq_tools/format/writer.py
+tests/test_format.py
 tests/test_pack.py
+tests/test_quantize.py
