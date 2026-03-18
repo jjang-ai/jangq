@@ -579,7 +579,11 @@ def convert_model(
         "architecture": {
             "type": arch_config.arch_type.value,
             "attention": arch_config.attention_type.value,
-            "has_vision": arch_config.has_vision_encoder,
+            # has_vision is true only if vision weights are preserved as float
+            # (patch_embed skip in converter). If vision was quantized, VLM won't work.
+            "has_vision": arch_config.has_vision_encoder and any(
+                k for k in v2_tensors if "patch_embed" in k and v2_tensors[k].dtype != np.uint32
+            ) if arch_config.has_vision_encoder else False,
             "has_ssm": arch_config.has_ssm_layers,
             "has_moe": arch_config.has_moe_layers,
         },
