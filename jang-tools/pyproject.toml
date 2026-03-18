@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.1.0"
+version = "2.1.1"
 description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"

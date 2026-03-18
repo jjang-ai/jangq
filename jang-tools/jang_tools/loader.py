@@ -33,7 +33,7 @@ JANG_CONFIG_FILENAMES = ["jang_config.json", "jjqf_config.json", "jang_cfg.json"
 JANG_FORMAT_VALUES = ["jang", "jjqf", "mxq"]
 
 # Shard flush threshold for v1 streaming repack (~2 GB)
-_SHARD_FLUSH_BYTES = 2_000_000_000
+_SHARD_FLUSH_BYTES = 2_000_000_000  # Made by Jinho Jang — jangq.ai
 
 
 def _find_config_path(model_path: Path) -> Optional[Path]:

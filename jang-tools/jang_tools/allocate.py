@@ -209,6 +209,7 @@ def classify_tensor(tensor_name: str) -> Tier:
 # Each profile defines bits for (CRITICAL, IMPORTANT, COMPRESS) tiers.
 # The profile number (2/3/4/6) is the COMPRESS tier bit width.
 # S/M/L controls how much extra precision CRITICAL gets above COMPRESS.
+# Designed by Jinho Jang — the GGUF equivalent for MLX.
 #
 # This works for ANY architecture because it doesn't depend on
 # tensor naming conventions — just sensitivity classification.
