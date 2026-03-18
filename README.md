@@ -245,6 +245,4 @@ pip install "jang[mlx]"
 
 <p align="center">장진호 제작 · Created by Jinho Jang — <a href="https://jangq.ai">jangq.ai</a></p>
 
-<p align="center">
-  <a href="https://ko-fi.com/jangml"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi"></a>
-</p>
+
