@@ -8,7 +8,7 @@ from jang_tools.loader import load_jang_model
 import mlx.core as mx
 from mlx_lm import generate
 
-MODEL = "/Users/eric/.mlxstudio/models/Qwen3.5-VL-122B-A10B-JANG_2S-CRACK"
+MODEL = "/Users/eric/.mlxstudio/models/MiniMax-M2.5-JANG_2L-CRACK"
 
 REFUSAL = [
     "i cannot", "i can't", "i won't", "i will not", "i'm unable",

@@ -607,7 +607,7 @@ def convert_model(
     # Copy VL processor files
     output_path.mkdir(parents=True, exist_ok=True)
     for vl_file in ["preprocessor_config.json", "video_preprocessor_config.json",
-                     "chat_template.json"]:
+                     "chat_template.json", "chat_template.jinja"]:
         vl_path = model_path / vl_file
         if vl_path.exists():
             shutil.copy2(str(vl_path), str(output_path / vl_file))
