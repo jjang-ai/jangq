@@ -1,0 +1,245 @@
+===== MMLU 200-QUESTION BENCHMARK =====
+Date: Tue Mar 17 14:46:55 PDT 2026
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  JANG: Qwen3.5-4B-JANG_2S
+  GPU: 1.7 GB
+============================================================
+  abstract_algebra                6/20
+  anatomy                         7/20
+  astronomy                       4/20
+  college_computer_science        8/20
+  college_physics                 7/20
+  high_school_biology             6/20
+  high_school_chemistry           6/20
+  high_school_mathematics         5/20
+  logical_fallacies               4/20
+  world_religions                 4/20
+
+  TOTAL: 57/200 = 28.5%
+  Time: 45.2s (0.2s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  JANG: Qwen3.5-4B-JANG_3K
+  GPU: 1.7 GB
+============================================================
+  abstract_algebra                5/20
+  anatomy                         6/20
+  astronomy                       7/20
+  college_computer_science        7/20
+  college_physics                 8/20
+  high_school_biology             6/20
+  high_school_chemistry           5/20
+  high_school_mathematics         5/20
+  logical_fallacies               4/20
+  world_religions                 6/20
+
+  TOTAL: 59/200 = 29.5%
+  Time: 78.2s (0.4s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  JANG: Qwen3.5-4B-JANG_4K
+  GPU: 2.2 GB
+============================================================
+  abstract_algebra                4/20
+  anatomy                         15/20
+  astronomy                       18/20
+  college_computer_science        7/20
+  college_physics                 13/20
+  high_school_biology             17/20
+  high_school_chemistry           11/20
+  high_school_mathematics         8/20
+  logical_fallacies               15/20
+  world_religions                 17/20
+
+  TOTAL: 125/200 = 62.5%
+  Time: 43.9s (0.2s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  MLX: Qwen3.5-4B-MLX-2bit
+  GPU: 1.2 GB
+============================================================
+  abstract_algebra                3/20
+  anatomy                         1/20
+  astronomy                       1/20
+  college_computer_science        1/20
+  college_physics                 7/20
+  high_school_biology             5/20
+  high_school_chemistry           3/20
+  high_school_mathematics         1/20
+  logical_fallacies               1/20
+  world_religions                 2/20
+
+  TOTAL: 25/200 = 12.5%
+  Time: 52.0s (0.3s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  MLX: Qwen3.5-4B-MLX-3bit
+  GPU: 1.7 GB
+============================================================
+  abstract_algebra                3/20
+  anatomy                         11/20
+  astronomy                       13/20
+  college_computer_science        7/20
+  college_physics                 8/20
+  high_school_biology             13/20
+  high_school_chemistry           7/20
+  high_school_mathematics         6/20
+  logical_fallacies               13/20
+  world_religions                 16/20
+
+  TOTAL: 97/200 = 48.5%
+  Time: 38.2s (0.2s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  MLX: Qwen3.5-4B-MLX-4bit
+  GPU: 2.2 GB
+============================================================
+  abstract_algebra                6/20
+  anatomy                         15/20
+  astronomy                       17/20
+  college_computer_science        11/20
+  college_physics                 13/20
+  high_school_biology             17/20
+  high_school_chemistry           12/20
+  high_school_mathematics         9/20
+  logical_fallacies               17/20
+  world_religions                 17/20
+
+  TOTAL: 134/200 = 67.0%
+  Time: 25.9s (0.1s per question)
+
+
+===== 9B MODELS =====
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  JANG: Qwen3.5-9B-JANG_2S
+  GPU: 3.8 GB
+============================================================
+  abstract_algebra                3/20
+  anatomy                         4/20
+  astronomy                       4/20
+  college_computer_science        6/20
+  college_physics                 6/20
+  high_school_biology             5/20
+  high_school_chemistry           7/20
+  high_school_mathematics         7/20
+  logical_fallacies               4/20
+  world_religions                 5/20
+
+  TOTAL: 51/200 = 25.5%
+  Time: 70.9s (0.4s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  JANG: Qwen3.5-9B-JANG_3K
+  GPU: 3.6 GB
+============================================================
+  abstract_algebra                4/20
+  anatomy                         6/20
+  astronomy                       3/20
+  college_computer_science        8/20
+  college_physics                 6/20
+  high_school_biology             6/20
+  high_school_chemistry           4/20
+  high_school_mathematics         6/20
+  logical_fallacies               1/20
+  world_religions                 7/20
+
+  TOTAL: 51/200 = 25.5%
+  Time: 87.2s (0.4s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  JANG: Qwen3.5-9B-JANG_4K
+  GPU: 4.6 GB
+============================================================
+  abstract_algebra                11/20
+  anatomy                         16/20
+  astronomy                       18/20
+  college_computer_science        12/20
+  college_physics                 13/20
+  high_school_biology             17/20
+  high_school_chemistry           16/20
+  high_school_mathematics         7/20
+  logical_fallacies               16/20
+  world_religions                 15/20
+
+  TOTAL: 141/200 = 70.5%
+  Time: 51.7s (0.3s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  MLX: Qwen3.5-9B-MLX-2bit
+  GPU: 2.6 GB
+============================================================
+  abstract_algebra                4/20
+  anatomy                         6/20
+  astronomy                       5/20
+  college_computer_science        7/20
+  college_physics                 6/20
+  high_school_biology             4/20
+  high_school_chemistry           4/20
+  high_school_mathematics         2/20
+  logical_fallacies               3/20
+  world_religions                 3/20
+
+  TOTAL: 44/200 = 22.0%
+  Time: 103.6s (0.5s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  MLX: Qwen3.5-9B-MLX-3bit
+  GPU: 3.6 GB
+============================================================
+  abstract_algebra                8/20
+  anatomy                         13/20
+  astronomy                       16/20
+  college_computer_science        10/20
+  college_physics                 12/20
+  high_school_biology             19/20
+  high_school_chemistry           15/20
+  high_school_mathematics         5/20
+  logical_fallacies               16/20
+  world_religions                 14/20
+
+  TOTAL: 128/200 = 64.0%
+  Time: 40.7s (0.2s per question)
+
+You are using a model of type qwen3_5 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+
+============================================================
+  MLX: Qwen3.5-9B-MLX-4bit
+  GPU: 4.7 GB
+============================================================
+  abstract_algebra                11/20
+  anatomy                         15/20
+  astronomy                       20/20
+  college_computer_science        13/20
+  college_physics                 13/20
+  high_school_biology             18/20
+  high_school_chemistry           14/20
+  high_school_mathematics         9/20
+  logical_fallacies               16/20
+  world_religions                 16/20
+
+  TOTAL: 145/200 = 72.5%
+  Time: 41.4s (0.2s per question)
+
