@@ -4,5 +4,5 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .DS_Store
-mlxq-runtime/.build/
-mlxq-runtime/.swiftpm/
+jang-runtime/.build/
+jang-runtime/.swiftpm/

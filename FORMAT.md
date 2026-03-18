@@ -1,239 +1,246 @@
-# MLXQ Format Specification v1.0
+# JANG Format Specification v2.0
 
-> Mixed-Precision Importance Quantization for Apple Silicon
-> Created by Eric Jang (eric@vmlx.net)
+> Mixed-Precision Quantization for Apple Silicon
+> Created by Jinho Jang (eric@jangq.ai)
 
 ## Overview
 
-MXQ is an open file format for storing mixed-precision quantized LLM weights
-optimized for Apple Silicon inference. Each weight block can use a different
-bit width (2, 3, 4, 5, 6, or 8 bits), allocated based on importance scoring
-during calibration.
+JANG is an open file format for storing mixed-precision quantized LLM weights
+optimized for Apple Silicon inference. Each tensor is quantized at a single
+bit width (2, 3, 4, 5, 6, or 8 bits), assigned based on its sensitivity tier.
+
+Models stay quantized in GPU memory and dequantize on-the-fly using MLX native
+Metal kernels (`quantized_matmul`, `gather_qmm`).
+
+## v2 vs v1
+
+| | v2 (current) | v1 (legacy) |
+|---|---|---|
+| **Storage** | MLX-native safetensors (uint32 weights) | JANG-packed uint8 qweight |
+| **Load time** | **Instant** (mx.load mmap) | 5-10 min (repack needed) |
+| **File naming** | `model-NNNNN.safetensors` | `model-NNNNN.jang.safetensors` |
+| **Index** | `model.safetensors.index.json` | `model.jang.index.json` |
+| **File size** | Same as v1 | Same as v2 |
+| **config.json** | Has `quantization` key | No quantization key |
+
+v2 stores weights in the exact format MLX expects — no conversion at load time.
+Like GGUF: the file IS the runtime format.
+
+Existing v1 models can be upgraded: `jang upgrade <model_path>`
 
 ## Directory Layout
 
-An MXQ model is a directory containing:
+### v2 (MLX-native)
 
 ```
-model-name-MXQ-Xbit/
-  config.json                   # HuggingFace model config (unmodified)
+model-name-JANG_2L/
+  config.json                   # HuggingFace config + quantization key
   tokenizer.json                # HuggingFace tokenizer (unmodified)
   tokenizer_config.json         # Tokenizer settings (unmodified)
   special_tokens_map.json       # Special token mappings (unmodified)
-  mxq_config.json               # MXQ quantization metadata
-  mxq_imatrix.safetensors       # Importance matrix used for quantization
-  model-00001-of-NNNNN.mxq.safetensors  # Quantized weight shards
-  model.mxq.index.json          # Shard index mapping tensor names to files
+  jang_config.json              # JANG quantization metadata
+  model-00001-of-NNNNN.safetensors     # MLX-native quantized weights
+  model.safetensors.index.json         # Standard safetensors index
 ```
 
-## mxq_config.json
+### v1 (legacy)
+
+```
+model-name-JANG_2L/
+  config.json
+  tokenizer.json
+  jang_config.json
+  model-00001-of-NNNNN.jang.safetensors  # JANG-packed uint8 weights
+  model.jang.index.json                   # JANG shard index
+```
+
+## v2 Weight Storage
+
+Each quantized weight matrix is stored as three companion tensors in standard
+safetensors format, using MLX-native naming and shapes:
+
+### weight — packed quantized data
+
+**Name**: `layers.N.self_attn.q_proj.weight`
+**Type**: uint32
+**Shape**: `(out_features, packed_in_features)` or `(num_experts, out_features, packed_in_features)`
+
+Contains the quantized weight values packed into uint32 words, exactly as MLX's
+`quantized_matmul` kernel expects. Each row is independently packed — no
+cross-row byte spanning.
+
+`packed_in_features = ceil(in_features * bits / 32)`
+
+### scales — per-group scale factors
+
+**Name**: `layers.N.self_attn.q_proj.scales`
+**Type**: float16
+**Shape**: `(out_features, n_groups)` or `(num_experts, out_features, n_groups)`
+
+Scale factor for dequantization: `dequantized = quantized_int * scale + bias`
+
+`n_groups = ceil(in_features / group_size)`
+
+### biases — per-group bias values
+
+**Name**: `layers.N.self_attn.q_proj.biases`
+**Type**: float16
+**Shape**: `(out_features, n_groups)` or `(num_experts, out_features, n_groups)`
+
+Bias for asymmetric dequantization. Stored directly (no zero-point round-trip).
+
+## jang_config.json
 
 ```json
 {
-  "format": "mxq",
-  "format_version": "1.0",
+  "format": "jang",
+  "format_version": "2.0",
   "quantization": {
-    "method": "mxq-importance",
-    "target_bits": 2.5,
-    "actual_bits": 2.51,
+    "method": "jang-importance",
+    "profile": "JANG_2L",
+    "target_bits": 2.0,
+    "actual_bits": 2.31,
     "block_size": 64,
-    "calibration_dataset": "mxq-calib-v1",
-    "calibration_samples": 512,
-    "scoring_method": "awq+hessian",
-    "bit_widths_used": [2, 3, 4, 5, 6, 8],
-    "quantization_scheme": "asymmetric"
+    "bit_widths_used": [2, 6, 8],
+    "quantization_scheme": "asymmetric",
+    "quantization_backend": "mx.quantize"
   },
   "source_model": {
-    "name": "Qwen/Qwen3.5-72B",
+    "name": "Qwen/Qwen3.5-122B-A10B",
     "dtype": "bfloat16",
-    "parameters": "72B",
-    "sha256": "..."
-  },
-  "quality_metrics": {
-    "perplexity_bf16": 5.21,
-    "perplexity_mxq": 5.38,
-    "perplexity_uniform_4bit": 5.42
+    "parameters": "122B"
   },
   "runtime": {
-    "recommended_memory_gb": 24,
-    "total_weight_bytes": 23068672000
+    "total_weight_bytes": 49000000000,
+    "total_weight_gb": 45.6
   }
 }
 ```
 
 ### Required fields
 
-- `format`: must be `"mxq"`
-- `format_version`: semantic version string (currently `"1.0"`)
-- `quantization.method`: must be `"mxq-importance"`
-- `quantization.target_bits`: float, the target average bits per weight
-- `quantization.actual_bits`: float, the actual average bits achieved
-- `quantization.block_size`: integer, weights per quantization block (default 64)
-- `quantization.bit_widths_used`: array of integers, bit widths present in this model
-- `source_model.name`: string, HuggingFace model ID or name of source model
+- `format`: must be `"jang"`
+- `format_version`: `"2.0"` for v2, `"1.1"` for v1
+- `quantization.profile`: JANG profile name (e.g., `"JANG_2L"`)
+- `quantization.block_size`: integer (default 64)
+- `quantization.bit_widths_used`: array of integers, bit widths present
+- `source_model.name`: HuggingFace model ID or name
 
-## Weight Tensor Storage
+## config.json (v2)
 
-Each quantized weight matrix is stored as a set of companion tensors in
-safetensors format. For a weight named `layers.N.self_attn.q_proj.weight`,
-the following tensors are stored:
-
-### qweight — packed quantized data
-
-**Name**: `layers.N.self_attn.q_proj.qweight`
-**Type**: uint8
-**Shape**: (total_packed_bytes,)
-
-Contains the quantized weight values packed at their assigned bit widths.
-Blocks are stored contiguously — block 0 first, then block 1, etc.
-
-Within each block, values are packed LSB-first (least significant bit first)
-into bytes. For non-byte-aligned bit widths (3, 5, 6), values span byte
-boundaries.
-
-**Packing example (3-bit, block of 8 weights for illustration):**
-
-```
-Values: [5, 3, 7, 1, 0, 6, 2, 4]  (each 0-7, fits in 3 bits)
-
-Bit stream (LSB first per value):
-  101 011 111 001 000 110 010 100
-
-Packed into bytes:
-  Byte 0: 101_011_11  = 0xEF  (bits 0-7)
-  Byte 1: 1_001_000_1  = 0x91  (bits 8-15)
-  Byte 2: 10_010_100  = 0x94  (bits 16-23)
-
-Total: 8 values × 3 bits = 24 bits = 3 bytes
-```
-
-### scales — per-block scale factors
-
-**Name**: `layers.N.self_attn.q_proj.scales`
-**Type**: float16
-**Shape**: (n_blocks,)
-
-Scale factor for dequantization: `dequantized = (raw_int - zero) * scale`
-
-### zeros — per-block zero points
-
-**Name**: `layers.N.self_attn.q_proj.zeros`
-**Type**: float16
-**Shape**: (n_blocks,)
-
-Zero point for asymmetric quantization.
-
-### bit_map — per-block bit widths
-
-**Name**: `layers.N.self_attn.q_proj.bit_map`
-**Type**: uint8
-**Shape**: (n_blocks,)
-
-The bit width assigned to each block. Values must be in {2, 3, 4, 5, 6, 8}.
-
-### block_offsets — byte offsets into qweight
-
-**Name**: `layers.N.self_attn.q_proj.block_offsets`
-**Type**: uint32
-**Shape**: (n_blocks,)
-
-Byte offset of each block's data within the qweight array. Required because
-variable bit widths mean block sizes in bytes are not uniform.
-
-`block_offsets[i] = sum(ceil(block_size * bit_map[j] / 8) for j in 0..i-1)`
-
-## Dequantization
-
-To recover the float16 value for weight `w` in block `b`:
-
-```
-bits = bit_map[b]
-byte_offset = block_offsets[b]
-in_block_idx = w - b * block_size
-bit_offset = in_block_idx * bits
-byte_idx = byte_offset + bit_offset // 8
-bit_shift = bit_offset % 8
-mask = (1 << bits) - 1
-raw = (read_uint16(qweight[byte_idx:byte_idx+2]) >> bit_shift) & mask
-dequantized = float16(raw - zeros[b]) * scales[b]
-```
-
-Where `read_uint16` reads two bytes in little-endian order. Reading uint16
-handles the case where a value spans a byte boundary.
-
-## Block Layout
-
-Weights in a matrix of shape (out_features, in_features) are divided into
-blocks along the in_features (input channel) dimension:
-
-```
-For weight matrix W[out, in]:
-  n_blocks_per_row = ceil(in_features / block_size)
-  total_blocks = out_features * n_blocks_per_row
-
-  Block index for W[i, j]:
-    block = i * n_blocks_per_row + j // block_size
-```
-
-This layout ensures that blocks correspond to contiguous weight groups along
-the input channel — matching the access pattern during matrix multiplication
-(input activations are dot-producted with weight rows).
-
-## Non-quantized Tensors
-
-Some tensors are stored in full precision (float16 or bfloat16) without
-quantization:
-
-- `model.embed_tokens.weight` — stored at bit width specified in mxq_config
-  (typically 4-bit or higher, but uses the same MXQ block format)
-- `model.norm.weight` — RMSNorm weights, stored as float16
-- `lm_head.weight` — may be quantized at higher bit width or stored as float16
-
-Non-quantized tensors use standard safetensors storage (no companion tensors).
-
-## Shard Index
-
-`model.mxq.index.json` maps tensor names to shard files:
+v2 models add a `quantization` key to the standard HuggingFace config:
 
 ```json
 {
-  "metadata": {
-    "format": "mxq",
-    "total_size": 23068672000
-  },
-  "weight_map": {
-    "layers.0.self_attn.q_proj.qweight": "model-00001-of-00004.mxq.safetensors",
-    "layers.0.self_attn.q_proj.scales": "model-00001-of-00004.mxq.safetensors",
-    "layers.0.self_attn.q_proj.zeros": "model-00001-of-00004.mxq.safetensors",
-    "layers.0.self_attn.q_proj.bit_map": "model-00001-of-00004.mxq.safetensors",
-    "layers.0.self_attn.q_proj.block_offsets": "model-00001-of-00004.mxq.safetensors"
+  "model_type": "qwen3_5_moe",
+  "hidden_size": 3072,
+  "quantization": {
+    "group_size": 64,
+    "bits": 2
   }
 }
 ```
 
-## Importance Matrix
+The `bits` value is the COMPRESS tier (most common bit width). The loader uses
+this to create the model skeleton with `QuantizedLinear` layers, then corrects
+per-layer bit widths by inspecting tensor shapes.
 
-`mxq_imatrix.safetensors` stores the importance scores used during
-quantization, enabling reproducibility and re-quantization at different
-bit targets:
+## Tier System
+
+JANG classifies every tensor into a sensitivity tier:
+
+| Tier | Examples | Sensitivity |
+|------|----------|-------------|
+| CRITICAL | Full softmax attention (q/k/v/o_proj), lm_head, MoE routers, MLA projections, SSM state | Highest — controls coherence |
+| IMPORTANT | Embeddings, linear attention (GatedDeltaNet), shared experts | Moderate — degrades but doesn't break |
+| COMPRESS | MLP gate/up/down, MoE experts, vision FFN, SSM projections | Most robust — bulk of parameters |
+
+Profiles assign bits per tier: `(CRITICAL_bits, IMPORTANT_bits, COMPRESS_bits)`.
+
+## Bit Width Inference
+
+In v2, bit width is NOT stored as a companion tensor. The loader infers it
+from the weight tensor shape:
+
+```python
+in_dim = scales.shape[-1] * group_size
+actual_bits = (weight.shape[-1] * 32) // in_dim
+```
+
+This works because `packed_in_features = ceil(in_features * bits / 32)`.
+
+## MoE Expert Storage
+
+For MoE models, expert weights are pre-stacked into 3D tensors and renamed
+to MLX's `switch_mlp` convention during conversion:
+
+| Source (HuggingFace) | v2 Output (MLX-native) |
+|---|---|
+| `experts.gate_up_proj.weight` [E, 2I, H] | `switch_mlp.gate_proj.weight` [E, I, packed] + `switch_mlp.up_proj.weight` [E, I, packed] |
+| `experts.down_proj.weight` [E, H, I] | `switch_mlp.down_proj.weight` [E, H, packed] |
+| `experts.N.w1.weight` (per-expert) | `switch_mlp.gate_proj.weight` [E, I, packed] (stacked) |
+
+This eliminates per-expert tensor iteration at load time.
+
+## Non-quantized Tensors
+
+Some tensors are stored in full precision (float16) without quantization:
+
+- `model.norm.weight` — RMSNorm weights
+- `layers.N.input_layernorm.weight` — per-layer norms
+- Vision encoder weights (VL models)
+- All `.bias` tensors
+
+## Inference Loading
+
+### v2 (instant)
+
+```python
+# 1. mx.load() via mmap — instant, no data copying
+weights = mx.load("model-00001-of-00004.safetensors")
+
+# 2. model.sanitize() handles any remaining renames
+weights = model.sanitize(weights)
+
+# 3. Load into QuantizedLinear / QuantizedSwitchLinear
+model.load_weights(list(weights.items()), strict=False)
+
+# 4. Fix per-layer bit widths (inferred from tensor shapes)
+_fix_quantized_bits(model)
+```
+
+### v1 (legacy, slow)
 
 ```
-layers.N.self_attn.q_proj.importance   # (n_blocks,) float32
-layers.N.self_attn.q_proj.act_norms    # (in_features,) float32
+1. Read .qweight (uint8), .scales, .biases, .bits from .jang.safetensors
+2. Repack uint8 → uint32 (reinterpret bytes + reshape)
+3. Reshape scales/biases from flat to (out_dim, n_groups)
+4. Split gate_up_proj, stack per-expert weights
+5. Load into model
 ```
+
+## Upgrading v1 → v2
+
+```bash
+jang upgrade /path/to/model
+
+# Or in Python:
+from jang_tools.loader import upgrade_v1_to_v2
+upgrade_v1_to_v2("/path/to/model")
+```
+
+This repacks the weights once and replaces the .jang.safetensors files with
+standard .safetensors files. Model size stays the same.
 
 ## Compatibility
 
-- MXQ files use standard safetensors format — any safetensors reader can
-  parse the container, even if it doesn't understand MXQ semantics.
-- Model config and tokenizer files are unmodified HuggingFace format.
-- The `mxq_config.json` file is the indicator that a directory contains
-  an MXQ model — loaders should check for its presence.
+- v2 files are standard safetensors — any safetensors reader can parse them.
+- `jang_config.json` is what makes a directory a JANG model.
+- The JANG loader auto-detects v1 vs v2 and loads both.
+- v1 models work forever — no forced migration.
 
 ## Versioning
 
-The format version follows semantic versioning:
-- **1.x**: backward-compatible additions (new optional fields)
-- **2.0**: breaking changes to tensor layout or packing
-
-Loaders should check `format_version` and reject versions they don't support.
+- **1.0**: Original format with per-block `bit_map` and `block_offsets`
+- **1.1**: Single `.bits` per tensor, `.shape` for original dimensions
+- **2.0**: MLX-native storage — uint32 weights, float16 scales/biases in standard safetensors. Instant loading.

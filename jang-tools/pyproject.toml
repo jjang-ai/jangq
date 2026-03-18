@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jang"
+version = "2.1.0"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX."
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
+keywords = ["quantization", "llm", "apple-silicon", "metal", "mlx", "jang", "moe", "mixed-precision"]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: MacOS",
+]
+dependencies = ["safetensors>=0.4", "numpy>=1.24", "tqdm>=4.60", "huggingface_hub>=0.20"]
+
+[project.optional-dependencies]
+mlx = ["mlx>=0.22", "mlx-lm>=0.20"]
+vlm = ["mlx>=0.22", "mlx-lm>=0.20", "mlx-vlm>=0.1"]
+torch = ["torch>=2.0", "transformers>=4.40"]
+all = ["jang[mlx]", "jang[vlm]", "jang[torch]"]
+
+[project.scripts]
+jang = "jang_tools.__main__:main"
+
+[project.urls]
+Homepage = "https://jangq.ai"
+Repository = "https://github.com/jjang-ai/jangq"
+Documentation = "https://github.com/jjang-ai/jangq#readme"
+"Bug Tracker" = "https://github.com/jjang-ai/jangq/issues"
+"HuggingFace" = "https://huggingface.co/JANGQ-AI"
+
+[tool.setuptools.packages.find]
+include = ["jang_tools*"]
