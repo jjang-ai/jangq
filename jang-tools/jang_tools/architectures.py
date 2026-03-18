@@ -289,6 +289,13 @@ def detect_architecture(model_path: str | Path) -> ArchConfig:
     arch_config.attention_type = attention_type
     arch_config.model_type = model_type
 
+    # Override has_vision_encoder if config has vision_config or arch is ConditionalGeneration
+    # This catches hybrid models (Qwen3.5 MoE+SSM+VL) that aren't pure VL arch type
+    if not arch_config.has_vision_encoder:
+        if ("vision_config" in config
+                or "ForConditionalGeneration" in str(architectures)):
+            arch_config.has_vision_encoder = True
+
     return arch_config
 
 
@@ -306,8 +313,16 @@ def _classify_architecture(
     def _cfg(key, default=0):
         return config.get(key, tc.get(key, default))
 
-    # --- Vision-Language Models ---
-    if any(vl in model_type.lower() for vl in ["qwen2_vl", "llava", "pixtral", "gemma_vl"]):
+    # --- Detect vision encoder ---
+    # Check model_type, architecture string, and vision_config presence
+    has_vision = (
+        any(vl in model_type.lower() for vl in ["qwen2_vl", "llava", "pixtral", "gemma_vl"])
+        or "vision_config" in config
+        or "ForConditionalGeneration" in arch_str  # HF convention for VLMs
+    )
+
+    # --- Pure Vision-Language Models (no SSM/MoE) ---
+    if has_vision and not _cfg("layer_types", None) and not _cfg("num_local_experts", _cfg("num_experts", 0)):
         layers = {**TRANSFORMER_LAYER_CONFIGS, **VISION_LAYER_CONFIGS}
         return ArchConfig(
             arch_type=ArchType.VISION_LANGUAGE,
