@@ -278,8 +278,9 @@ def convert_model(
     # Proven empirically: shared_expert at <4-bit + hidden_size>=4096 → float16 inf.
     # Routed experts at 2-bit + 512+ experts → NaN on 397B.
     from .allocate import classify_tensor, Tier
-    hidden_size = model_config.get("hidden_size",
-                    model_config.get("text_config", {}).get("hidden_size", 0))
+    _cfg = json.loads((model_path / "config.json").read_text())
+    hidden_size = _cfg.get("hidden_size",
+                    _cfg.get("text_config", {}).get("hidden_size", 0))
     danger_tensors = {}
     for i, tname in enumerate(all_tensor_names_for_alloc):
         bits = int(global_bit_alloc[i])
