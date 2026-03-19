@@ -99,8 +99,11 @@ TIER_RULES = [
     # MiniMax specifically requires router at 8-bit or output degrades to garbage.
     # Small tensor but maximum sensitivity.
     ("shared_expert_gate", Tier.CRITICAL),
-    # DeepSeek shared experts (always active, more important than routed experts)
-    ("shared_expert", Tier.IMPORTANT),
+    # Shared experts are ALWAYS active (process every token). Quantization errors
+    # compound through every layer. The SiLU gate multiplication amplifies errors
+    # quadratically: gate_error * up_error. At 3-bit on hidden_size>=4096, this
+    # causes float16 overflow (proven on 397B). Must be CRITICAL (4+ bit minimum).
+    ("shared_expert", Tier.CRITICAL),
     # "gate" alone is tricky — could be MoE router OR MLP gate_proj
     # gate_proj will match gate_proj rule below (COMPRESS) before reaching here
 
