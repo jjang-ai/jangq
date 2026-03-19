@@ -638,13 +638,29 @@ def convert_model(
             else:
                 tokenizer_files[tok_file] = tok_path.read_text()
 
-    # Copy VL processor files
+    # Copy VL processor, chat template, and custom model code files.
+    # Chat templates are CRITICAL — missing or wrong template causes:
+    #   - Qwen3.5: infinite thinking loops if eos_token_id wrong
+    #   - MiniMax: loops if enable_thinking toggle missing from template
+    # Custom .py files needed for trust_remote_code models (Nemotron, MiniMax)
     output_path.mkdir(parents=True, exist_ok=True)
-    for vl_file in ["preprocessor_config.json", "video_preprocessor_config.json",
-                     "chat_template.json", "chat_template.jinja"]:
-        vl_path = model_path / vl_file
-        if vl_path.exists():
-            shutil.copy2(str(vl_path), str(output_path / vl_file))
+    for extra_file in ["preprocessor_config.json", "video_preprocessor_config.json",
+                       "chat_template.json", "chat_template.jinja",
+                       "generation_config.json",
+                       "configuration_minimax_m2.py", "modeling_minimax_m2.py"]:
+        extra_path = model_path / extra_file
+        if extra_path.exists():
+            shutil.copy2(str(extra_path), str(output_path / extra_file))
+
+    # Verify chat template exists in tokenizer_config or as .jinja file
+    tok_cfg_path = output_path / "tokenizer_config.json" if "tokenizer_config.json" in tokenizer_files else None
+    has_inline_template = False
+    if "tokenizer_config.json" in tokenizer_files:
+        tc = tokenizer_files["tokenizer_config.json"]
+        has_inline_template = bool(tc.get("chat_template"))
+    has_jinja = (output_path / "chat_template.jinja").exists()
+    if not has_inline_template and not has_jinja:
+        print("  ⚠ WARNING: No chat template found (inline or .jinja). Model may loop during inference.")
 
     write_jang_v2_model(
         output_dir=output_path,
