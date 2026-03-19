@@ -140,8 +140,18 @@ TIER_RULES = [
     ("patch_embed", Tier.IMPORTANT),
     ("pos_embed", Tier.IMPORTANT),
 
-    # ── SSM Projections (Mamba) ──────────────────────────────
-    ("x_proj", Tier.COMPRESS),
+    # ── Latent MoE Projections (Nemotron-H) ──────────────────
+    # fc1_latent_proj compresses hidden→latent, fc2 decompresses latent→hidden.
+    # ALL expert computation flows through this bottleneck. At 2-bit the 1024-dim
+    # latent loses too much — must be CRITICAL.
+    ("latent_proj", Tier.CRITICAL),
+
+    # ── SSM Projections (Mamba / Nemotron-H) ─────────────────
+    # Mamba mixer.in_proj/out_proj are always-active SSM projections.
+    # Must come BEFORE generic "proj" catch-all.
+    ("mixer.in_proj", Tier.IMPORTANT),
+    ("mixer.out_proj", Tier.IMPORTANT),
+    ("x_proj", Tier.IMPORTANT),
     ("conv1d", Tier.COMPRESS),
 
     # ── MoE Expert MLP (fused) ───────────────────────────────
