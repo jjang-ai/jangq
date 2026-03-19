@@ -154,6 +154,8 @@ def convert_model(
             print(f"  Loaded pre-computed imatrix: {imatrix_path}")
         elif calibration_method == "weights":
             # Save imatrix to output dir (not source dir) to avoid polluting source
+            if output_path:
+                output_path.mkdir(parents=True, exist_ok=True)
             imatrix_out = output_path / "jang_imatrix.safetensors" if output_path else None
             importance_data = calibrate_from_weights(model_path, block_size, output_path=imatrix_out)
         else:
@@ -270,6 +272,38 @@ def convert_model(
     print(f"  Total blocks: {alloc_summary['total_blocks']:,}")
     for bw, info in alloc_summary["histogram"].items():
         print(f"    {bw}: {info['count']:,} blocks ({info['percent']}%)")
+
+    # ── Safety check: precision floor warnings ──────────────────────
+    # Detect dangerous combinations that cause NaN/overflow.
+    # Proven empirically: shared_expert at <4-bit + hidden_size>=4096 → float16 inf.
+    # Routed experts at 2-bit + 512+ experts → NaN on 397B.
+    from .allocate import classify_tensor, Tier
+    hidden_size = model_config.get("hidden_size",
+                    model_config.get("text_config", {}).get("hidden_size", 0))
+    danger_tensors = {}
+    for i, tname in enumerate(all_tensor_names_for_alloc):
+        bits = int(global_bit_alloc[i])
+        tier = classify_tensor(tname)
+        # Shared expert at <4 bit with large hidden_size
+        if "shared_expert" in tname and "gate" not in tname and bits < 4 and hidden_size >= 4096:
+            danger_tensors.setdefault(tname, bits)
+        # Always-active components at <3 bit
+        if tier == Tier.CRITICAL and bits < 4:
+            danger_tensors.setdefault(tname, bits)
+
+    if danger_tensors:
+        print(f"\n  ⚠ PRECISION WARNING: {len(set(danger_tensors.values()))} tensor types below safe floor")
+        shown = set()
+        for tname, bits in danger_tensors.items():
+            # Show one example per unique type
+            base = tname.split(".")[-1] if "." in tname else tname
+            if base not in shown:
+                print(f"    {tname}: {bits}-bit (min recommended: 4-bit)")
+                shown.add(base)
+                if len(shown) >= 5:
+                    break
+        print(f"    This may cause float16 overflow (NaN) on large models.")
+        print(f"    Consider using a higher-bit profile or reclassifying these tensors.\n")
 
     # Step 4: Quantize and build MLX-native tensors
     print(f"\n  [4/5] Quantizing to MLX-native format ({quantization_method})...")

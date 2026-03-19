@@ -44,18 +44,40 @@ def _prev_bit_width(current: int) -> Optional[int]:
 # Every weight tensor is classified into one of three sensitivity tiers:
 #
 #   CRITICAL  — Directly controls output quality. Quantization errors here
-#               cause repetition loops, incoherence, or total failure.
+#               cause repetition loops, incoherence, NaN overflow, or total failure.
+#               MUST be 4+ bits. At lower bits, the SiLU gate multiplication
+#               amplifies quantization errors quadratically → float16 overflow.
+#
 #               Examples: full softmax attention projections, output heads,
-#               MLA latent projections, SSM state matrices.
+#               MLA latent projections, SSM state matrices, MoE routers,
+#               shared experts (always-active MLP — errors compound every layer).
 #
 #   IMPORTANT — Moderate sensitivity. Errors degrade but don't destroy quality.
-#               Examples: embeddings, MoE routers, vision-language connectors,
-#               shared experts, SSM timestep projections.
+#               Examples: embeddings, vision-language connectors,
+#               linear attention projections (GatedDeltaNet), SSM timestep.
 #
 #   COMPRESS  — Most robust to quantization. Can go to 2-bit with minimal
-#               quality loss. Examples: MLP/FFN layers (dense or expert),
-#               linear attention projections (RWKV/DeltaNet), vision FFN,
-#               SSM input/output projections.
+#               quality loss on MoE models (expert redundancy absorbs errors).
+#               WARNING: 2-bit on dense model MLP causes quality collapse.
+#               WARNING: 2-bit on 512+ expert models may cause NaN (proven on 397B).
+#
+#               Examples: MLP/FFN layers (dense or expert),
+#               linear attention out_proj, vision FFN, SSM input/output projections.
+#
+# ── Precision Floor Rules (proven empirically) ──────────────
+#
+#   Component              | Min bits | Why
+#   -----------------------|----------|--------------------------------------------
+#   Shared expert (always  | 4-bit    | SiLU(gate)*up amplifies errors quadratically.
+#     active MLP)          |          | 3-bit → 45x output error → float16 inf (397B).
+#   MoE router/gate        | 8-bit    | Controls expert routing. Lower → garbage.
+#   Attention Q/K/V/O      | 4-bit    | Controls coherence. Lower → repetition loops.
+#   Embeddings             | 4-bit    | First layer, errors propagate everywhere.
+#   Routed experts (MoE)   | 2-bit*   | Redundancy across K-of-N absorbs errors.
+#                          |          | *BUT 2-bit fails on 512+ experts (397B NaN).
+#   Dense MLP              | 3-bit    | No redundancy. 2-bit → quality cliff.
+#   Linear attention (GDN) | 3-bit    | Always active but lower sensitivity.
+#
 #
 
 class Tier(IntEnum):
