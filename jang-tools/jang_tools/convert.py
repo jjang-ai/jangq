@@ -137,6 +137,13 @@ def convert_model(
             # 64-149 experts: warn but keep 64 (quality vs speed tradeoff)
             print(f"  Note: {num_experts} experts. Consider -b 128 if speed is priority.")
 
+    # MLP asymmetry fix for 512+ expert models.
+    # gate_proj→IMPORTANT (4-bit), down_proj→3-bit floor, up_proj→COMPRESS (2-bit OK).
+    # Prevents SiLU amplification → float16 overflow → NaN (proven on 397B + Nemotron).
+    # See research/397B-MLP-ASYMMETRY.md for full analysis.
+    if num_experts >= 512:
+        print(f"  MLP asymmetry: 512+ experts → gate_proj=IMPORTANT(4-bit), down_proj=3-bit floor")
+
     # Step 2: Calibrate (compute importance scores)
     # Skip calibration for profile and K-quant allocation — they use tier
     # classification only, never importance scores. Saves 10-30 seconds.
@@ -249,14 +256,19 @@ def convert_model(
         print(f"  Using K-quant: {profile} (target: {k_target} avg bits)")
         global_bit_alloc = allocate_bits_budget(
             all_tensor_names_for_alloc, target_bits=k_target,
+            num_experts=num_experts,
         )
     elif profile:
         print(f"  Using profile: {profile}")
-        global_bit_alloc = allocate_bits_profile(all_tensor_names_for_alloc, profile)
+        global_bit_alloc = allocate_bits_profile(
+            all_tensor_names_for_alloc, profile,
+            num_experts=num_experts,
+        )
     elif target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
         print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
         global_bit_alloc = allocate_bits_budget(
             all_tensor_names_for_alloc, target_bits=target_bits,
+            num_experts=num_experts,
         )
     else:
         global_bit_alloc = allocate_bits_greedy(
@@ -264,7 +276,7 @@ def convert_model(
             n_layers=n_layers, block_size=block_size,
         )
 
-    alloc_summary = summarize_allocation(global_bit_alloc, all_tensor_names_for_alloc)
+    alloc_summary = summarize_allocation(global_bit_alloc, all_tensor_names_for_alloc, num_experts)
     actual_bits = alloc_summary["average_bits"]
 
     print(f"  Target bits: {target_bits}")
@@ -284,13 +296,23 @@ def convert_model(
     danger_tensors = {}
     for i, tname in enumerate(all_tensor_names_for_alloc):
         bits = int(global_bit_alloc[i])
-        tier = classify_tensor(tname)
+        tier = classify_tensor(tname, num_experts)
         # Shared expert at <4 bit with large hidden_size
         if "shared_expert" in tname and "gate" not in tname and bits < 4 and hidden_size >= 4096:
             danger_tensors.setdefault(tname, bits)
         # Always-active components at <3 bit
         if tier == Tier.CRITICAL and bits < 4:
             danger_tensors.setdefault(tname, bits)
+        # MLP asymmetry: gate_proj of routed experts at <4 bit on 512+ expert models
+        if num_experts >= 512 and bits < 4 and "shared_expert" not in tname:
+            tname_lower = tname.lower()
+            if "gate_proj" in tname_lower or "gate_up_proj" in tname_lower:
+                danger_tensors.setdefault(tname, bits)
+        # down_proj of routed experts at <3 bit on 512+ expert models
+        if num_experts >= 512 and bits < 3 and "shared_expert" not in tname:
+            tname_lower = tname.lower()
+            if "down_proj" in tname_lower:
+                danger_tensors.setdefault(tname, bits)
 
     if danger_tensors:
         print(f"\n  ⚠ PRECISION WARNING: {len(set(danger_tensors.values()))} tensor types below safe floor")
@@ -303,6 +325,9 @@ def convert_model(
                 shown.add(base)
                 if len(shown) >= 5:
                     break
+        if num_experts >= 512:
+            print(f"    512+ experts with hidden_size={hidden_size}: MLP asymmetry risk.")
+            print(f"    gate_proj needs 4-bit min (SiLU amplifier), down_proj needs 3-bit min.")
         print(f"    This may cause float16 overflow (NaN) on large models.")
         print(f"    Consider using a higher-bit profile or reclassifying these tensors.\n")
 
@@ -631,7 +656,7 @@ def convert_model(
     # Copy tokenizer files
     tokenizer_files = {}
     for tok_file in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
-                     "tokenizer.model", "merges.txt", "vocab.json"]:
+                     "tokenizer.model", "merges.txt", "vocab.json", "added_tokens.json"]:
         tok_path = model_path / tok_file
         if tok_path.exists():
             if tok_file.endswith(".json"):
@@ -639,22 +664,62 @@ def convert_model(
             else:
                 tokenizer_files[tok_file] = tok_path.read_text()
 
-    # Copy VL processor, chat template, and custom model code files.
+    # ── eos_token_id auto-fix ──────────────────────────────────
+    # Qwen3.5 source ships with eos_token_id=248044 (<|endoftext|>) which is WRONG.
+    # Correct: 248046 (<|im_end|>). Wrong eos causes infinite thinking loops.
+    # Fix in BOTH config.json and tokenizer_config.json.
+    _eos_fixes = {
+        "qwen3_5_moe": {248044: 248046},  # <|endoftext|> → <|im_end|>
+        "qwen3_5": {248044: 248046},
+    }
+    model_type = model_config.get("model_type", "")
+    text_cfg = model_config.get("text_config", {})
+    if not model_type:
+        model_type = text_cfg.get("model_type", "")
+    eos_fix_map = _eos_fixes.get(model_type, {})
+    if eos_fix_map:
+        # Fix in text_config
+        old_eos = text_cfg.get("eos_token_id")
+        if old_eos in eos_fix_map:
+            new_eos = eos_fix_map[old_eos]
+            text_cfg["eos_token_id"] = new_eos
+            model_config["text_config"] = text_cfg
+            print(f"  eos_token_id fix: {old_eos} → {new_eos} (text_config)")
+        # Fix in top-level config
+        old_eos_top = model_config.get("eos_token_id")
+        if old_eos_top in eos_fix_map:
+            model_config["eos_token_id"] = eos_fix_map[old_eos_top]
+            print(f"  eos_token_id fix: {old_eos_top} → {eos_fix_map[old_eos_top]} (top-level)")
+        # Fix in tokenizer_config.json
+        if "tokenizer_config.json" in tokenizer_files:
+            tc = tokenizer_files["tokenizer_config.json"]
+            if tc.get("eos_token_id") in eos_fix_map:
+                tc["eos_token_id"] = eos_fix_map[tc["eos_token_id"]]
+
+    # Copy VL processor, chat template, and extra config files.
     # Chat templates are CRITICAL — missing or wrong template causes:
     #   - Qwen3.5: infinite thinking loops if eos_token_id wrong
     #   - MiniMax: loops if enable_thinking toggle missing from template
-    # Custom .py files needed for trust_remote_code models (Nemotron, MiniMax)
     output_path.mkdir(parents=True, exist_ok=True)
-    for extra_file in ["preprocessor_config.json", "video_preprocessor_config.json",
-                       "chat_template.json", "chat_template.jinja",
-                       "generation_config.json",
-                       "configuration_minimax_m2.py", "modeling_minimax_m2.py"]:
+    extra_configs = ["preprocessor_config.json", "video_preprocessor_config.json",
+                     "chat_template.json", "chat_template.jinja",
+                     "generation_config.json"]
+    for extra_file in extra_configs:
         extra_path = model_path / extra_file
         if extra_path.exists():
             shutil.copy2(str(extra_path), str(output_path / extra_file))
 
+    # Copy ALL custom .py files (trust_remote_code models: Nemotron, MiniMax, etc.)
+    # Auto-detect instead of hardcoding specific filenames.
+    py_files_copied = []
+    for f in model_path.iterdir():
+        if f.suffix == ".py" and f.is_file():
+            shutil.copy2(str(f), str(output_path / f.name))
+            py_files_copied.append(f.name)
+    if py_files_copied:
+        print(f"  Custom .py files: {', '.join(py_files_copied)}")
+
     # Verify chat template exists in tokenizer_config or as .jinja file
-    tok_cfg_path = output_path / "tokenizer_config.json" if "tokenizer_config.json" in tokenizer_files else None
     has_inline_template = False
     if "tokenizer_config.json" in tokenizer_files:
         tc = tokenizer_files["tokenizer_config.json"]

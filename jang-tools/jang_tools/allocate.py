@@ -78,6 +78,27 @@ def _prev_bit_width(current: int) -> Optional[int]:
 #   Dense MLP              | 3-bit    | No redundancy. 2-bit → quality cliff.
 #   Linear attention (GDN) | 3-bit    | Always active but lower sensitivity.
 #
+# ── MLP Asymmetry (512+ expert models) ────────────────────
+#
+#   Expert MLP tensors are NOT equal in sensitivity:
+#
+#   gate_proj → SiLU amplifier. Errors get squared through SiLU(gate)*up.
+#              At 3-bit on hidden=4096: produces 45x error → float16 overflow.
+#              MUST be 4-bit on 512+ expert models.
+#
+#   up_proj   → Linear multiplicand. Errors are bounded, not amplified.
+#              2-bit is safe IF gate_proj has sufficient precision.
+#
+#   down_proj → Projects back to residual stream. Every subsequent layer
+#              sees this output. GGUF always gives +1 bit (Q3_K in Q2_K).
+#              3-bit minimum on 512+ expert models.
+#
+#   Budget-neutral: (gate=4 + up=2 + down=3) / 3 = 3.0 average.
+#   Same size as uniform 3-bit, but prevents float16 overflow.
+#
+#   See research/397B-MLP-ASYMMETRY.md for full analysis.
+#
+#
 #
 
 class Tier(IntEnum):
@@ -201,15 +222,20 @@ TIER_RULES = [
 # We handle it in classify_tensor() directly
 
 
-def classify_tensor(tensor_name: str) -> Tier:
+def classify_tensor(tensor_name: str, num_experts: int = 0) -> Tier:
     """
     Classify a tensor into a sensitivity tier based on its name.
 
     Uses substring matching with priority ordering. First match wins.
     Handles edge cases like "gate" (MoE router) vs "gate_proj" (MLP).
 
+    Note: For 512+ expert models, MLP asymmetry bit floors are enforced
+    in the allocator functions (allocate_bits_profile, allocate_bits_budget),
+    not here. This function only handles tier classification.
+
     Args:
         tensor_name: full tensor name (e.g., "model.layers.5.self_attn.q_proj.weight")
+        num_experts: number of MoE experts (0 for dense, passed for future use)
 
     Returns:
         Tier enum value
@@ -235,6 +261,44 @@ def classify_tensor(tensor_name: str) -> Tier:
 
     # Default: COMPRESS (assume it's some form of MLP/projection we don't recognize)
     return Tier.COMPRESS
+
+
+def _is_routed_expert_mlp(name_lower: str, component: str) -> bool:
+    """Check if a tensor is a routed expert MLP component (not shared_expert)."""
+    return component in name_lower and "shared_expert" not in name_lower
+
+
+# ── MLP asymmetry bit floors for 512+ expert models ──────────
+# Applied as post-classification floors in allocator functions.
+# gate_proj: SiLU amplifier → 4-bit minimum (prevents 45x error on hidden=4096)
+# down_proj: residual projection → 3-bit minimum (matches GGUF Q2_K behavior)
+# up_proj: linear multiplicand → no floor (2-bit OK when gate is protected)
+# Budget impact: depends on profile. For 2-bit profiles, (4+2+3)/3 = 3.0 avg.
+MLP_ASYMMETRY_FLOORS = {
+    "gate_proj": 4,
+    "gate_up_proj": 4,  # Fused variant, conservative (contains gate)
+    "w1": 4,            # Mixtral naming for gate_proj
+    "down_proj": 3,
+    "w2": 3,            # Mixtral naming for down_proj
+}
+
+
+def _apply_mlp_asymmetry_floor(name: str, bits: int, num_experts: int) -> int:
+    """
+    Apply MLP asymmetry bit floors for 512+ expert models.
+
+    Returns the adjusted bit width (may be higher than input if floor applies).
+    Only affects routed expert MLP tensors, not shared_expert.
+    """
+    if num_experts < 512:
+        return bits
+    name_lower = name.lower()
+    if "shared_expert" in name_lower:
+        return bits  # shared_expert is already CRITICAL, don't touch
+    for component, floor in MLP_ASYMMETRY_FLOORS.items():
+        if component in name_lower:
+            return max(bits, floor)
+    return bits
 
 
 # ============================================================
@@ -410,6 +474,7 @@ def classify_layer(tensor_name: str) -> tuple[str, Optional[int], int]:
 def allocate_bits_budget(
     tensor_names: list[str],
     target_bits: float = 4.0,
+    num_experts: int = 0,
 ) -> np.ndarray:
     """
     Budget-neutral bit allocation — same total bits as uniform, smarter distribution.
@@ -419,9 +484,13 @@ def allocate_bits_budget(
 
     Like GGUF K-quants: same size as uniform, better quality.
 
+    For 512+ expert models, classify_tensor applies MLP asymmetry
+    (gate_proj → IMPORTANT) and down_proj gets a 3-bit floor.
+
     Args:
         tensor_names: tensor name per block (repeated for each block in tensor)
         target_bits: target average bits (e.g., 4.0 to match MLX 4-bit size)
+        num_experts: number of MoE experts (0 for dense models)
 
     Returns:
         uint8 array of bit widths per block
@@ -431,7 +500,7 @@ def allocate_bits_budget(
     for i, name in enumerate(tensor_names):
         if name not in unique_tensors:
             unique_tensors[name] = {
-                "tier": classify_tensor(name),
+                "tier": classify_tensor(name, num_experts),
                 "params": 0,
                 "indices": [],
             }
@@ -519,6 +588,10 @@ def allocate_bits_budget(
             for name, n_blocks in compress_tensors:
                 if remaining <= 0:
                     break
+                # Apply MLP asymmetry floor: don't downgrade below the floor
+                floor = _apply_mlp_asymmetry_floor(name, lower_bits, num_experts)
+                if floor > lower_bits:
+                    continue  # Can't downgrade this tensor (floor prevents it)
                 savings = (base_bits - lower_bits) * n_blocks
                 tensor_bits[name] = lower_bits
                 remaining -= savings
@@ -535,6 +608,7 @@ def allocate_bits_budget(
 def allocate_bits_profile(
     tensor_names: list[str],
     profile: str = "JANG_3M",
+    num_experts: int = 0,
 ) -> np.ndarray:
     """
     Tier-based bit allocation — classifies each tensor into a sensitivity
@@ -543,9 +617,16 @@ def allocate_bits_profile(
     Works for ANY architecture: dense transformer, MoE, hybrid SSM,
     MLA, VL, Mamba, etc. No tensor name hardcoding needed.
 
+    For 512+ expert models, applies MLP asymmetry fix:
+      - gate_proj of routed experts → IMPORTANT tier (4-bit min)
+      - down_proj of routed experts → 3-bit floor (prevents residual corruption)
+      - up_proj stays COMPRESS (2-bit OK when gate is protected)
+      Budget-neutral at (4+2+3)/3 = 3.0 avg for 3-bit profiles.
+
     Args:
         tensor_names: tensor name for each block
         profile: e.g. "JANG_3M", "JANG_4S", "JANG_2M" (case-insensitive)
+        num_experts: number of MoE experts (0 for dense models)
 
     Returns:
         uint8 array of bit widths per block
@@ -568,7 +649,11 @@ def allocate_bits_profile(
     cache = {}
     for i, name in enumerate(tensor_names):
         if name not in cache:
-            cache[name] = tier_to_bits[classify_tensor(name)]
+            assigned = tier_to_bits[classify_tensor(name, num_experts)]
+            # Apply MLP asymmetry floors for 512+ expert models.
+            # gate_proj → 4-bit min (SiLU amplifier), down_proj → 3-bit min.
+            assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
+            cache[name] = assigned
         bits[i] = cache[name]
 
     return bits
@@ -726,6 +811,7 @@ def allocate_bits_dp(
 def summarize_allocation(
     bit_map: np.ndarray,
     tensor_names: Optional[list[str]] = None,
+    num_experts: int = 0,
 ) -> dict:
     """
     Generate a summary of the bit allocation.
@@ -750,7 +836,7 @@ def summarize_allocation(
     if tensor_names:
         tier_bits = {Tier.CRITICAL: [], Tier.IMPORTANT: [], Tier.COMPRESS: []}
         for i, name in enumerate(tensor_names):
-            tier = classify_tensor(name)
+            tier = classify_tensor(name, num_experts)
             tier_bits[tier].append(int(bit_map[i]))
 
         result["per_tier"] = {}

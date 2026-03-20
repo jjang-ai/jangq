@@ -132,6 +132,22 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     if not hasattr(model, "config"):
         model.config = config
 
+    # ── bfloat16 compute for 512+ expert models ──────────────────
+    # Models with 512+ experts and hidden_size>=4096 overflow float16
+    # at the shared expert down_proj (SiLU*up product → 4096-dim dot product
+    # exceeds float16 max 65504). bfloat16 has same range as float32
+    # (max 3.4e38) so it handles this without any quality loss.
+    # See research/397B-BFLOAT16-FIX.md for full analysis.
+    _model_cfg = json.loads((path / "config.json").read_text())
+    _text_cfg = _model_cfg.get("text_config", _model_cfg)
+    _n_experts = _text_cfg.get("num_experts",
+                    _text_cfg.get("num_local_experts",
+                    _text_cfg.get("n_routed_experts", 0)))
+    _hidden = _text_cfg.get("hidden_size", 0)
+    if _n_experts >= 512 and _hidden >= 4096:
+        model.set_dtype(mx.bfloat16)
+        logger.info(f"  bfloat16 enabled: {_n_experts} experts, hidden={_hidden} (float16 overflow prevention)")
+
     mx.eval(model.parameters())
     elapsed = time.perf_counter() - start
 
@@ -278,6 +294,17 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
 
     if not hasattr(model, "config"):
         model.config = model_config
+
+    # ── bfloat16 for 512+ expert models (same as text loader) ──
+    _model_cfg = json.loads((path / "config.json").read_text())
+    _text_cfg = _model_cfg.get("text_config", _model_cfg)
+    _n_experts = _text_cfg.get("num_experts",
+                    _text_cfg.get("num_local_experts",
+                    _text_cfg.get("n_routed_experts", 0)))
+    _hidden = _text_cfg.get("hidden_size", 0)
+    if _n_experts >= 512 and _hidden >= 4096:
+        model.set_dtype(mx.bfloat16)
+        logger.info(f"  bfloat16 enabled: {_n_experts} experts, hidden={_hidden}")
 
     mx.eval(model.parameters())
     elapsed = time.perf_counter() - start

@@ -98,22 +98,42 @@ Per-subject breakdown (out of 20):
 | World Religions | 5 | 7 | 15 | 3 | 14 | 16 |
 | **Total** | **51** | **51** | **141** | **44** | **128** | **145** |
 
+### Dense at 4-bit: JANG_4S matches MLX
+
+| Model | JANG_4S | MLX 4-bit | JANG Size | MLX Size | Speed |
+|-------|---------|-----------|-----------|----------|-------|
+| Qwen3.5-27B | **84.5%** | 84.5% | 16 GB | 14 GB | 35 tok/s |
+
+JANG_4S (6,4,4) works on dense because COMPRESS=4 bit (same as MLX) with only attention
+boosted to 6-bit. Minimal overhead, matching quality, faster inference.
+
 ## Key Findings
 
 ### Where JANG wins:
-- **2-bit on ALL models**: JANG_2S always beats MLX 2-bit (+16 on 4B, +3.5 on 9B, +22.5 on 122B, +45 on 35B)
+- **2-bit on ALL MoE models**: JANG_2S always beats MLX 2-bit (+16 on 4B, +3.5 on 9B, +22.5 on 122B, +45 on 35B)
 - **MoE at all bit levels**: JANG_4K beats MLX 4-bit on 122B (+1%) and 35B (+2%)
 - **MiniMax**: JANG is the ONLY working option (MLX broken at ALL bit levels)
 - **Extreme compression (2-bit MoE)**: JANG_2S 79% vs MLX 56.5% on 122B
+- **Dense at 4-bit**: JANG_4S matches MLX 4-bit on 27B (84.5% = 84.5%)
 
 ### Where MLX uniform wins:
-- **Dense/hybrid at 3-bit**: MLX 3-bit beats JANG_3K (48.5% vs 29.5% on 4B, 64% vs 25.5% on 9B)
-- **Dense/hybrid at 4-bit**: MLX 4-bit beats JANG_4K (67% vs 62.5% on 4B, 72.5% vs 70.5% on 9B)
+- **Dense/hybrid at 3-bit with K-quant**: MLX 3-bit beats JANG_3K (48.5% vs 29.5% on 4B, 64% vs 25.5% on 9B)
+- **Dense/hybrid at 4-bit with K-quant**: MLX 4-bit beats JANG_4K (67% vs 62.5% on 4B, 72.5% vs 70.5% on 9B)
+- Note: K-quant (budget-neutral) downgrades some tensors to compensate for CRITICAL boost.
+  Use JANG_4S (fixed profile) instead of JANG_4K (budget-neutral) for dense 4-bit models.
+
+### Dense model profile guide:
+- **JANG_4S** (6,4,4): Best for dense. COMPRESS=4 (same as MLX), attention at 6-bit. Proven 84.5%.
+- **JANG_4K** (budget): Worse on dense small models (4B/9B) because it downgrades some tensors below 4-bit to compensate.
+- **JANG_4L** (8,6,4): Bad on dense. IMPORTANT=6-bit overhead too high. 32.5% on 27B.
+- **JANG_2S/2L**: Bad on dense. 2-bit MLP kills quality (no expert redundancy).
 
 ### Why:
-Dense models have 15-25% CRITICAL parameters (attention). Boosting CRITICAL to 8-bit and downgrading COMPRESS to compensate hurts dense models because the COMPRESS tier covers a smaller fraction. On MoE models, CRITICAL is <5% of params, so the boost is nearly free.
+MoE models have expert redundancy (256-512 experts). 2-bit experts = OK.
+Dense models have ONE MLP per layer — 2-bit MLP = quality cliff.
+At 4-bit, both work fine. Use JANG_4S for dense, JANG_4K/4M for MoE.
 
-**JANG's value: 2-bit (where uniform fails) + MoE (where CRITICAL is <5%) + broken architectures (MiniMax).**
+**JANG's value: MoE at all bits + dense at 4-bit (4S) + broken architectures (MiniMax).**
 
 ## VLM Support
 
