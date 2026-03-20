@@ -117,12 +117,62 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     weight_files = _get_v2_weight_files(path)
     logger.info(f"  Loading {len(weight_files)} safetensors shards via mmap")
 
+    # Detect Nemotron-H: needs fc1/fc2 rename + gate dequantization
+    _model_cfg = json.loads((path / "config.json").read_text())
+    _is_nemotron = _model_cfg.get("model_type", "") == "nemotron_h"
+    _nemotron_renames = {
+        "switch_mlp.up_proj": "switch_mlp.fc1",
+        "switch_mlp.down_proj": "switch_mlp.fc2",
+    }
+
     for sf in weight_files:
         weights = mx.load(str(sf))
         weights = {k: v for k, v in weights.items()
-                   if not k.endswith(".importance")}
+                   if not k.endswith(".importance") and not k.startswith("mtp.")}
         if hasattr(model, "sanitize"):
             weights = model.sanitize(weights)
+
+        # Nemotron-H: rename switch_mlp keys + dequantize gate weights
+        if _is_nemotron:
+            renamed = {}
+            gate_parts = {}  # prefix -> {scales, biases}
+            for k, v in weights.items():
+                new_k = k
+                # Collect gate scales/biases for dequantization
+                if ".gate." in k and (k.endswith(".scales") or k.endswith(".biases")):
+                    prefix = k.rsplit(".", 1)[0]
+                    gate_parts.setdefault(prefix, {})[k.rsplit(".", 1)[1]] = v
+                    continue
+                # Apply fc1/fc2 rename
+                for old, new in _nemotron_renames.items():
+                    if old in k:
+                        new_k = k.replace(old, new)
+                        break
+                renamed[new_k] = v
+            # Dequantize gate weights (uint32 packed → float)
+            # Gate is nn.Linear (not QuantizedLinear), needs float weights
+            for prefix, parts in gate_parts.items():
+                wkey = f"{prefix}.weight"
+                if wkey in renamed and "scales" in parts:
+                    qw = renamed[wkey]
+                    scales = parts["scales"]
+                    biases = parts.get("biases", mx.zeros_like(scales))
+                    # Infer bits from shapes: try common bit widths
+                    for bits in [8, 6, 4, 3, 2]:
+                        elem_per_u32 = 32 // bits
+                        real_cols = qw.shape[-1] * elem_per_u32
+                        gs = real_cols // scales.shape[-1] if scales.shape[-1] > 0 else 0
+                        if gs > 0 and gs * scales.shape[-1] == real_cols:
+                            try:
+                                dq = mx.dequantize(qw, scales, biases, gs, bits)
+                                mx.eval(dq)
+                                renamed[wkey] = dq.astype(mx.bfloat16)
+                                logger.info(f"  Dequantized gate: {wkey} bits={bits} gs={gs} → {dq.shape}")
+                                break
+                            except Exception:
+                                continue
+            weights = renamed
+
         model.load_weights(list(weights.items()), strict=False)
         del weights
         gc.collect()
