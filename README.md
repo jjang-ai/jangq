@@ -6,7 +6,7 @@
   <a href="https://mlx.studio"><img src="https://mlx.studio/assets/screenshots/mlx-studio-featured.png?v=1" alt="MLX Studio App" width="600"></a>
 </p>
 
-<h4 align="center"><a href="https://mlx.studio">MLX Studio</a> — the only app that natively supports JANG models</h4>
+<h4 align="center"><a href="https://mlx.studio">MLX Studio</a> — the only app that natively supports JANG models with reasoning</h4>
 
 ---
 
@@ -39,53 +39,112 @@
   <a href="https://github.com/jjang-ai/jangq/blob/main/FORMAT.md">Format Spec</a>
 </p>
 
+## Highlights
+
+- **397B on 128 GB Mac** — JANG_1L: 112 GB, 36 tok/s, 86.5% MMLU with reasoning
+- **Nemotron-Cascade-2 in 10 GB** — IMO Gold Medal reasoning model at 130 tok/s on 16 GB MacBooks
+- **MiniMax: only JANG works** — MLX scores 25% (random), JANG scores 74%
+- **Nemotron-3-Super-120B in 43 GB** — first working Nemotron-H quantization for Apple Silicon
+- **bfloat16 auto-detection** — fixes float16 overflow on 512-expert models
+- **Reasoning mode** — `<think>...</think>` with configurable thinking on/off
+
 ## Results (200-question MMLU)
 
-### MoE at 4-bit: JANG_4K beats MLX
+### Qwen3.5-397B-A17B — JANG runs where MLX can't
 
-| Model | JANG_4K | MLX 4-bit | JANG Size | MLX Size |
-|-------|---------|-----------|-----------|----------|
-| Qwen3.5-122B | **86%** | 85% | 69 GB | 64 GB |
-| Qwen3.5-35B | **77.5%** | 75.5% | **16.7 GB** | 18 GB |
+| Model | No-Think | Reasoning | Size | Speed |
+|-------|:--------:|:---------:|:----:|:-----:|
+| **JANG_1L** | 81.0% | **86.5%** | **112 GB** | 36 tok/s |
+| **JANG_2L** | 79.5% | **92.0%** | 187 GB | 36 tok/s |
+| MLX 4-bit | 81.5% | 94.0% | 209 GB | ~36 tok/s |
+| MLX 2/3-bit | **NaN** | **NaN** | — | — |
 
-### MoE at 2-bit: JANG dominates
+MLX cannot quantize 397B below 4-bit (float16 overflow). JANG solves this with bfloat16.
 
-| Model | JANG_2S | MLX 2-bit | JANG Size | MLX Size |
-|-------|---------|-----------|-----------|----------|
-| Qwen3.5-122B | **79%** | 56.5% | 38 GB | 36 GB |
-| Qwen3.5-35B | **65.5%** | ~20% | 12 GB | 10 GB |
+### Nemotron-Cascade-2-30B — IMO Gold Medal in 10 GB
 
-### MiniMax: JANG is the ONLY working option
+| Model | No-Think | Reasoning | Size | Speed |
+|-------|:--------:|:---------:|:----:|:-----:|
+| **JANG_2L** | 59.0% | **88.0%** | **10.3 GB** | 130 tok/s |
+| **JANG_4M** | 69.0% | **93.0%** | 17 GB | 55 tok/s |
+| MLX 4-bit | 69.0% | 92.5% | 16.6 GB | — |
+| MLX 6-bit | 71.0% | 94.5% | 23.9 GB | — |
 
-| Model | JANG_2L | MLX 4-bit | MLX 3-bit | MLX 2-bit |
-|-------|---------|-----------|-----------|-----------|
-| MiniMax-M2.5 | **74%** | 26.5% | 24.5% | 25% |
+JANG_4M beats MLX 4-bit (93.0% vs 92.5%) at the same size.
 
-MLX is broken on MiniMax at ALL bit levels (~25% = random). JANG scores 74%.
+### Nemotron-3-Super-120B — Only JANG can go below 4-bit
 
-### Dense/Hybrid at 2-bit: JANG saves what MLX destroys
+| Model | No-Think | Reasoning | Size | Speed |
+|-------|:--------:|:---------:|:----:|:-----:|
+| **JANG_2L** | **75.0%** | 86.0% | **43 GB** | 52 tok/s |
+| **JANG_4M** | 72.5% | **93.0%** | 63 GB | 55 tok/s |
+| MLX 4-bit | 71.0% | 93.5% | 63 GB | 60 tok/s |
+| MLX 3-bit | **Crashes** | — | — | — |
 
-| Model | JANG_2S | MLX 2-bit | JANG Size | MLX Size |
-|-------|---------|-----------|-----------|----------|
-| Qwen3.5-4B | **28.5%** | 12.5% | 1.5 GB | 1.2 GB |
-| Qwen3.5-9B | **25.5%** | 22.0% | 3.4 GB | 2.7 GB |
+MLX `mlx_lm.convert` crashes on Nemotron's mtp.* weights. Only JANG can produce sub-4-bit.
 
-At 3-bit and 4-bit, MLX uniform is better on dense models — JANG's value is at 2-bit (where uniform fails) and on MoE (where attention is < 5% of params).
+### MiniMax-M2.5 — JANG is the ONLY working option
+
+| Model | MMLU | Size |
+|-------|:----:|:----:|
+| **JANG_2L** | **74%** | 63 GB |
+| **JANG_3M** | **74.5%** | 82 GB |
+| MLX 4-bit | 26.5% | 120 GB |
+| MLX 3-bit | 24.5% | 93 GB |
+| MLX 2-bit | 25% | — |
+
+MLX is broken on MiniMax at ALL bit levels (~25% = random). MiniMax has 256 experts — MLX compresses attention to the same bits as expert MLP, destroying coherence.
+
+### Qwen3.5 MoE (122B, 35B)
+
+| Model | JANG | MLX 4-bit | JANG Size | MLX Size |
+|-------|:----:|:---------:|:---------:|:--------:|
+| 122B JANG_4K | **86%** | 85% | 69 GB | 64 GB |
+| 122B JANG_2S | **79%** | 56.5% (2-bit) | 38 GB | 36 GB |
+| 35B JANG_4K | **77.5%** | 77.0% | 16.7 GB | 18 GB |
+| 35B JANG_2S | **65.5%** | ~20% (2-bit) | 12 GB | 10 GB |
+
+### The Full Picture: JANG vs MLX Across All Models
+
+| Model | JANG Best | MLX Best | JANG Size | MLX Size | MLX Broken? |
+|-------|:---------:|:--------:|:---------:|:--------:|:-----------:|
+| Qwen3.5-397B | **92.0%** | 94.0% | **187 GB** | 209 GB | NaN below 4-bit |
+| Qwen3.5-397B (128 GB Mac) | **86.5%** | — | **112 GB** | Can't fit | — |
+| Nemotron-Cascade-2 | **93.0%** | 92.5% | 17 GB | 16.6 GB | — |
+| Nemotron-Cascade-2 (16 GB Mac) | **88.0%** | — | **10.3 GB** | Can't fit | — |
+| Nemotron-Super-120B | **93.0%** | 93.5% | 63 GB | 63 GB | Crashes below 4-bit |
+| Nemotron-Super-120B (64 GB Mac) | **86.0%** | — | **43 GB** | Can't fit | — |
+| MiniMax-M2.5 | **74.5%** | 26.5% | **82 GB** | 120 GB | Broken at ALL bits |
+| Qwen3.5-122B | **86%** | 85% | 69 GB | 64 GB | 56.5% at 2-bit |
+| Qwen3.5-35B | **77.5%** | 77.0% | 16.7 GB | 18 GB | ~20% at 2-bit |
+
+**JANG wins at every size point.** At equivalent sizes, JANG matches or beats MLX. At smaller sizes, JANG runs where MLX literally cannot (NaN, crashes, or random output).
+
+### Why MLX Fails on MoE Models
+
+On MoE models, attention is only **1-5% of total parameters** but controls 100% of coherence. MLX compresses everything equally:
+
+```
+MLX 4-bit: attention at 4-bit, experts at 4-bit → works but wastes bits on experts
+MLX 2-bit: attention at 2-bit, experts at 2-bit → attention breaks → model breaks
+
+JANG 2-bit: attention at 8-bit, experts at 2-bit → attention preserved → model works
+```
+
+The more experts a model has, the worse MLX performs at low bits:
+- **128 experts** (Cascade-2): MLX 4-bit still works, JANG slightly better
+- **256 experts** (122B, MiniMax): MLX 2-bit breaks badly, JANG dominates
+- **512 experts** (397B, Super-120B): MLX NaN/crash below 4-bit, only JANG works
 
 ## Install
 
 ```bash
-pip install jang
-```
-
-For inference on Apple Silicon:
-```bash
-pip install "jang[mlx]"
+pip install "jang[mlx]>=2.1.5"
 ```
 
 For Vision-Language models:
 ```bash
-pip install "jang[vlm]"
+pip install "jang[vlm]>=2.1.5"
 ```
 
 ## Quick Start
@@ -100,92 +159,172 @@ jang convert Qwen/Qwen3.5-35B-A3B -p 4
 jang convert Qwen/Qwen3.5-122B-A10B -p 2
 
 # Specific profile
-jang convert model -p JANG_2S
+jang convert model -p JANG_2L
 ```
 
 ### Run inference
 
 ```python
 from jang_tools.loader import load_jang_model
-from mlx_lm.sample_utils import make_sampler
-from mlx_lm.generate import generate_step
-import mlx.core as mx
+from mlx_lm import generate
 
-model, tokenizer = load_jang_model("JANGQ-AI/Qwen3.5-122B-A10B-JANG_2S")
-sampler = make_sampler(temp=0.7)
+model, tokenizer = load_jang_model("JANGQ-AI/Qwen3.5-397B-A17B-JANG_1L")
 
-tokens = tokenizer.encode("What is photosynthesis?")
-for tok, _ in generate_step(prompt=mx.array(tokens), model=model, max_tokens=200, sampler=sampler):
-    t = tok.item() if hasattr(tok, 'item') else int(tok)
-    print(tokenizer.decode([t]), end="", flush=True)
-    if t == tokenizer.eos_token_id:
-        break
+# With reasoning (recommended for hard questions)
+messages = [{"role": "user", "content": "Prove that sqrt(2) is irrational."}]
+prompt = tokenizer.apply_chat_template(messages, tokenize=False,
+    add_generation_prompt=True, enable_thinking=True)
+result = generate(model, tokenizer, prompt=prompt, max_tokens=2048)
+
+# Without reasoning (faster)
+prompt = tokenizer.apply_chat_template(messages, tokenize=False,
+    add_generation_prompt=True, enable_thinking=False)
+result = generate(model, tokenizer, prompt=prompt, max_tokens=100)
 ```
 
-### Upgrade v1 models to v2 (instant loading)
+### VLM (Vision-Language) inference
+
+```python
+from jang_tools.loader import load_jang_vlm_model
+from mlx_vlm import generate as vlm_generate
+
+model, processor = load_jang_vlm_model("JANGQ-AI/Qwen3.5-397B-A17B-JANG_2L")
+messages = [{"role": "user", "content": [
+    {"type": "image"},
+    {"type": "text", "text": "Describe this image."},
+]}]
+prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+result = vlm_generate(model, processor, prompt=prompt, image=["photo.jpg"], max_tokens=200)
+```
+
+### MMLU Benchmark
 
 ```bash
-jang upgrade /path/to/model
+python -m jang_tools.benchmark /path/to/model --max-thinking 1024
 ```
 
-## CLI Commands
+Smart two-pass: no-thinking first, then reasoning retry on wrong answers. Checkpointing, forced answers, full output logging.
 
-| Command | Description |
-|---------|-------------|
-| `jang convert <model> -p <profile>` | Convert HuggingFace model to JANG |
-| `jang upgrade <model>` | Upgrade v1 model to v2 (instant load) |
-| `jang inspect <model>` | Show bit allocation and model info |
-| `jang validate <model>` | Validate a JANG model directory |
-| `jang estimate <params>` | Estimate sizes (e.g., `jang estimate 122B`) |
+## Pre-quantized Models
 
-## v2 Format — Instant Loading
+| Model | Profile | MMLU | Size | Fits |
+|-------|---------|:----:|:----:|:----:|
+| [Qwen3.5-397B JANG_1L](https://huggingface.co/JANGQ-AI/Qwen3.5-397B-A17B-JANG_1L) | 2.1-bit | 86.5%* | 112 GB | 128 GB Mac |
+| [Qwen3.5-397B JANG_2L](https://huggingface.co/JANGQ-AI/Qwen3.5-397B-A17B-JANG_2L) | 3.7-bit | 92.0%* | 187 GB | 256 GB Mac |
+| [Nemotron-Cascade-2 JANG_2L](https://huggingface.co/JANGQ-AI/Nemotron-Cascade-2-30B-A3B-JANG_2L) | 2.3-bit | 88.0%* | 10 GB | 16 GB Mac |
+| [Nemotron-Cascade-2 JANG_4M](https://huggingface.co/JANGQ-AI/Nemotron-Cascade-2-30B-A3B-JANG_4M) | 4.1-bit | 93.0%* | 17 GB | 24 GB Mac |
+| [Nemotron-Super-120B JANG_2L](https://huggingface.co/JANGQ-AI/Nemotron-3-Super-120B-A12B-JANG_2L) | 2.8-bit | 86.0%* | 43 GB | 64 GB Mac |
+| [Nemotron-Super-120B JANG_4M](https://huggingface.co/JANGQ-AI/Nemotron-3-Super-120B-A12B-JANG_4M) | 4.1-bit | 93.0%* | 63 GB | 64 GB Mac |
+| [Qwen3.5-122B JANG_4K](https://huggingface.co/JANGQ-AI/Qwen3.5-122B-A10B-JANG_4K) | 4.0-bit | 86% | 69 GB | 192 GB Mac |
+| [Qwen3.5-122B JANG_2S](https://huggingface.co/JANGQ-AI/Qwen3.5-122B-A10B-JANG_2S) | 2.1-bit | 79% | 38 GB | 64 GB Mac |
+| [Qwen3.5-35B JANG_4K](https://huggingface.co/JANGQ-AI/Qwen3.5-35B-A3B-JANG_4K) | 4.0-bit | 77.5% | 17 GB | 36 GB Mac |
+| [MiniMax-M2.5 JANG_2L](https://huggingface.co/JANGQ-AI/MiniMax-M2.5-JANG_2L) | 2.3-bit | 74% | 63 GB | 128 GB Mac |
+| [Qwen3.5-27B JANG_4S](https://huggingface.co/JANGQ-AI/Qwen3.5-27B-JANG_4S) | 4.1-bit | 84.5% | 16 GB | 24 GB Mac |
 
-JANG v2 stores weights in MLX-native format. Like GGUF — the file IS the runtime format. No conversion at load time.
+*\* with reasoning mode*
 
-| | v2 (current) | v1 (legacy) |
-|---|---|---|
-| Load time | **Seconds** (mmap) | 5-10 minutes (repack) |
-| File size | Same | Same |
-
-New conversions automatically use v2. Existing v1 models can be upgraded with `jang upgrade`.
+[Full collection](https://huggingface.co/collections/jangq/jang-quantized-gguf-for-mlx)
 
 ## Profiles
 
 | Profile | Type | Bits | Best for |
-|---------|------|------|----------|
+|---------|------|:----:|----------|
 | `JANG_4K` | K-quant | 4.0 | Same size as MLX 4-bit, smarter |
+| `JANG_4M` | Profile | 4.0 | 8-bit attention, 4-bit experts |
+| `JANG_4S` | Profile | 4.0 | Dense models (27B) |
 | `JANG_3K` | K-quant | 3.0 | Same size as MLX 3-bit, smarter |
-| `JANG_2S` | Profile | ~2.1 | Tightest 2-bit, near MLX 2-bit size |
-| `JANG_2L` | Profile | ~2.3 | Quality 2-bit |
-| `JANG_1L` | Profile | ~2.2 | Maximum quality 2-bit |
+| `JANG_2L` | Profile | ~2.3 | Quality 2-bit, best for MoE |
+| `JANG_1L` | Profile | ~2.1 | Maximum quality 2-bit |
 
-## Pre-quantized Models
+## App Developers: Add JANG Support
 
-| Model | Profile | MMLU (200q) | Size | Best for |
-|-------|---------|------------|------|----------|
-| [Qwen3.5-122B-A10B](https://huggingface.co/JANGQ-AI/Qwen3.5-122B-A10B-JANG_4K) | JANG_4K | **86%** | 69 GB | 192+ GB Mac |
-| [Qwen3.5-122B-A10B](https://huggingface.co/JANGQ-AI/Qwen3.5-122B-A10B-JANG_2S) | JANG_2S | **79%** | 38 GB | 64+ GB Mac |
-| [Qwen3.5-35B-A3B](https://huggingface.co/JANGQ-AI/Qwen3.5-35B-A3B-JANG_4K) | JANG_4K | **77.5%** | 16.7 GB | 36+ GB Mac |
-| [Qwen3.5-35B-A3B](https://huggingface.co/JANGQ-AI/Qwen3.5-35B-A3B-JANG_2S) | JANG_2S | **65.5%** | 12 GB | 24+ GB Mac |
-| [MiniMax-M2.5](https://huggingface.co/JANGQ-AI/MiniMax-M2.5-JANG_2L) | JANG_2L | **74%** | 89 GB | 192+ GB Mac |
-| Qwen3.5-9B | JANG_2S | **25.5%** | 3.4 GB | 8 GB MacBook |
-| Qwen3.5-4B | JANG_2S | **28.5%** | 1.5 GB | 8 GB MacBook |
+**JANG models are standard MLX safetensors.** If your app loads MLX quantized models, adding JANG is minimal work.
+
+### Quickest Integration (5 lines)
+
+```python
+# Detect JANG model
+from pathlib import Path
+is_jang = (Path(model_path) / "jang_config.json").exists()
+
+# Load with jang-tools
+if is_jang:
+    from jang_tools.loader import load_jang_model
+    model, tokenizer = load_jang_model(model_path)
+    # model is a standard mlx_lm model — use like any MLX model
+```
+
+### What's Different from Standard MLX
+
+1. **Mixed bit widths** — different tensors have different bits (attention at 8-bit, experts at 2-bit). Each `QuantizedLinear` needs its `bits` and `group_size` set from tensor shapes.
+2. **bfloat16 for large models** — 512+ expert models need `model.set_dtype(mx.bfloat16)` to prevent float16 overflow.
+3. **Nemotron-H weight renaming** — `switch_mlp.up_proj→fc1`, `down_proj→fc2`, gate dequantization.
+
+### Full Integration Guide
+
+See **[INTEGRATION.md](https://github.com/jjang-ai/jangq/blob/main/INTEGRATION.md)** for complete step-by-step with code for:
+- Loading without jang-tools dependency
+- Per-tensor bit inference from shapes
+- bfloat16 auto-detection
+- Nemotron-H special handling
+- Chat template with thinking on/off
+- VLM support
+- Edge cases and gotchas
 
 ## Supported Architectures
 
-Dense Transformer, Mixture of Experts, Hybrid SSM, Linear Attention (GatedDeltaNet), MLA (DeepSeek), Vision-Language, Mamba, FP8 source models (MiniMax, DeepSeek).
+- **Qwen3.5** (hybrid SSM + MoE + VLM) — 4B, 9B, 27B, 35B, 122B, 397B
+- **Nemotron-H** (Mamba-2 + Latent MoE + Attention) — Cascade-2 30B, Super-120B
+- **MiniMax-M2.5** (256-expert MoE, FP8 source)
+- **DeepSeek-V2/V3** (MLA + MoE)
+- **Mixtral / Qwen2-MoE** (standard MoE)
+- **Dense Transformers** (Llama, Mistral, Gemma, Phi)
+- **Vision-Language** (Qwen3.5-VL, Pixtral)
+- **Mamba / Hybrid SSM** (Jamba, Nemotron-H)
+- **FP8 source models** (auto-dequantization)
+- **Mistral Small 4** (119B MoE + MLA + Pixtral VL) — *coming soon*
+
+## Changelog
+
+### v2.1.5 (2026-03-21)
+- **Nemotron-H loader**: fc1/fc2 rename, gate weight dequantization, mtp.* key filtering
+- **bfloat16 auto-detection** for 512+ expert models (prevents float16 overflow)
+- **MLP asymmetry floors**: gate_proj=4-bit, down_proj=3-bit for 512+ expert models
+- **Benchmark script**: smart two-pass MMLU with reasoning, checkpointing, forced answers
+- **eos_token_id auto-fix** for Qwen3.5 (248044→248046)
+- **Auto-copy all .py files** for trust_remote_code models
+- Nemotron-3-Super-120B: 86% MMLU at 43 GB
+- Qwen3.5-397B: 92% MMLU at 187 GB, 86.5% at 112 GB
+
+### v2.1.4 (2026-03-19)
+- MLP asymmetry fix for 512-expert models
+- eos_token_id auto-fix for Qwen3.5
+- Auto-copy custom .py files
+
+### v2.1.3 (2026-03-18)
+- Per-tensor group_size (router=64, experts=128 for 150+ expert models)
+- Precision floor rules for shared expert
+- VLM support for all Qwen3.5 models
 
 ## How It Works
 
 JANG redistributes bits based on tensor sensitivity — same total size, smarter allocation:
 
 ```
-CRITICAL  (attention, MoE routers)   →  6-8 bit  →  Controls coherence
-IMPORTANT (embeddings, linear attn)  →  4-6 bit  →  Moderate sensitivity
-COMPRESS  (MLP, MoE experts)         →  2-4 bit  →  98% of parameters
+CRITICAL  (attention, MoE routers, MLA latent)  →  6-8 bit  →  Controls coherence
+IMPORTANT (embeddings, linear attention)         →  4-6 bit  →  Moderate sensitivity
+COMPRESS  (MLP, MoE experts)                     →  2-4 bit  →  95%+ of parameters
 ```
 
-K-quant profiles (JANG_4K, JANG_3K) redistribute within the same bit budget — boost attention, compensate with least-important MLP. Same size as MLX, smarter allocation. Like GGUF K-quants.
+On MoE models, attention is only 1-5% of parameters. Boosting it to 8-bit costs ~2% overhead but dramatically improves quality. MLX compresses everything equally — that's why it breaks on MoE models at low bits.
+
+## Technical Features
+
+- **bfloat16 compute**: Auto-detected for 512+ expert models. Prevents float16 overflow at shared expert down_proj.
+- **MLP asymmetry**: gate_proj gets 4-bit floor (SiLU amplifier), down_proj gets 3-bit floor for 512+ expert models.
+- **FP8 dequantization**: Handles FP8 source models (MiniMax, Nemotron) automatically.
+- **Latent MoE**: Supports Nemotron-H's fc1/fc2_latent_proj compression.
+- **v2 format**: MLX-native safetensors, instant mmap loading, no repack needed.
 
 ## Requirements
 
@@ -193,7 +332,7 @@ K-quant profiles (JANG_4K, JANG_3K) redistribute within the same bit budget — 
 - **Conversion**: any platform (numpy + safetensors)
 - **Inference**: Apple Silicon Mac (M1/M2/M3/M4) with MLX
 - **Dependencies**: `safetensors>=0.4`, `numpy>=1.24`, `tqdm>=4.60`, `huggingface_hub>=0.20`
-- **Optional**: `mlx>=0.22`, `mlx-lm>=0.20` (for inference), `mlx-vlm>=0.1` (for VLM)
+- **Optional**: `mlx>=0.22`, `mlx-lm>=0.20` (inference), `mlx-vlm>=0.1` (VLM)
 
 ## Links
 
@@ -203,46 +342,23 @@ K-quant profiles (JANG_4K, JANG_3K) redistribute within the same bit budget — 
 
 ## 한국어
 
-### JANG이란?
+**JANG**은 Apple Silicon을 위한 혼합정밀도 양자화 포맷입니다. MLX를 위한 GGUF.
 
-**JANG**은 Apple Silicon을 위한 오픈소스 혼합정밀도 양자화 포맷입니다. MLX를 위한 GGUF와 같은 역할을 합니다.
+| 모델 | MMLU | 크기 | 최소 Mac |
+|------|:----:|:----:|:--------:|
+| Qwen3.5-397B JANG_1L | 86.5%* | 112 GB | 128 GB |
+| Nemotron-Cascade-2 JANG_2L | 88.0%* | 10 GB | 16 GB |
+| Nemotron-Super-120B JANG_2L | 86.0%* | 43 GB | 64 GB |
+| MiniMax-M2.5 JANG_2L | 74% | 63 GB | 128 GB |
 
-### 결과 (200문항 MMLU)
-
-#### 4-bit: JANG_4K가 MLX 4-bit보다 우수 (MoE 모델)
-
-| 모델 | JANG_4K | MLX 4-bit | 크기 |
-|------|---------|-----------|------|
-| Qwen3.5-122B | **86%** | 85% | 69 vs 64 GB |
-| Qwen3.5-35B | **77.5%** | 75.5% | **16.7** vs 18 GB |
-
-#### 2-bit: JANG이 MLX를 압도
-
-| 모델 | JANG_2S | MLX 2-bit | 크기 |
-|------|---------|-----------|------|
-| Qwen3.5-122B | **79%** | 56.5% | 38 vs 36 GB |
-| Qwen3.5-35B | **65.5%** | ~20% | 12 vs 10 GB |
-
-#### MiniMax: JANG만 작동
-
-| 모델 | JANG_2L | MLX 4-bit | MLX 3-bit | MLX 2-bit |
-|------|---------|-----------|-----------|-----------
-| MiniMax-M2.5 | **74%** | 26.5% | 24.5% | 25% |
-
-### 설치
+*\* 추론 모드 사용*
 
 ```bash
-pip install "jang[mlx]"
+pip install "jang[mlx]>=2.1.5"
 ```
-
-### 호환성
-
-현재 **[MLX Studio](https://mlx.studio)**만 JANG 포맷을 기본 지원합니다. LM Studio, Ollama, oMLX, Inferencer 등은 아직 지원하지 않습니다. 좋아하는 앱의 개발자에게 JANG 지원을 요청해 주세요!
 
 [GitHub](https://github.com/jjang-ai/jangq) · [HuggingFace](https://huggingface.co/JANGQ-AI) · [MLX Studio](https://mlx.studio) · [PyPI](https://pypi.org/project/jang/)
 
 ---
 
 <p align="center">장진호 제작 · Created by Jinho Jang — <a href="https://jangq.ai">jangq.ai</a></p>
-
-
