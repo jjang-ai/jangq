@@ -263,3 +263,65 @@ Map Mistral-native names to mlx-lm conventions:
 | Context | 256K | 256K | 1M | **1M** |
 
 The biggest new challenge is **MLA attention** — we haven't implemented this for any model yet. It's the same architecture as DeepSeek-V2/V3, just with Mistral-specific naming.
+
+## Updated Findings (2026-03-21)
+
+### Two Weight Formats Available
+
+The source model has BOTH formats:
+1. `consolidated-*.safetensors` — Mistral-native naming (w1/w2/w3, wq_a/wkv_b)
+2. `model-*.safetensors` — HuggingFace standard naming (gate_proj, q_a_proj, etc.)
+
+**Use the `model-*` format.** It has:
+- Standard HF naming our converter already handles
+- Pre-stacked 3D expert tensors (128, out, in) — already JANG format
+- Fused `gate_up_proj` — split same as Qwen3.5
+- MLA naming matches DeepSeek-V2 (`kv_a_proj_with_mqa`, etc.)
+
+### FP8 Format Details
+
+Weights are `uint8` (E4M3 FP8) with per-tensor scales:
+```
+*.weight           — uint8, the FP8 weights
+*.weight_scale_inv — bfloat16 scalar, inverse scale
+*.activation_scale — bfloat16 scalar (drop, not needed for weight-only)
+```
+
+Dequantize: `float_weight = uint8_weight.astype(float32) * (1.0 / weight_scale_inv)`
+
+For pre-stacked experts: `experts.gate_up_proj_scale_inv` has shape `(128, 1, 1)` — per-expert scale.
+
+### What Already Works in JANG
+
+1. **MLA tier classification** — `q_a_proj`, `kv_a_proj_with_mqa`, etc. already in TIER_RULES as CRITICAL
+2. **Fused gate_up_proj splitting** — same as Qwen3.5 MoE
+3. **Pre-stacked experts** — already the format JANG v2 stores
+4. **Gate is already float** — (128, 4096) bfloat16, no dequant needed
+5. **128 experts** — no bfloat16 or MLP asymmetry needed (not 512)
+
+### What Needs Adding
+
+1. **FP8 `uint8 + scale_inv` dequant** — new format (MiniMax used block-wise FP8, this is per-tensor)
+2. **`model_type: "mistral4"` in architectures.py** — new model type detection
+3. **mlx-lm model file** — needs `mistral4.py` with MLA attention (or check if existing `mistral3.py` can handle it)
+4. **Drop `activation_scale` tensors** during conversion
+5. **Handle `language_model.model.layers.*` prefix** — VLM naming with `language_model.` prefix
+
+### Tensor Summary (model-* format)
+
+| Tensor | Shape | dtype | Tier |
+|--------|-------|-------|------|
+| `embed_tokens.weight` | (131072, 4096) | bf16 | IMPORTANT |
+| `lm_head.weight` | (131072, 4096) | bf16 | CRITICAL |
+| `self_attn.q_a_proj.weight` | (1024, 4096) | uint8 | CRITICAL |
+| `self_attn.q_b_proj.weight` | (4096, 1024) | uint8 | CRITICAL |
+| `self_attn.kv_a_proj_with_mqa.weight` | (320, 4096) | uint8 | CRITICAL |
+| `self_attn.kv_b_proj.weight` | (6144, 256) | uint8 | CRITICAL |
+| `self_attn.o_proj.weight` | (4096, 4096) | uint8 | CRITICAL |
+| `mlp.experts.gate_up_proj` | (128, 4096, 4096) | uint8 | COMPRESS |
+| `mlp.experts.down_proj` | (128, 4096, 2048) | uint8 | COMPRESS |
+| `mlp.gate.weight` | (128, 4096) | bf16 | CRITICAL |
+| `shared_experts.gate_proj.weight` | (2048, 4096) | uint8 | CRITICAL |
+| `shared_experts.down_proj.weight` | (4096, 2048) | uint8 | CRITICAL |
+| `shared_experts.up_proj.weight` | (2048, 4096) | uint8 | CRITICAL |
+| `vision_encoder.*` | various | bf16 | IMPORTANT |
