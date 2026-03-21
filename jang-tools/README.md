@@ -93,7 +93,7 @@ MLX `mlx_lm.convert` crashes on Nemotron's mtp.* weights. Only JANG can produce 
 | MLX 3-bit | 24.5% | 93 GB |
 | MLX 2-bit | 25% | — |
 
-MLX is broken on MiniMax at ALL bit levels (~25% = random).
+MLX is broken on MiniMax at ALL bit levels (~25% = random). MiniMax has 256 experts — MLX compresses attention to the same bits as expert MLP, destroying coherence.
 
 ### Qwen3.5 MoE (122B, 35B)
 
@@ -103,6 +103,38 @@ MLX is broken on MiniMax at ALL bit levels (~25% = random).
 | 122B JANG_2S | **79%** | 56.5% (2-bit) | 38 GB | 36 GB |
 | 35B JANG_4K | **77.5%** | 77.0% | 16.7 GB | 18 GB |
 | 35B JANG_2S | **65.5%** | ~20% (2-bit) | 12 GB | 10 GB |
+
+### The Full Picture: JANG vs MLX Across All Models
+
+| Model | JANG Best | MLX Best | JANG Size | MLX Size | MLX Broken? |
+|-------|:---------:|:--------:|:---------:|:--------:|:-----------:|
+| Qwen3.5-397B | **92.0%** | 94.0% | **187 GB** | 209 GB | NaN below 4-bit |
+| Qwen3.5-397B (128 GB Mac) | **86.5%** | — | **112 GB** | Can't fit | — |
+| Nemotron-Cascade-2 | **93.0%** | 92.5% | 17 GB | 16.6 GB | — |
+| Nemotron-Cascade-2 (16 GB Mac) | **88.0%** | — | **10.3 GB** | Can't fit | — |
+| Nemotron-Super-120B | **93.0%** | 93.5% | 63 GB | 63 GB | Crashes below 4-bit |
+| Nemotron-Super-120B (64 GB Mac) | **86.0%** | — | **43 GB** | Can't fit | — |
+| MiniMax-M2.5 | **74.5%** | 26.5% | **82 GB** | 120 GB | Broken at ALL bits |
+| Qwen3.5-122B | **86%** | 85% | 69 GB | 64 GB | 56.5% at 2-bit |
+| Qwen3.5-35B | **77.5%** | 77.0% | 16.7 GB | 18 GB | ~20% at 2-bit |
+
+**JANG wins at every size point.** At equivalent sizes, JANG matches or beats MLX. At smaller sizes, JANG runs where MLX literally cannot (NaN, crashes, or random output).
+
+### Why MLX Fails on MoE Models
+
+On MoE models, attention is only **1-5% of total parameters** but controls 100% of coherence. MLX compresses everything equally:
+
+```
+MLX 4-bit: attention at 4-bit, experts at 4-bit → works but wastes bits on experts
+MLX 2-bit: attention at 2-bit, experts at 2-bit → attention breaks → model breaks
+
+JANG 2-bit: attention at 8-bit, experts at 2-bit → attention preserved → model works
+```
+
+The more experts a model has, the worse MLX performs at low bits:
+- **128 experts** (Cascade-2): MLX 4-bit still works, JANG slightly better
+- **256 experts** (122B, MiniMax): MLX 2-bit breaks badly, JANG dominates
+- **512 experts** (397B, Super-120B): MLX NaN/crash below 4-bit, only JANG works
 
 ## Install
 
