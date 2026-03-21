@@ -236,6 +236,41 @@ Smart two-pass: no-thinking first, then reasoning retry on wrong answers. Checkp
 | `JANG_2L` | Profile | ~2.3 | Quality 2-bit, best for MoE |
 | `JANG_1L` | Profile | ~2.1 | Maximum quality 2-bit |
 
+## App Developers: Add JANG Support
+
+**JANG models are standard MLX safetensors.** If your app loads MLX quantized models, adding JANG is minimal work.
+
+### Quickest Integration (5 lines)
+
+```python
+# Detect JANG model
+from pathlib import Path
+is_jang = (Path(model_path) / "jang_config.json").exists()
+
+# Load with jang-tools
+if is_jang:
+    from jang_tools.loader import load_jang_model
+    model, tokenizer = load_jang_model(model_path)
+    # model is a standard mlx_lm model — use like any MLX model
+```
+
+### What's Different from Standard MLX
+
+1. **Mixed bit widths** — different tensors have different bits (attention at 8-bit, experts at 2-bit). Each `QuantizedLinear` needs its `bits` and `group_size` set from tensor shapes.
+2. **bfloat16 for large models** — 512+ expert models need `model.set_dtype(mx.bfloat16)` to prevent float16 overflow.
+3. **Nemotron-H weight renaming** — `switch_mlp.up_proj→fc1`, `down_proj→fc2`, gate dequantization.
+
+### Full Integration Guide
+
+See **[INTEGRATION.md](https://github.com/jjang-ai/jangq/blob/main/INTEGRATION.md)** for complete step-by-step with code for:
+- Loading without jang-tools dependency
+- Per-tensor bit inference from shapes
+- bfloat16 auto-detection
+- Nemotron-H special handling
+- Chat template with thinking on/off
+- VLM support
+- Edge cases and gotchas
+
 ## Supported Architectures
 
 - **Qwen3.5** (hybrid SSM + MoE + VLM) — 4B, 9B, 27B, 35B, 122B, 397B
