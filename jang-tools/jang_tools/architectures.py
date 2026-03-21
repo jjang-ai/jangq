@@ -267,9 +267,10 @@ def detect_architecture(model_path: str | Path) -> ArchConfig:
     model_type = config.get("model_type", "")
     architectures = config.get("architectures", [])
 
-    # Detect attention type
-    num_heads = config.get("num_attention_heads", 0)
-    num_kv_heads = config.get("num_key_value_heads", num_heads)
+    # Detect attention type (check both top-level and text_config)
+    tc = config.get("text_config", {})
+    num_heads = config.get("num_attention_heads", tc.get("num_attention_heads", 0))
+    num_kv_heads = config.get("num_key_value_heads", tc.get("num_key_value_heads", num_heads))
 
     if num_kv_heads == 0:
         attention_type = AttentionType.NONE
@@ -280,13 +281,18 @@ def detect_architecture(model_path: str | Path) -> ArchConfig:
     else:
         attention_type = AttentionType.MHA
 
-    # Check for MLA (DeepSeek-V2/V3)
-    if config.get("kv_lora_rank") or "DeepseekV2" in str(architectures):
+    # Check for MLA (DeepSeek-V2/V3, Mistral 4)
+    kv_lora = config.get("kv_lora_rank", tc.get("kv_lora_rank"))
+    if kv_lora or "DeepseekV2" in str(architectures) or tc.get("model_type") == "mistral4":
         attention_type = AttentionType.MLA
 
     # Detect architecture type and build config
     arch_config = _classify_architecture(model_type, architectures, config)
-    arch_config.attention_type = attention_type
+    # Don't override if _classify_architecture set a more specific type
+    if arch_config.attention_type in (AttentionType.NONE, AttentionType.GQA) and attention_type == AttentionType.MLA:
+        arch_config.attention_type = attention_type
+    elif arch_config.attention_type == AttentionType.NONE:
+        arch_config.attention_type = attention_type
     arch_config.model_type = model_type
 
     # Override has_vision_encoder if config has vision_config or arch is ConditionalGeneration
@@ -322,7 +328,7 @@ def _classify_architecture(
     )
 
     # --- Pure Vision-Language Models (no SSM/MoE) ---
-    if has_vision and not _cfg("layer_types", None) and not _cfg("num_local_experts", _cfg("num_experts", 0)):
+    if has_vision and not _cfg("layer_types", None) and not _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0))):
         layers = {**TRANSFORMER_LAYER_CONFIGS, **VISION_LAYER_CONFIGS}
         return ArchConfig(
             arch_type=ArchType.VISION_LANGUAGE,
@@ -408,15 +414,21 @@ def _classify_architecture(
     if num_experts > 1:
         layers = {**TRANSFORMER_LAYER_CONFIGS, **MOE_LAYER_CONFIGS}
 
-        # Check for MLA + MoE (DeepSeek-V2/V3)
-        if config.get("kv_lora_rank") or "Deepseek" in arch_str:
+        # Check for MLA + MoE (DeepSeek-V2/V3, Mistral 4)
+        _has_mla = _cfg("kv_lora_rank") or "Deepseek" in arch_str or "mistral4" in str(tc.get("model_type", ""))
+        if _has_mla:
             layers.update(MLA_LAYER_CONFIGS)
+
+        # Check for vision encoder in MoE model (Mistral 4 is VLM + MoE)
+        if has_vision:
+            layers.update(VISION_LAYER_CONFIGS)
 
         return ArchConfig(
             arch_type=ArchType.MOE,
-            attention_type=AttentionType.GQA,
+            attention_type=AttentionType.MLA if _has_mla else AttentionType.GQA,
             model_type=model_type,
             layer_configs=layers,
+            has_vision_encoder=has_vision,
             has_moe_layers=True,
             num_experts=num_experts,
             num_experts_per_tok=_cfg("num_experts_per_tok", 2),

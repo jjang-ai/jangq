@@ -77,13 +77,20 @@ def load_fp8_tensor(
     fp8_vals = raw.reshape(shape)
     result = fp8_e4m3_to_float32(fp8_vals)
 
-    if scale_inv is not None and len(shape) == 2:
-        # Block scaling: scale_inv is [rows/B, cols/B], each covers BxB block
-        sh, sw = scale_inv.shape
-        bh = shape[0] // sh
-        bw = shape[1] // sw
-        scale_full = np.repeat(np.repeat(scale_inv, bh, axis=0), bw, axis=1)
-        result *= scale_full
+    if scale_inv is not None:
+        if scale_inv.ndim == 0 or (scale_inv.ndim == 1 and scale_inv.shape[0] == 1):
+            # Per-tensor scalar scale (Mistral Small 4 format)
+            result *= float(scale_inv)
+        elif scale_inv.ndim == 3:
+            # Per-expert scale (128, 1, 1) for pre-stacked 3D expert tensors
+            result *= scale_inv
+        elif len(shape) == 2:
+            # Block scaling: scale_inv is [rows/B, cols/B], each covers BxB block
+            sh, sw = scale_inv.shape
+            bh = shape[0] // sh
+            bw = shape[1] // sw
+            scale_full = np.repeat(np.repeat(scale_inv, bh, axis=0), bw, axis=1)
+            result *= scale_full
 
     return result
 

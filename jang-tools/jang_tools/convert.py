@@ -205,6 +205,8 @@ def convert_model(
                     continue
                 if "weight_scale_inv" in tensor_name or "_scale_inv" in tensor_name:
                     continue
+                if "activation_scale" in tensor_name:
+                    continue
                 if "lm_head" in tensor_name and _tie_embeddings:
                     continue
                 if ".visual." in tensor_name or "vision_tower" in tensor_name or "vision_model" in tensor_name:
