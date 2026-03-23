@@ -80,7 +80,7 @@ def load_fp8_tensor(
     if scale_inv is not None:
         if scale_inv.ndim == 0 or (scale_inv.ndim == 1 and scale_inv.shape[0] == 1):
             # Per-tensor scalar scale (Mistral Small 4 format)
-            result *= float(scale_inv)
+            result *= float(scale_inv.flat[0])
         elif scale_inv.ndim == 3:
             # Per-expert scale (128, 1, 1) for pre-stacked 3D expert tensors
             result *= scale_inv

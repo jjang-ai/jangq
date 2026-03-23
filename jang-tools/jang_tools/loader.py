@@ -119,7 +119,11 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
 
     # Detect Nemotron-H: needs fc1/fc2 rename + gate dequantization
     _model_cfg = json.loads((path / "config.json").read_text())
-    _is_nemotron = _model_cfg.get("model_type", "") == "nemotron_h"
+    _top_type = _model_cfg.get("model_type", "")
+    _text_type = _model_cfg.get("text_config", {}).get("model_type", "")
+    _is_nemotron = _top_type == "nemotron_h"
+    # Mistral 4 uses DeepSeek V2 MoE with raw gate weight — needs same dequant
+    _needs_gate_dequant = _is_nemotron or _text_type == "mistral4"
     _nemotron_renames = {
         "switch_mlp.up_proj": "switch_mlp.fc1",
         "switch_mlp.down_proj": "switch_mlp.fc2",
@@ -133,31 +137,35 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
             weights = model.sanitize(weights)
 
         # Nemotron-H: rename switch_mlp keys + dequantize gate weights
-        if _is_nemotron:
+        if _needs_gate_dequant:
             renamed = {}
             gate_parts = {}  # prefix -> {scales, biases}
             for k, v in weights.items():
                 new_k = k
-                # Collect gate scales/biases for dequantization
-                if ".gate." in k and (k.endswith(".scales") or k.endswith(".biases")):
+                # Collect MoE ROUTER gate scales/biases for dequantization
+                # Must match mlp.gate.scales but NOT gate_proj.scales or switch_mlp.gate_proj
+                if ".mlp.gate." in k and "gate_proj" not in k and (k.endswith(".scales") or k.endswith(".biases")):
                     prefix = k.rsplit(".", 1)[0]
                     gate_parts.setdefault(prefix, {})[k.rsplit(".", 1)[1]] = v
                     continue
-                # Apply fc1/fc2 rename
-                for old, new in _nemotron_renames.items():
-                    if old in k:
-                        new_k = k.replace(old, new)
-                        break
+                # Apply fc1/fc2 rename (Nemotron-H only)
+                if _is_nemotron:
+                    for old, new in _nemotron_renames.items():
+                        if old in k:
+                            new_k = k.replace(old, new)
+                            break
                 renamed[new_k] = v
-            # Dequantize gate weights (uint32 packed → float)
-            # Gate is nn.Linear (not QuantizedLinear), needs float weights
+            # Dequantize gate weights (uint32 packed → bfloat16 float)
+            # Gate is MoEGate with raw weight param. bfloat16 preserves routing
+            # precision that float16 cannot (MoE routing is extremely sensitive).
+            # Note: bf16 gate causes float32 promotion (~23 tok/s instead of ~40).
+            # Speed fix requires re-conversion with f16-compatible gate quantization.
             for prefix, parts in gate_parts.items():
                 wkey = f"{prefix}.weight"
                 if wkey in renamed and "scales" in parts:
                     qw = renamed[wkey]
                     scales = parts["scales"]
                     biases = parts.get("biases", mx.zeros_like(scales))
-                    # Infer bits from shapes: try common bit widths
                     for bits in [8, 6, 4, 3, 2]:
                         elem_per_u32 = 32 // bits
                         real_cols = qw.shape[-1] * elem_per_u32
@@ -197,6 +205,13 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
     if _n_experts >= 512 and _hidden >= 4096:
         model.set_dtype(mx.bfloat16)
         logger.info(f"  bfloat16 enabled: {_n_experts} experts, hidden={_hidden} (float16 overflow prevention)")
+    # Mistral 4 (and models with MLA + MoE): gate weight is bfloat16 from dequant.
+    # Setting entire model to bfloat16 prevents mixed-dtype float32 promotion
+    # that halves throughput (23 tok/s → 75+ tok/s). Gate routing requires bf16
+    # precision — even f16 breaks expert selection.
+    elif _text_cfg.get("model_type") == "mistral4" or _text_cfg.get("kv_lora_rank", 0) > 0:
+        model.set_dtype(mx.bfloat16)
+        logger.info(f"  bfloat16 enabled: MLA model with bf16 gate (speed optimization)")
 
     mx.eval(model.parameters())
     elapsed = time.perf_counter() - start

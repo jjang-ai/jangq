@@ -35,6 +35,34 @@ _PER_EXPERT_PATTERN = re.compile(
 _EXPERT_NAME_MAP = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
 
 
+def _load_bf16_from_header(sf_path: str, key: str):
+    """Load a bfloat16 tensor from safetensors by reading raw bytes.
+
+    numpy can't handle bfloat16 — this reads the raw bytes and converts
+    to float32 (bfloat16 is the upper 16 bits of float32).
+    Returns None if key not found. Works for scalars and any shape.
+    """
+    import struct as _struct
+    with open(sf_path, "rb") as fh:
+        header_size = _struct.unpack("<Q", fh.read(8))[0]
+        header = json.loads(fh.read(header_size))
+        if key not in header:
+            return None
+        info = header[key]
+        data_start = 8 + header_size
+        fh.seek(data_start + info["data_offsets"][0])
+        raw = fh.read(info["data_offsets"][1] - info["data_offsets"][0])
+    shape = info.get("shape", [])
+    n_elements = max(1, len(raw) // 2)  # 2 bytes per bfloat16
+    # Convert bfloat16 → float32: each bf16 is upper 16 bits of f32
+    bf16_arr = np.frombuffer(raw, dtype=np.uint16)
+    f32_bits = bf16_arr.astype(np.uint32) << 16
+    result = f32_bits.view(np.float32)
+    if shape:
+        result = result.reshape(shape)
+    return result
+
+
 def _get_tensor_group_size(tensor_name: str, default_gs: int, num_experts: int = 0) -> int:
     """
     Get the optimal group_size for a specific tensor.
@@ -209,7 +237,7 @@ def convert_model(
                     continue
                 if "lm_head" in tensor_name and _tie_embeddings:
                     continue
-                if ".visual." in tensor_name or "vision_tower" in tensor_name or "vision_model" in tensor_name:
+                if ".visual." in tensor_name or "vision_tower" in tensor_name or "vision_model" in tensor_name or "vision_encoder" in tensor_name:
                     continue
 
                 shape = f.get_slice(tensor_name).get_shape()
@@ -295,22 +323,22 @@ def convert_model(
     _cfg = json.loads((model_path / "config.json").read_text())
     hidden_size = _cfg.get("hidden_size",
                     _cfg.get("text_config", {}).get("hidden_size", 0))
+    # Vectorized safety check — classify unique tensor names only (not billions of blocks)
     danger_tensors = {}
+    unique_tensor_bits = {}
     for i, tname in enumerate(all_tensor_names_for_alloc):
-        bits = int(global_bit_alloc[i])
+        if tname not in unique_tensor_bits:
+            unique_tensor_bits[tname] = int(global_bit_alloc[i])
+    for tname, bits in unique_tensor_bits.items():
         tier = classify_tensor(tname, num_experts)
-        # Shared expert at <4 bit with large hidden_size
         if "shared_expert" in tname and "gate" not in tname and bits < 4 and hidden_size >= 4096:
             danger_tensors.setdefault(tname, bits)
-        # Always-active components at <3 bit
         if tier == Tier.CRITICAL and bits < 4:
             danger_tensors.setdefault(tname, bits)
-        # MLP asymmetry: gate_proj of routed experts at <4 bit on 512+ expert models
         if num_experts >= 512 and bits < 4 and "shared_expert" not in tname:
             tname_lower = tname.lower()
             if "gate_proj" in tname_lower or "gate_up_proj" in tname_lower:
                 danger_tensors.setdefault(tname, bits)
-        # down_proj of routed experts at <3 bit on 512+ expert models
         if num_experts >= 512 and bits < 3 and "shared_expert" not in tname:
             tname_lower = tname.lower()
             if "down_proj" in tname_lower:
@@ -347,13 +375,17 @@ def convert_model(
         # Skip vision conv weights — Conv3d/Conv2d needs float, not uint32.
         # These are passthrough tensors that get saved as float16.
         name_lower = tensor_name.lower()
-        if ("patch_embed" in name_lower or "temporal_embed" in name_lower) and ".weight" in name_lower:
+        if ("patch_embed" in name_lower or "temporal_embed" in name_lower or "patch_conv" in name_lower) and ".weight" in name_lower:
             with safe_open(str(sf_path), framework="numpy") as f:
                 try:
                     w = f.get_tensor(tensor_name)
                 except TypeError:
                     w = _load_bf16_tensor(sf_path, tensor_name, shape)
-                passthrough[tensor_name] = w.astype(np.float16) if w.dtype != np.float16 else w
+                w_out = w.astype(np.float16) if w.dtype != np.float16 else w
+                # Transpose 4D conv weights: PyTorch OIHW → MLX OHWI
+                if len(w_out.shape) == 4:
+                    w_out = np.transpose(w_out, (0, 2, 3, 1))
+                passthrough[tensor_name] = w_out
             offset += n_blocks
             continue
 
@@ -368,7 +400,9 @@ def convert_model(
                 try:
                     scale_inv = f.get_tensor(scale_key)
                 except Exception:
-                    pass
+                    # bfloat16 scale_inv can't be loaded by numpy —
+                    # read raw bytes from safetensors and convert manually
+                    scale_inv = _load_bf16_from_header(str(sf_path), scale_key)
                 try:
                     weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
                 except Exception:
@@ -397,6 +431,20 @@ def convert_model(
                 if len(norms) == in_features:
                     awq_scales = compute_awq_scales(norms, alpha=awq_alpha)
                     weights = apply_awq_scaling(weights, awq_scales)
+
+        # MoE router/gate: store as float16 passthrough (no quantization).
+        # Gate routing is extremely precision-sensitive — even 8-bit quantization
+        # with different intermediate dtypes (f32 vs bf16) changes expert selection.
+        # Gate is tiny (128 × 4096 = 0.5 MB per layer) so size impact is negligible.
+        # This ensures maximum routing precision and avoids bf16/f16 dtype issues.
+        _tn_lower = tensor_name.lower()
+        _is_gate = (".gate.weight" in _tn_lower or _tn_lower.endswith(".gate.weight"))
+        _is_gate = _is_gate and "gate_proj" not in _tn_lower and "gate_up" not in _tn_lower
+        if _is_gate and num_experts > 0:
+            passthrough[tensor_name] = weights.astype(np.float16)
+            # offset already incremented at line 412 — do NOT increment again
+            print(f"    Gate passthrough (f16): {tensor_name} → {weights.shape}")
+            continue
 
         bits = int(bit_alloc[0])
         w_shape = weights.shape
@@ -601,6 +649,10 @@ def convert_model(
                         tensor = tensor.astype(np.float16)
                     elif tensor.dtype != np.float16:
                         tensor = tensor.astype(np.float16)
+
+                    # Transpose 4D conv weights: PyTorch OIHW → MLX OHWI
+                    if len(tensor.shape) == 4:
+                        tensor = np.transpose(tensor, (0, 2, 3, 1))
 
                     passthrough[tensor_name] = tensor
 
