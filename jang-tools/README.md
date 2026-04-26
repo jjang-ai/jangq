@@ -273,18 +273,53 @@ See **[INTEGRATION.md](https://github.com/jjang-ai/jangq/blob/main/INTEGRATION.m
 
 ## Supported Architectures
 
-- **Qwen3.5** (hybrid SSM + MoE + VLM) — 4B, 9B, 27B, 35B, 122B, 397B
+- **Qwen3.5 / Qwen3.6** (hybrid SSM + MoE + VLM) — 4B, 9B, 27B, 35B, 122B, 397B
 - **Nemotron-H** (Mamba-2 + Latent MoE + Attention) — Cascade-2 30B, Super-120B
-- **MiniMax-M2.5** (256-expert MoE, FP8 source)
-- **DeepSeek-V2/V3** (MLA + MoE)
+- **MiniMax-M2.5 / M2.7** (256-expert MoE, FP8 source)
+- **Kimi K2.6** (REAP-pruned MoE)
+- **GLM-5.1** (MoE + DSA attention)
+- **DeepSeek-V2/V3/V3.2** (MLA + MoE)
+- **DeepSeek-V4-Flash** (MQA + mHC + Compressor/Indexer + MTP, 1M ctx) — JANG_2L / JANGTQ / JANGTQ4
+- **Mistral 4 Small** (119B MoE + MLA + Pixtral VL)
 - **Mixtral / Qwen2-MoE** (standard MoE)
 - **Dense Transformers** (Llama, Mistral, Gemma, Phi)
-- **Vision-Language** (Qwen3.5-VL, Pixtral)
+- **Vision-Language** (Qwen3.5-VL, Qwen3.6-VL, Pixtral, Holo3)
 - **Mamba / Hybrid SSM** (Jamba, Nemotron-H)
 - **FP8 source models** (auto-dequantization)
-- **Mistral Small 4** (119B MoE + MLA + Pixtral VL) — *coming soon*
+
+## JANG Format Family
+
+| Format | Routed expert quant | Use case | Loader |
+|---|---|---|---|
+| **JANG_2L / 3L / 4M / 6M** | affine 2/3/4/6-bit gsz=32 | mlx_lm-compatible drop-in | `mlx_lm.load()` |
+| **JANGTQ** (= JANGTQ2) | codebook 2-bit + Hadamard | Smallest 2-bit + best 2-bit quality | `jang_tools.load_jangtq` |
+| **JANGTQ4** | codebook 4-bit + Hadamard | Max quality codebook | `jang_tools.load_jangtq` |
+
+JANGTQ uses **Lloyd-Max-trained 4-entry codebooks** (2-bit) or 16-entry (4-bit)
+on Hadamard-rotated weights, then runs Metal kernels that read packed `uint32`
+indices, look up centroids, and accumulate against a pre-rotated input
+(QuIP# "rotate-input-once" math). Saves ~10-18% disk vs uniform affine at the
+same bit budget, with strictly higher quality (codebook is more expressive
+than uniform on Gaussian-ish post-rotation distributions).
+
+For DSV4-Flash specifically: JANGTQ runtime adds a **`jangtq_runtime.safetensors`
+sidecar** (signs + codebooks per unique `(in_features, bits)` pair) so Swift
+consumers can mmap them at load time. Python regenerates from `mxtq_seed`
+on the fly.
+
+Reference: `research/JANGTQ-REFERENCE.md` §1-§9 (DSV4 entry §9).
 
 ## Changelog
+
+### v2.5.8 (2026-04-24)
+- **DeepSeek-V4-Flash production**: JANG_2L (96.6 GB), JANGTQ (79.5 GB), JANGTQ4 (~140 GB) variants on `JANGQ-AI/`
+- **Python decode verified 20.54 tok/s** on M3 Ultra Mac Studio for JANGTQ
+- **DSV4 chat_template baked into bundles**: Jinja port of `encoding_dsv4.encode_messages` injected into `tokenizer_config.json` by `convert_dsv4_jangtq.py`
+- **Sidecar build 30× faster**: batched `_read_tq_bits_batch()` in `build_jangtq_sidecar.py` (was ~15 min for 33,792 tensors at gsz=32; now ~30 sec)
+- **Phase optimizations**: Phase-Rope (mx.fast.rope wavelength), Phase-RMSFast (mx.fast.rms_norm), Phase-Idx (uint32 inds), Phase-Logaddexp, Phase-FP16-Pre/Post, Phase-NoOnesQNorm, Phase-MLAFuse-P19 (wq_a + wkv fusion)
+- **Swift runtime**: 7 of 8 fixes landed for DSV4 coherence (per-head Q-norm via cached qNormOnes, attn_sink, inverse-rope, custom DSV4RoPE, HyperConnection collapse/expand, TurboQuantSwitchGLU). Last 5-line `.tq_bits` strip in sanitize() pending.
+- **Converter writes Swift Codable keys**: top-level `routed_expert_bits`, `group_size`, `mxtq_seed` in config.json
+- Reference: `research/DSV4-RUNTIME-ARCHITECTURE.md` §31, `research/JANGTQ-REFERENCE.md` §9
 
 ### v2.1.5 (2026-03-21)
 - **Nemotron-H loader**: fc1/fc2 rename, gate weight dequantization, mtp.* key filtering

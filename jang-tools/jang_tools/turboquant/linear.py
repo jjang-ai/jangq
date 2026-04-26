@@ -109,14 +109,16 @@ class TurboQuantSwitchLinear(nn.Module):
         expert_list = unique.tolist()
         expert_weights = {int(e): self._dequant_experts([int(e)])[0] for e in expert_list}
 
-        # Compute output per expert assignment
-        out = mx.zeros((B, S, K, self.out_features), dtype=x.dtype)
+        # Compute output per expert assignment.
+        # fp32 accumulator: bf16/fp16 storage compounds dequant/matmul rounding
+        # across 6 experts × 43 layers × N tokens, producing decode drift past
+        # ~1500 tokens. See research/JANGTQ-FP32-ACCUMULATOR-FIX-2026-04-25.md.
+        out = mx.zeros((B, S, K, self.out_features), dtype=mx.float32)
         for k in range(K):
             for e_idx, w in expert_weights.items():
                 mask = (indices[:, :, k] == e_idx)
                 if mx.any(mask):
-                    r = x @ w.T
-                    out_k = out[:, :, k, :]
+                    r = x.astype(mx.float32) @ w.T.astype(mx.float32)
                     out = out.at[:, :, k, :].add(
                         mx.where(mask[:, :, None], r, mx.zeros_like(r))
                     )
@@ -126,10 +128,11 @@ class TurboQuantSwitchLinear(nn.Module):
                 for e_idx in expert_list:
                     mask = (indices[:, :, k] == int(e_idx))
                     if mx.any(mask):
+                        b = self.bias[int(e_idx)].astype(mx.float32)
                         out = out.at[:, :, k, :].add(
-                            mx.where(mask[:, :, None], self.bias[int(e_idx)], mx.zeros_like(self.bias[0]))
+                            mx.where(mask[:, :, None], b, mx.zeros_like(b))
                         )
-        return out
+        return out.astype(x.dtype)
 
 
 # ── Conversion utilities ──────────────────────────────────────────

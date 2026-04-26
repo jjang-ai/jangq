@@ -103,6 +103,52 @@ def _read_tq_bits(model_dir: Path, packed_key: str) -> int:
     return 0
 
 
+def _read_tq_bits_batch(model_dir: Path, packed_keys: list[str]) -> dict[str, int]:
+    """Batched companion to `_read_tq_bits` — open each shard ONCE and read all
+    `.tq_bits` scalars from it. ~30× faster than per-key opens for 30K+ tensors
+    on TB5 external SSDs (verified during 2026-04-24 gsz=32 sidecar build:
+    per-key path took ~15 min for 33,792 tensors; batched path is ~30 sec).
+    """
+    bits_keys = [k[: -len(".tq_packed")] + ".tq_bits" for k in packed_keys]
+    out: dict[str, int] = {}
+    index_path = model_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        with open(index_path) as fh:
+            index = json.load(fh)
+        weight_map = index["weight_map"]
+        # Group bits_keys by shard.
+        by_shard: dict[str, list[str]] = {}
+        missing: list[str] = []
+        for bk in bits_keys:
+            fname = weight_map.get(bk)
+            if fname is None:
+                missing.append(bk)
+            else:
+                by_shard.setdefault(fname, []).append(bk)
+        for fname, keys in by_shard.items():
+            with safe_open(str(model_dir / fname), framework="numpy") as f:
+                for bk in keys:
+                    arr = f.get_tensor(bk)
+                    out[bk] = int(arr.flat[0])
+        for bk in missing:
+            out[bk] = 0
+        return out
+    # Fallback: scan all shards once, harvesting any bits_keys present.
+    remaining = set(bits_keys)
+    for sf in sorted(model_dir.glob("model-*.safetensors")):
+        if not remaining:
+            break
+        with safe_open(str(sf), framework="numpy") as f:
+            shard_keys = set(f.keys())
+            hits = remaining & shard_keys
+            for bk in hits:
+                out[bk] = int(f.get_tensor(bk).flat[0])
+            remaining -= hits
+    for bk in remaining:
+        out[bk] = 0
+    return out
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -122,15 +168,21 @@ def main() -> None:
     print("  Scanning for .tq_packed weights...")
     packed = _scan_tq_tensors(model_dir)
     if not packed:
-        sys.exit("FATAL: no .tq_packed tensors found in artifact")
+        print("  [sidecar] No .tq_packed tensors found; skipping sidecar generation.")
+        return
     print(f"  Found {len(packed)} TQ-packed tensors")
 
     # Collect the unique (in_features, bits) pairs and (in_features, seed)
     # pairs that the runtime cache will be queried for.
+    # Batched read: open each shard once, harvest all .tq_bits at once.
+    print(f"  Reading .tq_bits for {len(packed)} tensors (batched)...", flush=True)
+    keys_only = [k for k, _ in packed]
+    bits_map = _read_tq_bits_batch(model_dir, keys_only)
     unique_in_bits: set[tuple[int, int]] = set()
     unique_in_seed: set[tuple[int, int]] = set()
     for key, shape in packed:
-        bits = _read_tq_bits(model_dir, key)
+        bk = key[: -len(".tq_packed")] + ".tq_bits"
+        bits = bits_map.get(bk, 0)
         if bits == 0:
             print(f"  WARN: missing .tq_bits for {key}, skipping")
             continue

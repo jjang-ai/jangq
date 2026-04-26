@@ -47,6 +47,245 @@ import mlx.nn as nn
 from jang_tools.turboquant.tq_kernel import TurboQuantLinear, TurboQuantSwitchLinear
 
 
+# ── Runtime config-metadata fix (2026-04-25) ──────────────────────────────
+#
+# Background: legacy JANG/JANGTQ bundles ship `config.json` with a uniform
+# `quantization = {"bits": N, "group_size": M}` block, no per-module
+# overrides. But the on-disk weights are MIXED bit-widths (routed experts at
+# N-bit, attention/embed/lm_head at 8-bit affine). MLX's loader uses the
+# top-level `bits` for every QuantizedLinear → the 8-bit-stored attention
+# weights get dequantized with the N-bit kernel → silent garbage on hard
+# tasks (HumanEval pass@1 42% instead of 70%).
+#
+# This function fixes ALL such bundles at LOAD TIME, regardless of whether
+# config.json was patched on disk. Algorithm:
+#   1. Walk safetensors index, find every `(.weight, .scales, .biases)` triple
+#   2. Infer (bits, group_size) from shape ratio:
+#        bits × group_size = 32 × (weight.shape[-1] / scales.shape[-1])
+#   3. Try fixed-preference (bits, gsz) candidates, prefer 8-bit (matches
+#      converter convention for non-routed weights). First valid wins.
+#   4. Patch `model_config["quantization"]` IN MEMORY with per-module
+#      overrides + `bits=8 mode=affine` top-level. Idempotent: if config
+#      already has correct overrides, this is a no-op.
+#
+# Verified: produces bit-for-bit identical overrides vs the trusted local
+# `patch_dsv4_quant_config.py` on 3 spot-checked bundles (DSV4-JANGTQ,
+# Holo3-JANGTQ4, Nemotron-Cascade-2-JANG_4M).
+def _infer_quant_overrides_from_shapes(model_path: Path) -> tuple[dict, list[str]]:
+    """Return (overrides_dict, warnings) inferred from safetensors metadata.
+
+    overrides_dict maps `<module_path>` → `{"bits": N, "group_size": M, "mode": "affine"}`.
+    """
+    from safetensors import safe_open
+
+    warnings: list[str] = []
+    index_path = model_path / "model.safetensors.index.json"
+    if not index_path.exists():
+        # Single-shard bundle — fall back to globbing safetensors files
+        single = list(model_path.glob("*.safetensors"))
+        if not single:
+            return {}, ["no safetensors found"]
+        weight_map = {}
+        for sf in single:
+            with safe_open(str(sf), framework="numpy") as f:
+                for k in f.keys():
+                    weight_map[k] = sf.name
+    else:
+        try:
+            weight_map = json.loads(index_path.read_text())["weight_map"]
+        except Exception as e:
+            return {}, [f"index parse failed: {e}"]
+
+    keys = set(weight_map.keys())
+    quantized_bases: set[str] = set()
+    for k in keys:
+        if k.endswith(".scales"):
+            base = k[:-len(".scales")]
+            if (base + ".weight") in keys and (base + ".biases") in keys:
+                quantized_bases.add(base)
+
+    if not quantized_bases:
+        return {}, ["no quantized triples found"]
+
+    # Open shards once, cache shapes
+    shape_cache: dict[str, tuple] = {}
+    open_handles: dict[str, "safe_open"] = {}
+    try:
+        for base in sorted(quantized_bases):
+            for suffix in (".weight", ".scales"):
+                k = base + suffix
+                fname = weight_map.get(k)
+                if not fname:
+                    continue
+                if fname not in open_handles:
+                    open_handles[fname] = safe_open(
+                        str(model_path / fname), framework="numpy"
+                    )
+                    open_handles[fname].__enter__()
+                f = open_handles[fname]
+                try:
+                    shape_cache[k] = tuple(f.get_slice(k).get_shape())
+                except Exception:
+                    pass
+    finally:
+        for h in open_handles.values():
+            try:
+                h.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    # Preference order: prefer 8-bit (converter convention for non-routed),
+    # then 4-bit, 2-bit, 3-bit, 6-bit. group_size 32 first, then 64, 128.
+    candidates = [
+        (8, 32), (8, 64), (8, 128),
+        (4, 32), (4, 64), (4, 128),
+        (2, 32), (2, 64), (2, 128),
+        (3, 32), (3, 64), (3, 128),
+        (6, 32), (6, 64), (6, 128),
+    ]
+
+    overrides: dict[str, dict] = {}
+    for base in sorted(quantized_bases):
+        w_shape = shape_cache.get(base + ".weight")
+        s_shape = shape_cache.get(base + ".scales")
+        if not w_shape or not s_shape or len(w_shape) < 2 or len(s_shape) < 2:
+            continue
+        w_inner = int(w_shape[-1])
+        s_inner = int(s_shape[-1])
+        if s_inner == 0:
+            continue
+        # bits × group_size = 32 × (w_inner / s_inner)
+        # Walk candidates in preference order, take first that fits.
+        chosen = None
+        for bits, gsz in candidates:
+            in_feat = s_inner * gsz
+            bits_check = w_inner * 32.0 / in_feat if in_feat else 0
+            if bits_check == bits and bits in (2, 3, 4, 6, 8):
+                chosen = (bits, gsz)
+                break
+        if not chosen:
+            warnings.append(
+                f"could not infer quant for {base} "
+                f"(w_inner={w_inner} s_inner={s_inner})"
+            )
+            continue
+        bits, gsz = chosen
+        overrides[base] = {"bits": bits, "group_size": gsz, "mode": "affine"}
+
+    return overrides, warnings
+
+
+def _patch_quant_config_inplace(model_path: Path, model_config: dict) -> dict:
+    """Patch `model_config["quantization"]` in place if it's missing per-module
+    overrides for a mixed-bit bundle. Returns dict of stats for logging.
+
+    Safe to call on already-patched configs (idempotent).
+    """
+    q = model_config.get("quantization") or {}
+    existing_overrides = {k: v for k, v in q.items() if isinstance(v, dict)}
+    top_bits = q.get("bits")
+
+    inferred, warns = _infer_quant_overrides_from_shapes(model_path)
+    if not inferred:
+        return {"action": "no_quant_layers", "warnings": warns}
+
+    # Distribution of inferred bits — used to decide top-level fallback.
+    bit_dist: dict[int, int] = {}
+    for ov in inferred.values():
+        bit_dist[ov["bits"]] = bit_dist.get(ov["bits"], 0) + 1
+    gsz_dist: dict[int, int] = {}
+    for ov in inferred.values():
+        gsz_dist[ov["group_size"]] = gsz_dist.get(ov["group_size"], 0) + 1
+
+    # Mismatches: keys where existing override (or top-level fallback)
+    # disagrees with shape-inferred bits.
+    mismatches: list[tuple[str, int, int]] = []
+    for base, ov in inferred.items():
+        existing = existing_overrides.get(base)
+        if existing is not None:
+            if existing.get("bits") != ov["bits"]:
+                mismatches.append((base, existing.get("bits"), ov["bits"]))
+        elif top_bits is not None and top_bits != ov["bits"]:
+            mismatches.append((base, top_bits, ov["bits"]))
+
+    is_bug = len(mismatches) > 0 and not existing_overrides
+    is_partial_bug = len(mismatches) > 0 and existing_overrides
+    is_clean = len(mismatches) == 0
+
+    # Always write back the full set of per-module overrides (idempotent).
+    # Pick top-level bits/gsz: prefer to KEEP existing if it's a safe
+    # fallback (matches one of the inferred bits AND one of the inferred
+    # group sizes). Otherwise pick majority of inferred.
+    new_top_bits = top_bits if (top_bits in bit_dist) else (
+        8 if 8 in bit_dist else max(bit_dist.items(), key=lambda kv: kv[1])[0]
+    )
+    existing_top_gsz = q.get("group_size")
+    new_top_gsz = existing_top_gsz if (existing_top_gsz in gsz_dist) else (
+        max(gsz_dist.items(), key=lambda kv: kv[1])[0]
+    )
+    # If the existing config was already clean (no mismatches AND we have
+    # full per-module override coverage), keep it byte-identical — even if
+    # the top-level gsz/bits is a stale fallback. With overrides covering
+    # everything, top-level is dead metadata at runtime. Idempotency.
+    if (
+        is_clean
+        and existing_overrides
+        and len(existing_overrides) == len(inferred)
+    ):
+        return {
+            "action": "verified_clean",
+            "old_top_bits": top_bits,
+            "old_overrides": len(existing_overrides),
+            "new_top_bits": top_bits,
+            "new_overrides": len(existing_overrides),
+            "mismatches": 0,
+            "bit_distribution": bit_dist,
+            "warnings": warns,
+        }
+    new_q: dict = {"group_size": new_top_gsz, "bits": new_top_bits, "mode": "affine"}
+    new_q.update(inferred)
+    model_config["quantization"] = new_q
+    model_config.pop("quantization_config", None)
+
+    return {
+        "action": "patched_bug" if is_bug else (
+            "patched_partial" if is_partial_bug else "verified_clean"
+        ),
+        "old_top_bits": top_bits,
+        "old_overrides": len(existing_overrides),
+        "new_top_bits": new_top_bits,
+        "new_overrides": len(inferred),
+        "mismatches": len(mismatches),
+        "bit_distribution": bit_dist,
+        "warnings": warns,
+    }
+
+
+def _ensure_rope_parameters_inplace(config: dict) -> bool:
+    """Add rope_parameters if missing. Without it, transformers ≥4.50 falls
+    back to bare PreTrainedTokenizerFast, dropping chat_template + special
+    tokens. Returns True if a change was made.
+    """
+    if "rope_parameters" in config:
+        return False
+    rs = config.get("rope_scaling")
+    rope_theta = config.get("rope_theta", 10000)
+    if isinstance(rs, dict):
+        rp = dict(rs)
+        rp.setdefault("rope_type", rp.pop("type", "yarn"))
+        rp.setdefault("rope_theta", rope_theta)
+    else:
+        rp = {"rope_type": "default", "rope_theta": rope_theta}
+    for k in ("factor", "beta_fast", "beta_slow", "rope_theta"):
+        if k in rp:
+            try:
+                rp[k] = float(rp[k])
+            except Exception:
+                pass
+    config["rope_parameters"] = rp
+    return True
+
+
 def _apply_wired_limit_safe_default():
     """Set mx.wired_limit to ~70% of total RAM if the caller hasn't already.
 
@@ -66,19 +305,26 @@ def _apply_wired_limit_safe_default():
     No-op elsewhere.
     """
     try:
-        import psutil, sys, mlx.core as _mx
+        import os, psutil, sys, mlx.core as _mx
         if sys.platform != "darwin":
             return
+        # Explicit override: JANG_WIRED_LIMIT_GB=N
+        override = os.environ.get("JANG_WIRED_LIMIT_GB")
         total_gb = psutil.virtual_memory().total / 1e9
-        target_gb = int(total_gb * 0.70)
-        # Clamp to reasonable range: at least 32 GB, at most 220 GB
-        # (leaving enough headroom even on very-large-RAM machines).
+        if override:
+            target_gb = int(override)
+            why = f"JANG_WIRED_LIMIT_GB={override}"
+        else:
+            # 70% on big-RAM (≥200 GB), 55% on smaller machines (≤150 GB).
+            # MacBook Pro 128 GB: 55% = 70 GB → leaves 58 GB for OS/cache —
+            # avoids the 2026-04-24 OOM kill seen at 96 GB wired on 137 GB.
+            pct = 0.70 if total_gb >= 200 else 0.55
+            target_gb = int(total_gb * pct)
+            why = f"~{int(pct*100)}% of {total_gb:.0f} GB total RAM"
         target_gb = max(32, min(target_gb, 220))
         target_bytes = target_gb * 1000 * 1000 * 1000
         _mx.set_wired_limit(target_bytes)
-        print(f"  [wired_limit] auto-set to {target_gb} GB "
-              f"(~70% of {total_gb:.0f} GB total RAM; ralph iter-14 tuning)",
-              flush=True)
+        print(f"  [wired_limit] set to {target_gb} GB ({why})", flush=True)
     except Exception as _e:
         # Non-fatal: older MLX, no psutil, non-Apple OS, etc.
         pass
@@ -128,6 +374,34 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     if "quantization" not in model_config:
         model_config["quantization"] = {"group_size": 64, "bits": 2}
 
+    # Runtime config-metadata fix: ALWAYS infer per-module overrides from
+    # safetensors shapes and patch in-memory config. Idempotent — clean
+    # configs verify-pass, broken configs get fixed. This protects against
+    # legacy bundles uploaded before the converter metadata fix landed
+    # (2026-04-24). See `_infer_quant_overrides_from_shapes` for the math.
+    try:
+        stats = _patch_quant_config_inplace(model_path, model_config)
+        action = stats.get("action", "?")
+        if action == "patched_bug":
+            print(f"  ⚠ config-metadata BUG detected, patched in-memory: "
+                  f"top_bits {stats['old_top_bits']} → {stats['new_top_bits']}, "
+                  f"+{stats['new_overrides']} per-module overrides "
+                  f"({stats['mismatches']} mismatches)", flush=True)
+        elif action == "patched_partial":
+            print(f"  ⚠ config-metadata PARTIAL bug, fixing: "
+                  f"{stats['mismatches']} per-module mismatches resolved", flush=True)
+        elif action == "verified_clean":
+            print(f"  ✓ config-metadata clean ({stats['new_overrides']} overrides verified)", flush=True)
+    except Exception as e:
+        import warnings
+        warnings.warn(f"config-from-shape inference skipped: {e}")
+
+    # Tokenizer fallback fix: transformers ≥4.50 needs `rope_parameters`,
+    # not legacy `rope_scaling`. Without it `load_tokenizer` falls back to
+    # bare PreTrainedTokenizerFast, dropping chat_template + special tokens.
+    if _ensure_rope_parameters_inplace(model_config):
+        print(f"  ⚠ added rope_parameters (was missing — tokenizer would fall back)", flush=True)
+
     model, model_config = _load_skeleton(
         model_path, lazy=True, strict=False, model_config=model_config
     )
@@ -149,12 +423,73 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     except Exception as _e:
         # Newer model_types (e.g. deepseek_v4) may trip transformers' config
         # validation. Fall back to direct PreTrainedTokenizerFast from tokenizer.json.
+        # CRITICAL FIX (2026-04-25): the bare PreTrainedTokenizerFast doesn't
+        # read tokenizer_config.json, so it drops chat_template + special
+        # tokens — apply_chat_template then raises. Manually rehydrate from
+        # tokenizer_config.json to preserve chat-mode functionality without
+        # modifying the user's on-disk bundle.
         import warnings
-        warnings.warn(f"load_tokenizer failed ({_e}); using PreTrainedTokenizerFast fallback")
+        warnings.warn(f"load_tokenizer failed ({_e}); using PreTrainedTokenizerFast fallback with manual rehydrate")
         from transformers import PreTrainedTokenizerFast
         import os
         tok_file = os.path.join(str(model_path), "tokenizer.json")
-        tokenizer = PreTrainedTokenizerFast(tokenizer_file=tok_file, eos_token_id=eos_ids[0] if eos_ids else None)
+        tok_config_path = os.path.join(str(model_path), "tokenizer_config.json")
+        # Load tokenizer_config.json kwargs to restore chat_template + special tokens
+        tok_kwargs = {}
+        if os.path.exists(tok_config_path):
+            try:
+                with open(tok_config_path) as f:
+                    tok_kwargs = json.load(f)
+                # Filter to known PreTrainedTokenizerFast init kwargs.
+                # Drop transformers-internal keys + any deeper nested config.
+                _keep = {
+                    "chat_template", "model_max_length", "padding_side",
+                    "truncation_side", "clean_up_tokenization_spaces",
+                    "split_special_tokens", "add_eos_token", "add_bos_token",
+                    "bos_token", "eos_token", "unk_token", "pad_token",
+                    "sep_token", "cls_token", "mask_token", "additional_special_tokens",
+                }
+                tok_kwargs = {k: v for k, v in tok_kwargs.items() if k in _keep}
+            except Exception as _ee:
+                warnings.warn(f"tokenizer_config.json parse failed: {_ee}")
+                tok_kwargs = {}
+        if eos_ids:
+            tok_kwargs.setdefault("eos_token_id", eos_ids[0])
+        # Special tokens may be dicts in tokenizer_config.json (HF AddedToken
+        # serialization). PreTrainedTokenizerFast __init__ wants str/AddedToken;
+        # convert dict-form by extracting `content`.
+        from transformers import AddedToken
+        for _k in ("bos_token", "eos_token", "unk_token", "pad_token",
+                   "sep_token", "cls_token", "mask_token"):
+            v = tok_kwargs.get(_k)
+            if isinstance(v, dict):
+                content = v.get("content")
+                if content:
+                    tok_kwargs[_k] = AddedToken(
+                        content,
+                        lstrip=v.get("lstrip", False),
+                        rstrip=v.get("rstrip", False),
+                        single_word=v.get("single_word", False),
+                        normalized=v.get("normalized", False),
+                        special=v.get("special", True),
+                    )
+                else:
+                    tok_kwargs.pop(_k)
+        # additional_special_tokens may be a list of dicts.
+        ast = tok_kwargs.get("additional_special_tokens")
+        if isinstance(ast, list):
+            tok_kwargs["additional_special_tokens"] = [
+                AddedToken(
+                    item.get("content", ""),
+                    lstrip=item.get("lstrip", False),
+                    rstrip=item.get("rstrip", False),
+                    single_word=item.get("single_word", False),
+                    normalized=item.get("normalized", False),
+                    special=item.get("special", True),
+                ) if isinstance(item, dict) else item
+                for item in ast
+            ]
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=tok_file, **tok_kwargs)
 
     # Pre-compile Metal kernels layer-by-layer so the FIRST call to
     # generate() doesn't pay 60+ seconds of cold JIT inside a single
@@ -190,6 +525,40 @@ def load_jangtq_model(model_path, skip_params_eval=False):
             tokenizer.jang_chat = chat_cfg
         except Exception:
             pass
+
+    # Optional AWQ runtime scales: if the bundle ships
+    # `awq_scales.safetensors`, wire each tensor onto its matching
+    # TurboQuant{Linear,SwitchLinear} module as `awq_scale`. The runtime
+    # path in `tq_kernel.py:222-224` divides x by `awq_scale` pre-matmul
+    # so the model produces `(x / s) @ Q(W * s)` ≈ `x @ W` with outlier
+    # input channels preserved at higher effective resolution.
+    # Required precondition: the bundle was quantized AGAINST these same
+    # scales (each routed-expert weight stored as `Q(W * s)`). Loose
+    # bundles without pre-scaled weights MUST NOT contain the file.
+    import os
+    awq_path = os.path.join(str(model_path), "awq_scales.safetensors")
+    if os.path.exists(awq_path):
+        try:
+            from safetensors.numpy import load_file as _safe_load
+            scales_np = _safe_load(awq_path)
+            from jang_tools.turboquant.tq_kernel import (
+                TurboQuantLinear, TurboQuantSwitchLinear,
+            )
+            applied = 0
+            missing = 0
+            for name, mod in model.named_modules():
+                if not isinstance(mod, (TurboQuantLinear, TurboQuantSwitchLinear)):
+                    continue
+                arr = scales_np.get(name)
+                if arr is None:
+                    missing += 1
+                    continue
+                mod.awq_scale = mx.array(arr)
+                applied += 1
+            print(f"  AWQ runtime scales: {applied} applied, "
+                  f"{missing} TQ modules without scale entry", flush=True)
+        except Exception as _e:
+            print(f"  AWQ scale load skipped: {_e}", flush=True)
 
     print(f"  Done (eos_token_ids={eos_ids})", flush=True)
     return model, tokenizer
@@ -847,6 +1216,40 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         print(f"  P18 QKV fusion: {len(_patched_attn_classes)} class(es), {len(_qkv_fused)} instances", flush=True)
     except Exception as _e:
         print(f"  P18 QKV fusion skipped: {_e}", flush=True)
+
+    # P19: DSV4-MLA-specific wq_a + wkv fusion. P18 expects q_proj/k_proj/v_proj
+    # naming which DSV4 doesn't have (uses MLA's wq_a/wq_b/wkv low-rank LoRA
+    # decomposition). DSV4 wq_a (4096→1024) and wkv (4096→512) BOTH take x as
+    # input → can fuse into single quantized matmul (4096→1536). Saves 1
+    # dispatch/layer × 43 layers = 43 dispatches/token. Profiler showed
+    # attention is 45% of layer time (2026-04-24).
+    try:
+        import mlx.nn as _nn
+        _wq_a_kv_fused_count = 0
+        for _name, _mod in model.named_modules():
+            if not (hasattr(_mod, "wq_a") and hasattr(_mod, "wkv")):
+                continue
+            qa, kv = _mod.wq_a, _mod.wkv
+            if not (isinstance(qa, _nn.QuantizedLinear) and isinstance(kv, _nn.QuantizedLinear)):
+                continue
+            if not (qa.bits == kv.bits and qa.group_size == kv.group_size):
+                continue
+            in_f = qa.weight.shape[1] * (32 // qa.bits)
+            out_f = qa.weight.shape[0] + kv.weight.shape[0]
+            fused = _nn.QuantizedLinear(
+                input_dims=in_f, output_dims=out_f,
+                bias=False, group_size=qa.group_size, bits=qa.bits,
+            )
+            fused.weight = mx.concatenate([qa.weight, kv.weight], axis=0)
+            fused.scales = mx.concatenate([qa.scales, kv.scales], axis=0)
+            if hasattr(qa, "biases") and qa.biases is not None and \
+               hasattr(kv, "biases") and kv.biases is not None:
+                fused.biases = mx.concatenate([qa.biases, kv.biases], axis=0)
+            _mod._wq_a_kv_fused = fused
+            _wq_a_kv_fused_count += 1
+        print(f"  P19 MLA wq_a+wkv fusion: {_wq_a_kv_fused_count} instances", flush=True)
+    except Exception as _e:
+        print(f"  P19 MLA wq_a+wkv fusion skipped: {_e}", flush=True)
 
     # bfloat16 for MLA models. model_config can be a dict (mlx_lm path) or
     # a dataclass (mlx_vlm path); normalize via getattr/getitem fallback.

@@ -264,6 +264,12 @@ Smart two-pass: no-thinking first, then reasoning retry on wrong answers. Checkp
 | [Qwen3.5-35B JANG_4K](https://huggingface.co/JANGQ-AI/Qwen3.5-35B-A3B-JANG_4K) | 4.0-bit | 77.5% | 17 GB | 36 GB Mac |
 | [MiniMax-M2.5 JANG_2L](https://huggingface.co/JANGQ-AI/MiniMax-M2.5-JANG_2L) | 2.3-bit | 74% | 63 GB | 128 GB Mac |
 | [Qwen3.5-27B JANG_4S](https://huggingface.co/JANGQ-AI/Qwen3.5-27B-JANG_4S) | 4.1-bit | 84.5% | 16 GB | 24 GB Mac |
+| [DeepSeek-V4-Flash JANG_2L](https://huggingface.co/JANGQ-AI/DeepSeek-V4-Flash-JANG_2L) | 2-bit affine | TBD | 96.6 GB | 128 GB Mac |
+| [DeepSeek-V4-Flash JANGTQ](https://huggingface.co/JANGQ-AI/DeepSeek-V4-Flash-JANGTQ) | 2-bit codebook | TBD | 79.5 GB | 96 GB Mac |
+| [DeepSeek-V4-Flash JANGTQ4](https://huggingface.co/JANGQ-AI/DeepSeek-V4-Flash-JANGTQ4) | 4-bit codebook | TBD | ~140 GB | 192 GB Mac |
+| [MiniMax-M2.7 JANGTQ](https://huggingface.co/JANGQ-AI/MiniMax-M2.7-JANGTQ) | 2-bit codebook | 91.5% | 56.5 GB | 96 GB Mac |
+| [Qwen3.6-35B-A3B JANGTQ](https://huggingface.co/JANGQ-AI/Qwen3.6-35B-A3B-JANGTQ) | 2-bit codebook | TBD | ~10 GB | 16 GB Mac |
+| [Kimi-K2.6-Small JANGTQ](https://huggingface.co/JANGQ-AI/Kimi-K2.6-Small-JANGTQ) | 2-bit codebook | TBD | TBD | TBD |
 
 *\* with reasoning mode*
 

@@ -101,7 +101,7 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
         else:  # affine
             t = idx.read_tensor(name, out_dtype=torch.float32)
             w = mx.array(t.numpy())
-            qw, qs, qb = mx.quantize(w, group_size=64, bits=bits)
+            qw, qs, qb = mx.quantize(w, group_size=32, bits=bits)
             base = name[:-len(".weight")] if name.endswith(".weight") else name
             add_tensor(f"{base}.weight", np.array(qw))
             add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
@@ -127,8 +127,39 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
 
     src_cfg = json.loads((src / "config.json").read_text())
     src_cfg.pop("quantization_config", None)
-    src_cfg["quantization"] = {"group_size": 64, "bits": profile_bits}
+    # ROOT-CAUSE FIX 2026-04-24: top-level MUST stay bits=8 mode=affine to
+    # match the dominant 8-bit-affine layout (attention/shared/embed/head/
+    # compressor/indexer). Routed experts at profile_bits affine via
+    # per-module overrides. Setting top-level bits=2 (old behavior) made
+    # MLX dequantize 8-bit attention weights with the 2-bit kernel → silent
+    # garbage. See research/JANGTQ-CONFIG-METADATA-BUG-2026-04-24.md.
+    n_layers = src_cfg.get("num_hidden_layers", 43)
+    quant_cfg: dict = {"group_size": 32, "bits": 8, "mode": "affine"}
+    for L in range(n_layers):
+        for proj in ("gate_proj", "down_proj", "up_proj"):
+            path = f"model.layers.{L}.mlp.switch_mlp.{proj}"
+            quant_cfg[path] = {"group_size": 32, "bits": profile_bits, "mode": "affine"}
+    src_cfg["quantization"] = quant_cfg
     src_cfg["_name_or_path"] = f"DSV4-Flash-JANG_{profile_bits}L"
+
+    # transformers ≥4.50 expects `rope_parameters` instead of `rope_scaling`.
+    # Without it, mlx-lm load_tokenizer falls back to bare PreTrainedTokenizerFast.
+    # See convert_dsv4_jangtq.py for full rationale.
+    if "rope_parameters" not in src_cfg:
+        rs = src_cfg.get("rope_scaling")
+        if isinstance(rs, dict):
+            rp = dict(rs)
+            rp.setdefault("rope_type", rp.pop("type", "yarn"))
+            rp.setdefault("rope_theta", src_cfg.get("rope_theta", 10000))
+        else:
+            rp = {
+                "rope_type": "default",
+                "rope_theta": src_cfg.get("rope_theta", 10000),
+            }
+        for k in ("factor", "beta_fast", "beta_slow", "rope_theta"):
+            if k in rp and not isinstance(rp[k], float):
+                rp[k] = float(rp[k])
+        src_cfg["rope_parameters"] = rp
     (dst / "config.json").write_text(json.dumps(src_cfg, indent=2))
 
     (dst / "jang_config.json").write_text(json.dumps({

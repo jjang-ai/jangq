@@ -62,13 +62,23 @@ def _extract_code(raw: str, entry_point: str):
     point (HumanEval/10, /32, /38, /50 failed with NameError because
     `is_palindrome`, `poly`, `encode_cyclic`, `encode_shift` got cut).
     """
-    # Strip any <think>…</think> reasoning block entirely — many JANGTQ
-    # reasoning models emit explanation + multiple ``` blocks inside the
-    # think segment, and those blocks often contain unicode glyphs (✓, ✗,
-    # em-dashes) that break Python parsing if picked by the extractor.
+    # Bug fix 2026-04-24: chat templates that prefill "<think>\n" at the
+    # generation prompt boundary (MiniMax-M2, GLM-4.7, …) cause the model's
+    # raw output to start MID-think with no opening "<think>" tag. The
+    # original "<think>…</think>" pair regex never matched, so the broken
+    # in-think attempts (with token-boundary glitches like
+    # "```python一致:" or "```pythonfr") leaked into the extractor and
+    # confused fence pairing — costing ~9 pts of pass@1 on MiniMax-Small.
+    # Fix: if "</think>" appears with no opening "<think>" before it,
+    # strip everything up to and including the first "</think>".
+    if "</think>" in raw:
+        idx_close = raw.index("</think>")
+        idx_open = raw.find("<think>")
+        if idx_open < 0 or idx_open > idx_close:
+            raw = raw[idx_close + len("</think>"):]
+    # Now the regular pair-strip handles models that emit complete
+    # <think>…</think> blocks themselves.
     raw_stripped = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    # Also drop any orphan lead-in "<think>…" with no closing tag (model
-    # ran out of budget inside the think block).
     if "<think>" in raw_stripped and "</think>" not in raw_stripped:
         raw_stripped = raw_stripped.split("<think>", 1)[0]
 
@@ -76,15 +86,21 @@ def _extract_code(raw: str, entry_point: str):
     # by a newline (so inline mentions like "...inside a single ```python
     # fenced code block." don't get treated as openers and desync pairing).
     # Closer must be ``` on its own line (optionally with trailing whitespace).
+    # Bug fix 2026-04-24: opener language-tag is now "anything until \n"
+    # (`[^\n]*`) instead of `(?:python|py)?` — at 2-bit quant the model
+    # sometimes emits token-boundary glitches like "```python一致:\n" or
+    # "```pythonfr\n" where the \n is delayed by 1-3 BPE tokens. The
+    # stricter regex rejected these as openers but accepted bare "```"
+    # downstream, causing pairing to skip past the real answer.
     blocks = re.findall(
-        r"(?:^|\n)```(?:python|py)?[ \t]*\n(.*?)\n[ \t]*```(?:\n|$)",
+        r"(?:^|\n)```[^\n]*\n(.*?)\n[ \t]*```(?:\n|$)",
         raw_stripped, re.DOTALL,
     )
     # Fallback: if the stricter regex finds nothing (e.g. model forgot the
     # trailing newline before closing fence), accept a looser form.
     if not blocks:
         blocks = re.findall(
-            r"(?:^|\n)```(?:python|py)?[ \t]*\n?(.*?)```",
+            r"(?:^|\n)```[^\n]*\n?(.*?)```",
             raw_stripped, re.DOTALL,
         )
     sig_pat = re.compile(
