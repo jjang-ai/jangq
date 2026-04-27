@@ -144,7 +144,12 @@ def _sample(logits, T, top_p, min_p, repetition_penalty, recent_tokens):
         lg = mx.where(probs < max_p * min_p, mx.array(-1e9, dtype=lg.dtype), lg)
     if T <= 0:
         return mx.argmax(lg, axis=-1, keepdims=True)
-    return mx.random.categorical(lg / T, axis=-1)[:, None]
+    
+    # lg is 1D (V,), categorical returns 0D scalar. We need 1D (1,) to match argmax
+    out = mx.random.categorical(lg / T, axis=-1)
+    if out.ndim == 0:
+        out = mx.expand_dims(out, axis=0)
+    return out
 
 
 def generate(model, tok, bundle, messages=None, *, opts: Optional[GenerateOptions] = None,
