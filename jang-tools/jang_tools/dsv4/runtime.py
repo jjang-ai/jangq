@@ -142,18 +142,6 @@ def _sample(logits, T, top_p, min_p, repetition_penalty, recent_tokens):
         probs = mx.softmax(lg, axis=-1)
         max_p = mx.max(probs, axis=-1, keepdims=True)
         lg = mx.where(probs < max_p * min_p, mx.array(-1e9, dtype=lg.dtype), lg)
-    if top_p > 0 and top_p < 1.0:
-        probs = mx.softmax(lg, axis=-1)
-        # Sort probabilities descending to compute cumulative sums
-        sort_inds = mx.argsort(-probs, axis=-1)
-        sorted_probs = mx.take_along_axis(probs, sort_inds, axis=-1)
-        cum_probs = mx.cumsum(sorted_probs, axis=-1)
-        # Shift cumulative sums to the right by 1 (keep at least one token)
-        mask = mx.pad(cum_probs[..., :-1], ((0, 0), (1, 0))) > top_p
-        # Create mask in original order
-        orig_mask = mx.zeros_like(mask)
-        orig_mask = mx.put_along_axis(orig_mask, sort_inds, mask, axis=-1)
-        lg = mx.where(orig_mask, mx.array(-1e9, dtype=lg.dtype), lg)
     if T <= 0:
         return mx.argmax(lg, axis=-1, keepdims=True)
     return mx.random.categorical(lg / T, axis=-1)[:, None]
