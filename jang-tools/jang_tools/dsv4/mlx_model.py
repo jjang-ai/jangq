@@ -1122,7 +1122,7 @@ class DeepseekV4Attention(nn.Module):
         out = scaled_dot_product_attention(
             q, full_kv, full_kv,
             cache=None, scale=self.softmax_scale, mask=sdpa_mask,
-            sinks=None,
+            sinks=self.attn_sink.astype(q.dtype),
         )
         # Phase-NoInverseRope FAILED (2026-04-24, ralph iter): mlx-lm PR #1189
         # SKIPS this inverse-rope but our model REQUIRES it — without it
