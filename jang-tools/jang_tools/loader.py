@@ -179,6 +179,20 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
         weights = mx.load(str(sf))
         weights = {k: v for k, v in weights.items()
                    if not k.endswith(".importance") and not k.startswith("mtp.")}
+        # afmoe (e.g. Trinity Nano/Mini/Large): JANG pre-stacks SwitchGLU experts
+        # under `mlp.switch_mlp.*` but mlx-lm's afmoe model expects `mlp.experts.*`
+        # (its sanitize stacks per-expert tensors only, so pre-stacked weights at
+        # the wrong path silently fail to load and the model emits gibberish).
+        # Detect afmoe by structural signature: switch_mlp keys alongside the
+        # afmoe-specific expert_bias tensor.
+        if (any(".mlp.switch_mlp." in _k for _k in weights)
+                and any(".mlp.expert_bias" in _k for _k in weights)):
+            weights = {
+                (k.replace(".mlp.switch_mlp.", ".mlp.experts.")
+                 if ".mlp.switch_mlp." in k else k): v
+                for k, v in weights.items()
+            }
+
         # Some model classes (e.g. qwen3_next) gate sanitize() on an MoE-only sentinel
         # key (e.g. "model.layers.0.mlp.experts.0.up_proj.weight") and early-return
         # when it's missing. JANG strips that sentinel during expert pre-stacking, so
