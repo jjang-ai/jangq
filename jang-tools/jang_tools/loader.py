@@ -179,8 +179,37 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
         weights = mx.load(str(sf))
         weights = {k: v for k, v in weights.items()
                    if not k.endswith(".importance") and not k.startswith("mtp.")}
+        # Some model classes (e.g. qwen3_next) gate sanitize() on an MoE-only sentinel
+        # key (e.g. "model.layers.0.mlp.experts.0.up_proj.weight") and early-return
+        # when it's missing. JANG strips that sentinel during expert pre-stacking, so
+        # sanitize() becomes a no-op and skips transformations that should always run:
+        # the PyTorch->MLX conv1d transpose, and the RMSNorm +1 offset. Detect that
+        # case and apply the missing transformations explicitly.
+        _sanitize_skipped = (
+            hasattr(model, "sanitize")
+            and "model.layers.0.mlp.experts.0.up_proj.weight" not in weights
+            and any("conv1d.weight" in k for k in weights)
+        )
         if hasattr(model, "sanitize"):
             weights = model.sanitize(weights)
+        if _sanitize_skipped:
+            # Conv1d: PyTorch (out, 1, kernel) -> MLX (out, kernel, 1)
+            for _k in list(weights.keys()):
+                if "conv1d.weight" in _k:
+                    _v = weights[_k]
+                    if _v.ndim == 3 and _v.shape[-1] != 1:
+                        weights[_k] = _v.moveaxis(2, 1)
+            # RMSNorm: weights stored with -1 offset, runtime expects them +1
+            _norm_suffixes = (
+                ".input_layernorm.weight",
+                ".post_attention_layernorm.weight",
+                "model.norm.weight",
+                ".q_norm.weight",
+                ".k_norm.weight",
+            )
+            for _k, _v in weights.items():
+                if any(_k.endswith(_s) for _s in _norm_suffixes) and _v.ndim == 1:
+                    weights[_k] = _v + 1.0
 
         # Nemotron-H: rename switch_mlp keys + dequantize gate weights
         if _needs_gate_dequant:
