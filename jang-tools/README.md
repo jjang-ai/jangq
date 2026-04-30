@@ -311,6 +311,30 @@ Reference: `research/JANGTQ-REFERENCE.md` §1-§9 (DSV4 entry §9).
 
 ## Changelog
 
+### v2.5.9 (2026-04-30)
+
+**New model support:**
+- `mistral3` (Mistral-Medium-3.5-128B + sibling 3.5-128B-EAGLE) — dense 128B with `ministral3` text + `pixtral` vision tower. FP8 e4m3 per-tensor `weight_scale_inv` source dequant; vision tower + multi_modal_projector + lm_head bf16 passthrough.
+- `laguna` (poolside Laguna-XS.2, 33B/3B MoE) — hybrid SWA+full with per-layer head count (48/64), dual RoPE (full=YaRN/swa=default), 256 routed top-8 + 1 shared expert, sigmoid + per-head gating.
+- `mimo_v2` (Xiaomi MiMo-V2.5-Pro 1.02T MoE) — scaffold ready; converter parked pending download.
+
+**New converters (PyPI console scripts):**
+- `jang-convert-laguna-jangtq` `jang-convert-laguna-mxfp4`
+- `jang-convert-mistral3-jangtq` `jang-convert-mistral3-mxfp4`
+
+**New runtimes:**
+- `jang-laguna-runtime` `jang-mistral3-runtime`
+- Auto-detects bundle format (bf16/jangtq/mxfp4) via `jang_tools/jangrt/loader.py`
+- `jang_tools/vl/pixtral.py` — pixtral image preprocessing for Mistral 3.5
+
+**Swift package (`jang-tools/swift/`):**
+- `JANGRuntime`, `JANGQuant`, `JANGImage` (native pixtral), `JANGDistributed`, `JANGCxx` (C++ shim for TurboQuant kernel binding), `jang-probe` CLI
+- `swift build` produces 4 libs + 1 executable
+
+**Distributed scaffolding (TB5/RDMA, mlx.distributed jaccl):**
+- Hostfile generator, sharding plan (EP/PP/TP), bandwidth+latency probe
+- `scripts/setup_tb5.sh` for Thunderbolt Bridge
+
 ### v2.5.8 (2026-04-24)
 - **DeepSeek-V4-Flash production**: JANG_2L (96.6 GB), JANGTQ (79.5 GB), JANGTQ4 (~140 GB) variants on `JANGQ-AI/`
 - **Python decode verified 20.54 tok/s** on M3 Ultra Mac Studio for JANGTQ

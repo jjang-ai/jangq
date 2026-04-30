@@ -94,3 +94,21 @@ ralph_runner/*.log
 
 # Worktrees (local isolated workspaces)
 .worktrees/
+
+# v2.5.9 additions
+JANGStudio/.build/
+JANGStudio/default.profraw
+*.profraw
+codex_dsv4_fixkit/
+he_5probe.py
+humaneval_dsv4_fixed.py
+verify_quant_metadata.py
+jangtq_issues_report.md
+swift-stage/
+kimi40_calib/
+jang-tools/dist/
+jang-tools/build/
+jang-tools/*.egg-info/
+jang-tools/swift/.build/
+jang-tools/swift/.swiftpm/
+**/.cache/huggingface/

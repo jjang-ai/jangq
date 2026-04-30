@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.8"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX. v2.5: DeepSeek-V4 + Kimi K2.6 support."
+version = "2.5.9"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX. v2.5.9: Mistral 3.5 (mistral3+pixtral) + Laguna XS.2 + MiMo V2.5 Pro support."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
@@ -26,14 +26,19 @@ classifiers = [
 dependencies = ["safetensors>=0.4", "numpy>=1.24", "tqdm>=4.60", "huggingface_hub>=0.20", "jinja2>=3.1"]
 
 [project.optional-dependencies]
-mlx = ["mlx>=0.22", "mlx-lm>=0.20"]
-vlm = ["mlx>=0.22", "mlx-lm>=0.20", "mlx-vlm>=0.1"]
+mlx = ["mlx>=0.31.2", "mlx-lm>=0.31.0"]
+vlm = ["mlx>=0.31.2", "mlx-lm>=0.31.0", "mlx-vlm>=0.1"]
 torch = ["torch>=2.0", "transformers>=4.40"]
 all = ["jang[mlx]", "jang[vlm]", "jang[torch]"]
 
 [project.scripts]
 jang = "jang_tools.__main__:main"
-
+jang-convert-laguna-jangtq = "jang_tools.convert_laguna_jangtq:main"
+jang-convert-laguna-mxfp4  = "jang_tools.convert_laguna_mxfp4:main"
+jang-convert-mistral3-jangtq = "jang_tools.convert_mistral3_jangtq:main"
+jang-convert-mistral3-mxfp4  = "jang_tools.convert_mistral3_mxfp4:main"
+jang-laguna-runtime  = "jang_tools.laguna.runtime:main"
+jang-mistral3-runtime = "jang_tools.mistral3.runtime:main"
 [project.urls]
 Homepage = "https://jangq.ai"
 Repository = "https://github.com/jjang-ai/jangq"
