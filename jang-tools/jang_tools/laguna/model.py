@@ -150,7 +150,12 @@ class LagunaAttention(nn.Module):
         out = out.transpose(0, 2, 1, 3).reshape(B, T, self.n_heads * self.head_dim)
 
         if self.g_proj is not None:
-            gate = mx.sigmoid(self.g_proj(x))   # (B, T, n_heads)
+            # HF reference (modeling_laguna.py:412): softplus, not sigmoid.
+            # softplus(x) = ln(1+exp(x)) ∈ [0, ∞) — unbounded gate that can
+            # amplify the attention output, NOT the bounded [0,1] sigmoid I
+            # had originally. Using sigmoid drove residual stream blow-up
+            # (std 0.29 → 11 over 30 layers → garbage saturation).
+            gate = nn.softplus(self.g_proj(x).astype(mx.float32)).astype(out.dtype)
             out = out.reshape(B, T, self.n_heads, self.head_dim) * gate[..., None]
             out = out.reshape(B, T, self.n_heads * self.head_dim)
 
@@ -205,20 +210,37 @@ class LagunaMoE(nn.Module):
         B, T, H = x.shape
         flat = x.reshape(-1, H)
 
+        # HF reference (modeling_laguna.py LagunaTopKRouter / LagunaSparseMoeBlock):
+        #   router_logits = F.linear(x, gate.weight).float()          # (T, E)
+        #   routing_scores = sigmoid(router_logits)                    # (T, E)
+        #   scores_for_selection = routing_scores + e_score_correction_bias
+        #   _, top_k_idx = topk(scores_for_selection, k)
+        #   routing_weights = routing_scores.gather(idx)               # NOT scores_for_selection
+        #   routing_weights /= routing_weights.sum(-1, keepdim=True)
+        #   experts_out = experts(x, idx, routing_weights)
+        #   out = experts_out * routed_scaling_factor + shared_out
+        #
+        # Critical difference from the prior (broken) impl: bias is used
+        # ONLY to pick which experts get selected; the actual gating
+        # weight comes from the un-biased sigmoid scores. Adding the
+        # bias into the scoring path drove residual stream blow-up
+        # (std growth 0.29 → 11 across 30 layers, max=616 → garbage
+        # token saturation).
         logits = self.gate(flat).astype(mx.float32)
-        scores = mx.sigmoid(logits + self.e_score_correction_bias.astype(mx.float32))
+        scores = mx.sigmoid(logits)
+        scores_for_selection = scores + self.e_score_correction_bias.astype(mx.float32)
 
         k = self.top_k
-        inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
-        topk_scores = mx.take_along_axis(scores, inds, axis=-1)
+        inds = mx.argpartition(-scores_for_selection, kth=k - 1, axis=-1)[..., :k]
+        topk_scores = mx.take_along_axis(scores, inds, axis=-1)        # un-biased
         topk_scores = topk_scores / (mx.sum(topk_scores, axis=-1, keepdims=True) + 1e-20)
-        topk_scores = topk_scores * self.routed_scale
 
         # SwitchGLU expects (B*T, k) indices; flat already 2-D.
         y = self.switch_mlp(flat, inds)            # (B*T, k, H)
         y = (y * topk_scores[..., None].astype(y.dtype)).sum(axis=-2)
-
-        y = y + self.shared_expert(flat)
+        # Routed-scale applied to the routed-only contribution. Shared
+        # expert is NOT scaled — matches HF order exactly.
+        y = y * self.routed_scale + self.shared_expert(flat)
         return y.reshape(B, T, H).astype(x.dtype)
 
 

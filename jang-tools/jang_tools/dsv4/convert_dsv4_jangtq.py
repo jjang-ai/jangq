@@ -120,13 +120,41 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
         except ImportError:
             pass
 
-    # Norms + small tensors → fp16 passthrough
-    if ("norm" in n or n.endswith(".bias") or "attn_sink" in n
-            or ".ape" in n or "tid2eid" in n or n.startswith("hc_")
+    # P3 + P4 (HSA-CSA-SWA plan): tensors that are FP32 in source must stay
+    # at fp32 passthrough — fp16 round-trip loses 13 mantissa bits and the
+    # mHC mixing matrices + attention sinks rely on that precision.
+    # Per audit (research/DSV4-FLASH-MMLU-INVESTIGATION-2026-04-26.md):
+    #   - hc_*_fn / hc_*_base / hc_*_scale  : F32 source
+    #   - attn_sink                         : F32 source
+    #   - ffn.gate.bias (router bias)       : F32 source
+    # Total cost: ~135 MB extra in the bundle. Stays passthrough but at
+    # higher precision than the bf16-source case.
+    if ("attn_sink" in n
+            or n.startswith("hc_")
             or re.search(r"^layers\.\d+\.hc_", n)
             or re.search(r"^mtp\.\d+\.hc_", n)
-            or re.search(r"^layers\.\d+\.ffn\.gate\.(weight|bias)$", n)
+            or re.search(r"^layers\.\d+\.ffn\.gate\.bias$", n)
             ):
+        return 32, "passthrough", 0
+
+    # Norms + small tensors that are bf16-source → fp16 passthrough
+    if ("norm" in n or n.endswith(".bias")
+            or ".ape" in n or "tid2eid" in n
+            or re.search(r"^layers\.\d+\.ffn\.gate\.weight$", n)
+            ):
+        return 16, "passthrough", 0
+
+    # P2: Compressor + Indexer per-tensor quant policy (HSA + CSA layers).
+    # Source dtypes per audit:
+    #   - attn.indexer.weights_proj.weight   : BF16 → bf16 passthrough
+    #     (top-k decision projection — quant noise = wrong selection)
+    #   - attn.{compressor,indexer.compressor}.wkv.weight : BF16 → bf16 passthrough
+    #     (small low-rank pool aggregator; quant noise corrupts every pooled entry)
+    #   - attn.{compressor,...}.wgate.weight  : FP8 source → 8-bit affine (default)
+    #   - attn.indexer.wq_b.weight            : FP8 source → 8-bit affine (default)
+    if re.search(r"^layers\.\d+\.attn\.indexer\.weights_proj\.weight$", n):
+        return 16, "passthrough", 0
+    if re.search(r"^layers\.\d+\.attn(\.indexer)?\.compressor\.wkv\.weight$", n):
         return 16, "passthrough", 0
 
     # Router gate.weight → fp16 passthrough
@@ -285,8 +313,14 @@ def convert(
         bits, method, gsz = classify(name, profile_bits)
 
         if method == "passthrough":
-            t = idx.read_tensor(name, out_dtype=torch.float16)
-            arr = t.numpy() if t.dtype != torch.bfloat16 else t.float().numpy().astype(np.float16)
+            # bits=32 → keep F32 source intact (mHC fn matrices, sinks, gate.bias).
+            # bits=16 → cast to fp16 (norms, ape, etc).
+            if bits == 32:
+                t = idx.read_tensor(name, out_dtype=torch.float32)
+                arr = t.numpy().astype(np.float32)
+            else:
+                t = idx.read_tensor(name, out_dtype=torch.float16)
+                arr = t.numpy() if t.dtype != torch.bfloat16 else t.float().numpy().astype(np.float16)
             # AWQ fold (#44): if this is a post-attention layernorm (source
             # key `layers.N.ffn_norm.weight`) and we have a folded scale
             # for layer N, divide the layernorm weight by that scale.
