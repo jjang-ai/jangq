@@ -34,6 +34,7 @@ from .config import LagunaConfig
 # SwitchGLU lives in mlx_lm.models.switch_layers (vendored across all MoE
 # models we support). Falling back to a tiny copy isn't worth the size.
 from mlx_lm.models.switch_layers import SwitchGLU
+from mlx_lm.models.rope_utils import initialize_rope
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -51,11 +52,39 @@ class LagunaAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.layer_type = cfg.layer_types[layer_idx]
 
+        # Laguna ships per-layer-type RoPE under cfg.rope_parameters:
+        #   full_attention      = YaRN (rope_type=yarn, factor=32,
+        #                              original_max_position_embeddings=4096,
+        #                              attention_factor=1.0, partial_rotary_factor=0.5,
+        #                              rope_theta=500000)
+        #   sliding_attention   = default (rope_type=default,
+        #                              partial_rotary_factor=1.0,
+        #                              rope_theta=10000)
+        # Pull partial_rotary_factor from THIS layer's dict (1.0 on SWA = full
+        # rotary, 0.5 on full = half rotary). Pull rope_theta from THIS dict
+        # too (different bases per layer type — 500k vs 10k).
         rp = (cfg.rope_parameters or {}).get(self.layer_type, {})
         self.rope_base = rp.get("rope_theta", 10000.0)
         self.partial = rp.get("partial_rotary_factor", cfg.partial_rotary_factor)
         self.rope_dim = int(self.head_dim * self.partial)
         self.window = cfg.sliding_window if self.layer_type == "sliding_attention" else None
+
+        # initialize_rope dispatches on `rope_type`. Default = nn.RoPE,
+        # yarn = YarnRoPE. The HF YaRN dict uses `attention_factor` for
+        # the post-rotation length scaling (`mscale` in YarnRoPE's API),
+        # so remap that key.
+        scaling_cfg = None
+        if rp.get("rope_type") and rp.get("rope_type") != "default":
+            scaling_cfg = dict(rp)
+            if "attention_factor" in scaling_cfg and "mscale" not in scaling_cfg:
+                scaling_cfg["mscale"] = scaling_cfg.pop("attention_factor")
+        self.rope = initialize_rope(
+            self.rope_dim,
+            base=self.rope_base,
+            traditional=False,
+            scaling_config=scaling_cfg,
+            max_position_embeddings=cfg.max_position_embeddings,
+        )
 
         h = cfg.hidden_size
         self.q_proj = nn.Linear(h, self.n_heads * self.head_dim, bias=False)
@@ -75,17 +104,12 @@ class LagunaAttention(nn.Module):
         self.g_proj = nn.Linear(h, self.n_heads, bias=False) if cfg.gating else None
 
     def _rope(self, t: mx.array, offset: int) -> mx.array:
+        # Partial-rotary: apply RoPE to the first `rope_dim` of head_dim.
         if self.rope_dim == self.head_dim:
-            return mx.fast.rope(
-                t, self.head_dim, traditional=False,
-                base=self.rope_base, scale=1.0, offset=offset
-            )
+            return self.rope(t, offset=offset)
         rot = t[..., :self.rope_dim]
         keep = t[..., self.rope_dim:]
-        rot = mx.fast.rope(
-            rot, self.rope_dim, traditional=False,
-            base=self.rope_base, scale=1.0, offset=offset
-        )
+        rot = self.rope(rot, offset=offset)
         return mx.concatenate([rot, keep], axis=-1)
 
     def __call__(self, x: mx.array, mask=None, cache=None) -> mx.array:
