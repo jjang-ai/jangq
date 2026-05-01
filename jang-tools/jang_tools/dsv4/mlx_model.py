@@ -1060,7 +1060,21 @@ class DeepseekV4Attention(nn.Module):
                 P = pooled.shape[1]
                 if P > 0:
                     if hasattr(self, "indexer"):
-                        topk = self.indexer(x, q_residual, self.compress_rope, self.rope, v4_cache, offset)
+                        # A3 (HSA+CSA next-levers, 2026-05-01): when the pool
+                        # is smaller than the indexer's top_k window, every
+                        # entry would be selected anyway. Skip the indexer
+                        # score path and let the mask fall back to plain
+                        # _compressed_visibility (causal staircase, no
+                        # selection mask). Saves ~150 matmul dispatches per
+                        # token on short prefills × ~20 CSA layers. Quality
+                        # unchanged because top_k=512 of P≤512 is a no-op.
+                        index_topk = getattr(self.args, "index_topk", 512)
+                        if P <= index_topk:
+                            topk = None
+                        else:
+                            topk = self.indexer(x, q_residual,
+                                                self.compress_rope, self.rope,
+                                                v4_cache, offset)
                     else:
                         topk = None
 
@@ -1562,10 +1576,23 @@ class Model(nn.Module):
         from mlx_lm.models.cache import KVCache, RotatingKVCache
         import os
         long_ctx = os.environ.get("DSV4_LONG_CTX", "1") == "1"
+        # A1 (HSA+CSA next-levers, 2026-05-01): DSV4_POOL_QUANT=1 swaps the
+        # default DeepseekV4Cache for PoolQuantizedV4Cache, which 4-bit
+        # affine compresses pool entries (compressor + indexer state) on
+        # write. Memory savings: ~4x on the pool half of the cache. For
+        # 1M context HSA+CSA pools, that recovers ~4 GB. Quality unchanged
+        # because pool entries are heavily averaged inputs and 4-bit affine
+        # round-trip cosine on similar tensors stays >=0.996. Default off
+        # while we measure end-to-end.
+        pool_quant = os.environ.get("DSV4_POOL_QUANT", "0") == "1"
+        cache_cls = DeepseekV4Cache
+        if pool_quant:
+            from .pool_quant_cache import PoolQuantizedV4Cache
+            cache_cls = PoolQuantizedV4Cache
         caches = []
         for layer in self.model.layers:
             if long_ctx and layer.self_attn.compress_ratio:
-                caches.append(DeepseekV4Cache(self.args.sliding_window))
+                caches.append(cache_cls(self.args.sliding_window))
             else:
                 caches.append(KVCache())
         return caches
