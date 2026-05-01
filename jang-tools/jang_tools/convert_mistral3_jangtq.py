@@ -70,6 +70,35 @@ def fp8_e4m3_to_fp32(u8: np.ndarray) -> np.ndarray:
     return torch.from_numpy(u8.view(np.uint8)).view(torch.float8_e4m3fn).float().numpy()
 
 
+
+
+def _emit_jangtq_runtime_sidecar(out_dir: Path, in_feat_set: set, bits: int, seed: int) -> None:
+    """Write jangtq_runtime.safetensors next to the weight shards.
+
+    REQUIRED for any bundle uploaded to OsaurusAI — Osaurus uses the native
+    Swift JANGTQ runtime which refuses to start without this sidecar:
+        Error: Model '<name>' declares JANGTQ (weight_format: "mxtq") but is
+               missing required sidecar file 'jangtq_runtime.safetensors'.
+    Contains the deterministic codebooks + Hadamard rotation signs the Swift
+    loader uses to decode *.tq_packed weights. Tiny (~10 KB-200 KB).
+
+    See feedback_jangtq_swift_sidecar.md in /Users/eric/.claude memory.
+    """
+    from jang_tools.turboquant.codebook import compute_codebook
+    from jang_tools.turboquant.rotation import generate_random_signs
+    from safetensors.numpy import save_file
+    import numpy as _np
+    tensors = {}
+    for in_feat in sorted(in_feat_set):
+        cb = _np.asarray(compute_codebook(in_feat, bits), dtype=_np.float32)
+        signs = _np.asarray(generate_random_signs(in_feat, seed=seed), dtype=_np.float32)
+        tensors[f"codebook.{in_feat}.{bits}"] = cb
+        tensors[f"signs.{in_feat}.{seed}"] = signs
+    save_file(tensors, str(out_dir / "jangtq_runtime.safetensors"))
+    sz = sum(t.nbytes for t in tensors.values())
+    print(f"  wrote jangtq_runtime.safetensors ({len(tensors)} entries, "
+          f"{sz/1024:.1f} KB) for Swift Osaurus loader")
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     cfg = json.loads((SRC / "config.json").read_text())
@@ -186,6 +215,13 @@ def main():
     cfg["mxtq_bits"] = BITS
     cfg["routed_expert_bits"] = BITS  # invariant required even for dense (Swift fallback)
     (OUT / "config.json").write_text(json.dumps(cfg, indent=2))
+
+    # Emit Swift Osaurus loader sidecar (REQUIRED for OsaurusAI bundles)
+    _emit_jangtq_runtime_sidecar(
+        OUT,
+        in_feat_set={cfg["text_config"]["hidden_size"], cfg["text_config"]["intermediate_size"]},
+        bits=BITS, seed=SEED,
+    )
 
     for name in ("chat_template.jinja", "SYSTEM_PROMPT.txt", "generation_config.json",
                  "processor_config.json", "params.json",

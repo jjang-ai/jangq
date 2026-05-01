@@ -84,6 +84,35 @@ if PROFILE not in _BITS:
 EXPERT_BITS = _BITS[PROFILE]
 
 
+
+
+def _emit_jangtq_runtime_sidecar(out_dir: Path, in_feat_set: set, bits: int, seed: int) -> None:
+    """Write jangtq_runtime.safetensors next to the weight shards.
+
+    REQUIRED for any bundle uploaded to OsaurusAI — Osaurus uses the native
+    Swift JANGTQ runtime which refuses to start without this sidecar:
+        Error: Model '<name>' declares JANGTQ (weight_format: "mxtq") but is
+               missing required sidecar file 'jangtq_runtime.safetensors'.
+    Contains the deterministic codebooks + Hadamard rotation signs the Swift
+    loader uses to decode *.tq_packed weights. Tiny (~10 KB-200 KB).
+
+    See feedback_jangtq_swift_sidecar.md in /Users/eric/.claude memory.
+    """
+    from jang_tools.turboquant.codebook import compute_codebook
+    from jang_tools.turboquant.rotation import generate_random_signs
+    from safetensors.numpy import save_file
+    import numpy as _np
+    tensors = {}
+    for in_feat in sorted(in_feat_set):
+        cb = _np.asarray(compute_codebook(in_feat, bits), dtype=_np.float32)
+        signs = _np.asarray(generate_random_signs(in_feat, seed=seed), dtype=_np.float32)
+        tensors[f"codebook.{in_feat}.{bits}"] = cb
+        tensors[f"signs.{in_feat}.{seed}"] = signs
+    save_file(tensors, str(out_dir / "jangtq_runtime.safetensors"))
+    sz = sum(t.nbytes for t in tensors.values())
+    print(f"  wrote jangtq_runtime.safetensors ({len(tensors)} entries, "
+          f"{sz/1024:.1f} KB) for Swift Osaurus loader")
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -247,6 +276,13 @@ def main():
     config["mxtq_bits"] = EXPERT_BITS
     config["routed_expert_bits"] = EXPERT_BITS
     (OUT / "config.json").write_text(json.dumps(config, indent=2))
+
+    # Emit Swift Osaurus loader sidecar (REQUIRED for OsaurusAI bundles)
+    _emit_jangtq_runtime_sidecar(
+        OUT,
+        in_feat_set={cfg["hidden_size"], cfg["moe_intermediate_size"]},
+        bits=EXPERT_BITS, seed=SEED,
+    )
 
     # ---- copy ancillary files (chat_template, tokenizer, modeling_laguna) ---
     for name in ("chat_template.jinja", "generation_config.json",
