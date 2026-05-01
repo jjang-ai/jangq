@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.9"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX. v2.5.9: Mistral 3.5 (mistral3+pixtral) + Laguna XS.2 + MiMo V2.5 Pro support."
+version = "2.5.10"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX. v2.5.10: DSV4-Flash HSA+CSA+SWA tri-mode default ON; Mistral 3.5 + Laguna XS.2."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]

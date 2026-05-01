@@ -311,6 +311,36 @@ Reference: `research/JANGTQ-REFERENCE.md` §1-§9 (DSV4 entry §9).
 
 ## Changelog
 
+### v2.5.10 (2026-04-30)
+
+**DSV4-Flash HSA + CSA + SWA tri-mode runtime — turned ON by default.**
+
+The "known prefill shape bug" comment in `make_cache()` was stale: the §433-§436
+mask-construction fixes (build `[win_mask, comp_mask_extra]` when
+`long_ctx_kv_modified=True`) closed the broadcast crash long before this release.
+Verified end-to-end on `DeepSeek-V4-Flash-JANGTQ` 79 GB: 251-token prefill in
+30.9s, 41/43 layers running `DeepseekV4Cache` (Compressor + Indexer pool),
+2 SWA layers running plain `KVCache`. Synthetic shape harness covers 12/12
+(S, offset, compress_ratio, has_indexer) combinations.
+
+**Implication:** 41 of 43 attention layers now run the architecture the model
+was trained with. The 60% MMLU floor on prior releases was the runtime
+bypassing HSA + CSA, not the JANGTQ codec — codec round-trip cosine
+similarity stays ≥0.94 like every other model.
+
+**Convert-time per-mode quant policy** (`convert_dsv4_jangtq.py`):
+- `attn.{compressor,indexer.compressor}.wkv.weight` → bf16 passthrough
+- `attn.indexer.weights_proj.weight` → bf16 passthrough
+- F32-source `hc_*_{fn,base,scale}`, `attn_sink`, `ffn.gate.bias` →
+  fp32 in bundle (~135 MB extra; was fp16 = -13 mantissa bits)
+
+**Post-publication patcher** for older bundles:
+`python -m jang_tools.patch_dsv4_compressor_dtypes <bundle>` walks an existing
+JANGTQ bundle, dequantizes the misclassified Compressor + Indexer wkv /
+weights_proj weights back to fp16, removes the .scales/.biases sidecars.
+Cannot recover F32 source dtype for hc_*/sinks/gate.bias from a pre-existing
+fp16 bundle — re-convert from bf16 source for that.
+
 ### v2.5.9 (2026-04-30)
 
 **New model support:**
