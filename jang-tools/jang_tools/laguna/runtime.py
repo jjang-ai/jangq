@@ -85,6 +85,35 @@ def load(src: str):
                           ".mlp.e_score_correction_bias")
         return k
     weights = {_remap(k): v for k, v in weights.items()}
+
+    # 2026-04-30 expert weight packing for SwitchGLU. HF Laguna source
+    # stores experts unpacked as
+    #   layers.N.mlp.experts.E.{gate,up,down}_proj.weight
+    # SwitchGLU expects ONE packed tensor per matmul shaped
+    # (num_experts, out, in) under
+    #   layers.N.mlp.switch_mlp.{gate,up,down}_proj.weight
+    # Stack along axis=0 and rename. We only do this for the routed-expert
+    # path (NOT shared_expert, which is a regular DenseMLP).
+    import re as _re_pack
+    _expert_pat = _re_pack.compile(r"^(layers\.\d+\.mlp)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+    grouped: dict = {}
+    new_weights: dict = {}
+    for k, v in weights.items():
+        m = _expert_pat.match(k)
+        if not m:
+            new_weights[k] = v
+            continue
+        prefix, expert_idx, proj = m.group(1), int(m.group(2)), m.group(3)
+        grouped.setdefault((prefix, proj), {})[expert_idx] = v
+    for (prefix, proj), per_expert in grouped.items():
+        n_exp = max(per_expert.keys()) + 1
+        # Verify dense indexing 0..n_exp-1.
+        if set(per_expert.keys()) != set(range(n_exp)):
+            missing = set(range(n_exp)) - set(per_expert.keys())
+            raise ValueError(f"Expert pack: {prefix}.{proj} missing experts {sorted(missing)[:5]}…")
+        stacked = mx.stack([per_expert[i] for i in range(n_exp)], axis=0)
+        new_weights[f"{prefix}.switch_mlp.{proj}.weight"] = stacked
+    weights = new_weights
     if fmt in ("jang", "mxfp4", "jangtq"):
         # Group sizes / bits are in config.json["quantization"] for affine
         # paths; for JANGTQ they're per-module via jang_config.mxtq_bits
