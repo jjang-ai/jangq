@@ -1541,25 +1541,27 @@ class Model(nn.Module):
 
     def make_cache(self):
         """Build per-layer cache objects.
-        SHORT-PROMPT-SAFE default: use plain KVCache for all layers. Compressor
-        + Indexer fast-path is taken in DeepseekV4Attention (cache is None for
-        v4-state, so pooled is empty and skipped). This makes prompts up to
-        sliding_window=128 tokens behave identically to the pre-make_cache path.
-        For >128 tokens, attention falls back to local-only sliding-window context
-        (still coherent, but loses pooled-global benefit). To enable full
-        long-context behavior with Compressor + Indexer, set the env var
-        DSV4_LONG_CTX=1 — then compress_ratio>0 layers get DeepseekV4Cache.
+
+        Default: tri-mode HSA + CSA + SWA — `compress_ratio>0` layers use
+        `DeepseekV4Cache` (Compressor + Indexer pooled global), `compress_ratio==0`
+        layers use plain `KVCache`. This matches the architecture the model
+        was trained with.
+
+        The "known prefill shape bug" comment that lived here pre-2026-04-30
+        was stale — the §433-§436 mask-construction fixes (build our own
+        `[win_mask, comp_mask_extra]` when `long_ctx_kv_modified=True`) closed
+        the broadcast crash. Verified 2026-04-30 on DeepSeek-V4-Flash-JANGTQ
+        with a 251-token prompt: PREFILL OK in 31.6s, coherent next-token.
+        Synthetic shape harness in `dsv4/tests/test_long_ctx_shapes.py`
+        confirms 12/12 (S, offset, compress_ratio, indexer) combos.
+
+        Set `DSV4_LONG_CTX=0` to force the legacy SWA-only fallback (loses
+        the global-pool benefit; prompts >128 tokens regress to local-only
+        attention). Default is now `1`.
         """
         from mlx_lm.models.cache import KVCache, RotatingKVCache
         import os
-        # Default "0" = plain KVCache (sliding-window-only). DSV4_LONG_CTX=1
-        # enables DeepseekV4Cache (Compressor+Indexer pooled global). The
-        # long-ctx path has a known prefill shape bug on prompts that hit
-        # compress_ratio (manifests as `Shapes (L,L) and (1,H,L,big) cannot
-        # be broadcast` from SDPA mask). Until that bug is fixed, default
-        # off — sliding window is short-prompt-safe and matches verified
-        # 67% pass@1 HumanEval result on Mac Studio.
-        long_ctx = os.environ.get("DSV4_LONG_CTX", "0") == "1"
+        long_ctx = os.environ.get("DSV4_LONG_CTX", "1") == "1"
         caches = []
         for layer in self.model.layers:
             if long_ctx and layer.self_attn.compress_ratio:
