@@ -1,0 +1,21 @@
+{
+  "src": "/Volumes/EricsLLMDrive/jangq-ai/DeepSeek-V4-Flash-JANGTQ",
+  "qps": 3,
+  "subjects": [
+    "abstract_algebra",
+    "anatomy",
+    "astronomy",
+    "high_school_biology",
+    "high_school_chemistry",
+    "logical_fallacies",
+    "world_religions",
+    "college_computer_science",
+    "high_school_mathematics",
+    "college_physics"
+  ],
+  "correct": 23,
+  "total": 30,
+  "pct": 76.66666666666667,
+  "elapsed_min": 1.3542086164156595,
+  "DSV4_LONG_CTX": "1"
+}
