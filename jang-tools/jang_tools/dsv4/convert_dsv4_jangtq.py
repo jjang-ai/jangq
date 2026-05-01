@@ -176,7 +176,7 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
         # across multiple expert outputs → quantization noise compounds
         # harder. Bump them to higher bits via env DSV4_HASH_BITS=4 (default
         # off; opt-in until empirical pass@1 delta is measured).
-        hash_bits = int(_os.environ.get("DSV4_HASH_BITS", "0"))
+        hash_bits = int(_os.environ.get("DSV4_HASH_BITS", "3"))    # codesign §4.1 default ON
         n_hash_layers = int(_os.environ.get("DSV4_NUM_HASH_LAYERS", "3"))
         if hash_bits:
             layer_m = re.match(r"^layers\.(\d+)\.", n)
@@ -202,6 +202,18 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
     nonroute_bits = 16 if hp else (4 if lb else 8)
     nonroute_mode = "passthrough" if hp else "affine"
     nonroute_gsz = 0 if hp else gsz_default
+
+    # Codesign §4.1: layer 0 + last layer (compress_ratio=0, pure SWA, paper
+    # treats them as embedding-adjacent) get a higher precision floor for
+    # routed experts AND embed/head weights. wq_a/wq_b/wkv/wo_*/shared_*
+    # already at 8-bit affine on every layer; no further bump needed there.
+    # We bump embed/head to fp16 passthrough by default (only ~120 MB cost
+    # at vocab=129280 × hidden=4096 × 2B) since those carry the gradient
+    # bottleneck and any post-quant error propagates everywhere.
+    keep_embed_head = _os.environ.get("DSV4_EMBED_HEAD_PASSTHROUGH", "1") == "1"
+    if keep_embed_head and (n == "embed.weight" or n == "head.weight"):
+        return 16, "passthrough", 0
+
     if "shared_experts" in n and n.endswith(".weight"):
         return nonroute_bits, nonroute_mode, nonroute_gsz
     if re.search(r"attn\.(wq_a|wq_b|wkv|wo_a|wo_b)\.weight$", n):

@@ -59,11 +59,17 @@ class GenerateOptions:
 
 
 # ===== Mode defaults (battle-tested) =====
+# Paper Table 3 (DSV4-Flash): Think High needs >=8K, Think Max >=32K to
+# reach the published MMLU-Pro / LiveCodeBench / GPQA numbers. Earlier
+# defaults (4K/8K) cut the model off mid-thought before </think> →
+# never observed reasoning end → score collapses. Bumped 2026-05-01 per
+# research/dsv4/DSV4-COMPLETE-STATUS-2026-05-01.md §4 axis A.
+# Note: think_max temp 1.0 + top_p 0.95 mirrors the paper's pass@1-COT setting.
 MODE_DEFAULTS = {
-    "chat":      {"max_tokens": 2048, "temperature": 0.6,  "enable_thinking": False, "reasoning_effort": None},
-    "think":     {"max_tokens": 4096, "temperature": 0.6,  "enable_thinking": True,  "reasoning_effort": None},
-    "think_max": {"max_tokens": 8192, "temperature": 1.0,  "enable_thinking": True,  "reasoning_effort": "max"},
-    "fim":       {"max_tokens": 1024, "temperature": 0.6,  "enable_thinking": None,  "reasoning_effort": None},
+    "chat":      {"max_tokens": 2048,  "temperature": 0.6, "enable_thinking": False, "reasoning_effort": None},
+    "think":     {"max_tokens": 8192,  "temperature": 0.6, "enable_thinking": True,  "reasoning_effort": None},
+    "think_max": {"max_tokens": 32768, "temperature": 1.0, "enable_thinking": True,  "reasoning_effort": "max"},
+    "fim":       {"max_tokens": 1024,  "temperature": 0.6, "enable_thinking": None,  "reasoning_effort": None},
 }
 
 

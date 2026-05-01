@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.10"
+version = "2.5.11"
 description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. The GGUF equivalent for MLX. v2.5.10: DSV4-Flash HSA+CSA+SWA tri-mode default ON; Mistral 3.5 + Laguna XS.2."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
@@ -40,6 +40,9 @@ jang-convert-mistral3-mxfp4  = "jang_tools.convert_mistral3_mxfp4:main"
 jang-laguna-runtime  = "jang_tools.laguna.runtime:main"
 jang-mistral3-runtime = "jang_tools.mistral3.runtime:main"
 jang-mmlu = "jang_tools.eval.mmlu:main"
+jang-dsv4-codesign-smoke = "jang_tools.dsv4.experiments.codesign_smoke:main"
+jang-dsv4-build-role-codebooks = "jang_tools.dsv4.build_role_codebooks:main"
+jang-patch-dsv4-compressor-dtypes = "jang_tools.patch_dsv4_compressor_dtypes:main"
 [project.urls]
 Homepage = "https://jangq.ai"
 Repository = "https://github.com/jjang-ai/jangq"
