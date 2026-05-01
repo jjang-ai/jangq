@@ -200,10 +200,42 @@ def _warmup_jit_per_layer(model, verbose: bool = True) -> None:
                   "skipping", flush=True)
         return
 
+    hc_mult = None
+    for src in (
+        getattr(model, "config", None),
+        getattr(model, "args", None),
+        getattr(lm, "config", None),
+        getattr(lm, "args", None),
+    ):
+        if src is None:
+            continue
+            
+        def _get_val(obj, key):
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+            
+        # Flat hc_mult
+        hc_mult = _get_val(src, "hc_mult")
+        if hc_mult:
+            break
+        # Nested under text_config / text
+        for key in ("text_config", "text"):
+            sub = _get_val(src, key)
+            if sub is not None:
+                hc_mult = _get_val(sub, "hc_mult")
+                if hc_mult:
+                    break
+        if hc_mult:
+            break
+
     # 1-token dummy through each layer sequentially.
     import time as _time
     t0 = _time.time()
-    x = _mx.zeros((1, 1, H), dtype=_mx.bfloat16)
+    if hc_mult:
+        x = _mx.zeros((1, 1, int(hc_mult), H), dtype=_mx.bfloat16)
+    else:
+        x = _mx.zeros((1, 1, H), dtype=_mx.bfloat16)
     _materialize(x)
     if verbose:
         print(f"  [warmup] layer-by-layer 1-token forward "

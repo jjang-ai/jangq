@@ -56,6 +56,53 @@ def load(src: str):
         weights = load_affine(src, cfg)
     else:
         raise AssertionError(fmt)
+    # 2026-04-30 fix: quantized formats (jang affine, MXFP4, JANGTQ
+    # mixed-precision) ship `.weight + .scales + .biases` keys per
+    # Linear, but `model.update()` walks the tree against the bare
+    # `nn.Linear` modules instantiated by `LagunaForCausalLM.__init__`
+    # — which have NO `.scales` parameter, so the update raises:
+    #   ValueError: Module does not have parameter named "scales"
+    # Walk the weights once to swap matching `nn.Linear` modules to
+    # `nn.QuantizedLinear` BEFORE update, mirroring the pattern
+    # `mlx_lm.utils.load_model` uses (`nn.quantize` predicate that
+    # checks for sidecar keys). This is what makes JANG_2L / MXFP4 /
+    # JANGTQ-quantized Laguna bundles actually load.
+    # 2026-04-30 stack of key remappings to bridge HF safetensors layout
+    # to LagunaForCausalLM's flat module structure.
+    #   1. Strip leading `model.` prefix — HF stores the text decoder
+    #      under `model.embed_tokens.weight` etc, but Laguna flat-attaches
+    #      embed_tokens/layers/norm/lm_head at the wrapper root.
+    #   2. Drop the `experts.` infix on the MoE bias-correction key:
+    #      `mlp.experts.e_score_correction_bias` → `mlp.e_score_correction_bias`.
+    #      `self.experts` on `LagunaMoE` is a Python list of DenseMLPs
+    #      with no aggregate parameter slot; the bias lives on the parent
+    #      LagunaMoE module instead, so the key is renamed at load time.
+    def _remap(k: str) -> str:
+        if k.startswith("model."):
+            k = k[len("model."):]
+        if k.endswith(".mlp.experts.e_score_correction_bias"):
+            k = k.replace(".mlp.experts.e_score_correction_bias",
+                          ".mlp.e_score_correction_bias")
+        return k
+    weights = {_remap(k): v for k, v in weights.items()}
+    if fmt in ("jang", "mxfp4", "jangtq"):
+        # Group sizes / bits are in config.json["quantization"] for affine
+        # paths; for JANGTQ they're per-module via jang_config.mxtq_bits
+        # but `load_jangtq` in weight_loader_bf16 already dequantizes the
+        # JANGTQ codebook part to affine 8-bit before this point, so we
+        # treat all three quantized paths the same way: read group_size +
+        # bits from config and call nn.quantize with a predicate that
+        # only matches modules whose .scales key is in the weight map.
+        import json as _json
+        import mlx.nn as nn
+        cfg_json = _json.loads((Path(src) / "config.json").read_text())
+        qcfg = cfg_json.get("quantization") or {}
+        group_size = qcfg.get("group_size", 64)
+        bits = qcfg.get("bits", 4)
+        scale_keys = {k for k in weights.keys() if k.endswith(".scales")}
+        def _predicate(name, module):
+            return f"{name}.scales" in scale_keys
+        nn.quantize(model, group_size=group_size, bits=bits, class_predicate=_predicate)
     model.update(tree_unflatten(list(weights.items())))
     _force_eval(model.parameters())
     return model, cfg, fmt

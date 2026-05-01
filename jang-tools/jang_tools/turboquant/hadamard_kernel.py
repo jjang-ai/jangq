@@ -113,7 +113,7 @@ _HADAMARD_MULTIBLOCK_SOURCE = '''
             uint h = 1u << stage;
             uint two_h = 2u * h;
 
-            float newv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float newv[64];
             for (uint k = 0; k < ept; k++) {
                 uint i_local = tid * ept + k;
                 if (i_local < d_b) {

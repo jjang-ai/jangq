@@ -160,7 +160,7 @@ def _make_fused_rot_gather_source(in_features, n_split, opt=_GATHER_OPT, tgsize=
         for (uint stage = 0; stage < log_b; stage++) {{
             uint h = 1u << stage;
             uint two_h = 2u * h;
-            float newv[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            float newv[64];
             for (uint kk = 0; kk < ept_b; kk++) {{
                 uint i_local = tid * ept_b + kk;
                 if (i_local < d_b) {{

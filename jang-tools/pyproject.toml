@@ -39,6 +39,7 @@ jang-convert-mistral3-jangtq = "jang_tools.convert_mistral3_jangtq:main"
 jang-convert-mistral3-mxfp4  = "jang_tools.convert_mistral3_mxfp4:main"
 jang-laguna-runtime  = "jang_tools.laguna.runtime:main"
 jang-mistral3-runtime = "jang_tools.mistral3.runtime:main"
+jang-mmlu = "jang_tools.eval.mmlu:main"
 [project.urls]
 Homepage = "https://jangq.ai"
 Repository = "https://github.com/jjang-ai/jangq"

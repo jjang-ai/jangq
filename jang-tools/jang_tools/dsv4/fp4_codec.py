@@ -70,7 +70,7 @@ def dequant_fp4_blockwise(
     low = (w_u8 & 0x0F).long()
     high = ((w_u8 >> 4) & 0x0F).long()
     # Interleave low, high along dim 1 to reconstruct in_dim
-    vals = torch.stack([table[low], table[high]], dim=-1).flatten(1)  # (out_dim, in_dim)
+    vals = torch.stack([table[low], table[high]], dim=-1).flatten(1)  # (out_dim, in_dim) // fp4_block)
 
     # Apply block-wise scale (UE8M0 → fp32, one scale per fp4_block chunk)
     scale_fp32 = _ue8m0_to_fp32(scale_ue8m0)  # (out_dim, in_dim // fp4_block)

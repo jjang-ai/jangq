@@ -349,6 +349,24 @@ def convert(src: Path, dst: Path, profile: str, awq_scales_file: Path | None = N
     print(f"  output size: {total_bytes/1e9:.1f} GB", flush=True)
     print(f"  written to: {dst}", flush=True)
 
+    # Build jangtq_runtime.safetensors sidecar (required by Swift runtime;
+    # Python loader generates on the fly so it doesn't need this).
+    print(f"\n  Building jangtq_runtime.safetensors sidecar...", flush=True)
+    try:
+        from jang_tools.build_jangtq_sidecar import main as _build_sidecar
+        import sys as _sys
+        _argv_save = _sys.argv
+        _sys.argv = ["build_jangtq_sidecar", str(dst)]
+        try:
+            _build_sidecar()
+        finally:
+            _sys.argv = _argv_save
+        print(f"  [sidecar] built", flush=True)
+    except Exception as _e:
+        print(f"  [sidecar] FAILED: {_e} — run "
+              f"`python3 -m jang_tools.build_jangtq_sidecar {dst}` manually before upload",
+              flush=True)
+
 
 def main():
     ap = argparse.ArgumentParser()

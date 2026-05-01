@@ -103,6 +103,23 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
     # value for DSV4. Keep override env for future experiments.
     gsz_default = int(_os.environ.get("DSV4_GROUP_SIZE", "32"))
 
+    # JANG v3 per-tensor plan hook. When DSV4_V3_PLAN_PATH is set, defer
+    # to the bit-plan lookup. For FORMAT=jang we coerce mxtq→affine so
+    # the bundle is loadable via stock gather_qmm (no MXTQ codec runtime).
+    if _os.environ.get("DSV4_V3_PLAN_PATH", "").strip():
+        try:
+            from jang_tools.jang_v3.encode import lookup as _v3_lookup
+            v3 = _v3_lookup(n)
+            if v3 is not None:
+                v3_bits, v3_method, v3_gsz = v3
+                if FORMAT in ("jang", "jang_nobias") and v3_method == "mxtq":
+                    # Map MXTQ → standard affine. Group size = gsz_default
+                    # so all stacked experts within a layer share gs.
+                    return v3_bits, "affine", gsz_default
+                return v3_bits, v3_method, v3_gsz
+        except ImportError:
+            pass
+
     # Norms + small tensors → fp16 passthrough
     if ("norm" in n or n.endswith(".bias") or "attn_sink" in n
             or ".ape" in n or "tid2eid" in n or n.startswith("hc_")
@@ -137,7 +154,7 @@ def classify(name: str, profile_bits: int) -> tuple[int, str, int]:
             layer_m = re.match(r"^layers\.(\d+)\.", n)
             if layer_m and int(layer_m.group(1)) < n_hash_layers:
                 eff_bits = max(profile_bits, hash_bits)
-        if FORMAT == "jang":
+        if FORMAT in ("jang", "jang_nobias"):
             return eff_bits, "affine", gsz_default
         if eff_bits == 2:
             return eff_bits, "mxtq", 0
@@ -339,11 +356,36 @@ def convert(
                         fold_scale = awq_layernorm_fold.get(layer_idx)
                         if fold_scale is not None and fold_scale.shape[-1] == w.shape[-1]:
                             w = w * mx.array(fold_scale)[None, :].astype(w.dtype)
-                qw, qs, qb = mx.quantize(w, group_size=gsz or 64, bits=bits)
+                target_gsz = gsz or 64
+                if FORMAT == "jang_nobias" and is_routed_expert:
+                    if name.endswith("w1.weight"):
+                        target_gsz = 32
+                    elif name.endswith("w2.weight") or name.endswith("w3.weight"):
+                        target_gsz = 128
+                
+                # AWQ pre-scaling natively on MX GPU structure
+                if awq_norms and is_routed_expert:
+                    m_awq = re.search(r"layers\.(\d+)\.ffn\.experts\.\d+\.(w[123])\.weight$", name)
+                    if m_awq:
+                        layer_pfx, w_name = f"model.layers.{m_awq.group(1)}", m_awq.group(2)
+                        proj = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}[w_name]
+                        runtime_key = f"{layer_pfx}.mlp.switch_mlp.{proj}"
+                        norms = awq_norms.get(runtime_key)
+                        if norms is not None and norms.shape[-1] == w.shape[-1]:
+                            scale = (np.array(norms).astype(np.float32) + awq_eps) ** awq_alpha
+                            w = w * mx.array(scale)[None, :]
+                            if proj == "down_proj":
+                                awq_scales_out[runtime_key] = scale.astype(np.float32)
+                
+                qw, qs, qb = mx.quantize(w, group_size=target_gsz, bits=bits)
                 base = name[:-len(".weight")] if name.endswith(".weight") else name
                 add_tensor(f"{base}.weight", np.array(qw))
                 add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
-                add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
+                if FORMAT != "jang_nobias":
+                    add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
+                
+                if i % 100 == 0:
+                    mx.metal.clear_cache()
                 totals["affine"] += 1
 
         elif method == "mxtq":
@@ -498,7 +540,7 @@ def convert(
 
     (dst / "jang_config.json").write_text(json.dumps({
         "weight_format": "mxfp4_mixed" if FORMAT == "jangtq" and profile_bits == 4 else (
-            "affine" if FORMAT == "jang" else "mxtq"
+            "affine" if FORMAT in ("jang", "jang_nobias") else "mxtq"
         ),
         "profile": profile_name,
         "mxtq_seed": SEED,
@@ -622,7 +664,7 @@ def main() -> int:
     ap.add_argument("--dst", required=True, type=Path)
     ap.add_argument("--profile", type=int, default=2, choices=(2, 3, 4, 5, 6, 8),
                     help="Routed-expert bit count.")
-    ap.add_argument("--format", default="jangtq", choices=("jang", "jangtq"),
+    ap.add_argument("--format", default="jangtq", choices=("jang", "jangtq", "jang_nobias"),
                     help="jang=standard affine everywhere; jangtq=MXTQ for 2-bit routed.")
     ap.add_argument("--awq-norms", type=Path, default=None,
                     help="Optional awq_activations.safetensors from "

@@ -24,15 +24,26 @@ def _read_all(src: Path) -> dict:
         by_shard.setdefault(sh, []).append(k)
     out: dict = {}
     for shard, keys in by_shard.items():
-        with safe_open(str(src / shard), framework="numpy") as f:
-            for k in keys:
-                out[k] = f.get_tensor(k)
+        # 2026-04-30 fix: safe_open(framework="numpy") raises
+        # `TypeError: data type 'bfloat16' not understood` on safetensors
+        # shards stored in bf16 (Laguna-XS.2 source ships bf16). Use
+        # `mx.load` which understands bf16 natively. Slight memory
+        # increase since the whole shard goes through MLX in one pass,
+        # but the alternative of pulling torch in for `safe_open(framework="pt")`
+        # is heavier and we already require torch elsewhere only for the
+        # Stage-1 Omni bridge — not for Laguna.
+        path = str(src / shard)
+        shard_data = mx.load(path)
+        for k in keys:
+            if k in shard_data:
+                out[k] = shard_data[k]
     return out
 
 
 def load_bf16(src: str, cfg: LagunaConfig) -> dict:
     raw = _read_all(Path(src))
-    return {k: mx.array(v) for k, v in raw.items()}
+    # mx.load returns mx.array directly — no need to wrap.
+    return raw
 
 
 def load_affine(src: str, cfg: LagunaConfig) -> dict:

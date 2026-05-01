@@ -54,6 +54,27 @@ def load(src: str):
     # Streaming weight load — see weight_loader.py
     from .weight_loader import load_weights
     weights = load_weights(src, cfg, fmt)
+    # 2026-04-30 fix: mirrors the laguna runtime fix. Quantized formats
+    # (jang affine / MXFP4 / JANGTQ) ship `.scales + .biases` sidecars
+    # per Linear; `model.update()` traversing bare `nn.Linear` modules
+    # raises `Module does not have parameter named "scales"`. Walk weights,
+    # swap matching modules to `nn.QuantizedLinear` BEFORE update so the
+    # weight tree binds. Mistral3-specific note: the bundle keeps
+    # `model.vision_tower`, `model.multi_modal_projector`, and `lm_head`
+    # in bf16 (per `modules_to_not_convert`), so the predicate must skip
+    # any module without a `.scales` key — only the text decoder gets
+    # quantized.
+    if fmt in ("jang", "mxfp4", "jangtq"):
+        import json as _json
+        import mlx.nn as nn
+        cfg_json = _json.loads((Path(src) / "config.json").read_text())
+        qcfg = cfg_json.get("quantization") or {}
+        group_size = qcfg.get("group_size", 64)
+        bits = qcfg.get("bits", 4)
+        scale_keys = {k for k in weights.keys() if k.endswith(".scales")}
+        def _predicate(name, module):
+            return f"{name}.scales" in scale_keys
+        nn.quantize(model, group_size=group_size, bits=bits, class_predicate=_predicate)
     model.update(tree_unflatten(list(weights.items())))
     _force(model.parameters())
     return model, cfg, fmt

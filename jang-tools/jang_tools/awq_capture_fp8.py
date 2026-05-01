@@ -131,6 +131,9 @@ def _load_layer_weights(model_path: Path, weight_map: dict, li: int,
     for rel in keys_to_load:
         full = f"model.layers.{li}.{rel}"
         t = _load_tensor_by_name(model_path, weight_map, full)
+        if t is None:
+            full = f"layers.{li}.{rel}"
+            t = _load_tensor_by_name(model_path, weight_map, full)
         if t is not None:
             out[rel] = t
     return out
@@ -154,34 +157,33 @@ def _propagate_through_layer(h: np.ndarray, layer_weights: dict,
     if "input_layernorm.weight" in layer_weights:
         h_norm_attn = _rmsnorm(h, layer_weights["input_layernorm.weight"])
         stats["attn_input"] = np.abs(h_norm_attn).max(axis=(0, 1))
+    elif "attn_norm.weight" in layer_weights:
+        h_norm_attn = _rmsnorm(h, layer_weights["attn_norm.weight"])
+        stats["attn_input"] = np.abs(h_norm_attn).max(axis=(0, 1))
     else:
         h_norm_attn = h
-
-    # Skip MLA forward — it preserves hidden-state scale reasonably.
-    # The residual stream is h -> h + attn_out; we approximate attn_out
-    # as a small random perturbation scaled to match typical attention
-    # output magnitude.  For AWQ stats purposes, exact values don't
-    # matter — the distribution of MLP INPUT does.
-    # As a defensive choice we keep h as-is (attn contributes ~0).
 
     # Pre-MLP RMSNorm (the critical one for routed experts)
     if "post_attention_layernorm.weight" in layer_weights:
         h_norm_mlp = _rmsnorm(h, layer_weights["post_attention_layernorm.weight"])
+        stats["mlp_input"] = np.abs(h_norm_mlp).max(axis=(0, 1))
+    elif "ffn_norm.weight" in layer_weights:
+        h_norm_mlp = _rmsnorm(h, layer_weights["ffn_norm.weight"])
         stats["mlp_input"] = np.abs(h_norm_mlp).max(axis=(0, 1))
     else:
         h_norm_mlp = h
 
     # MLP forward — shared_expert for MoE, plain MLP for dense.
     if is_moe:
-        prefixes = ["mlp.shared_experts"]
+        prefixes = ["mlp.shared_experts", "ffn.shared_experts"]
     else:
-        prefixes = ["mlp"]
+        prefixes = ["mlp", "ffn"]
 
     mlp_out = np.zeros_like(h, dtype=np.float32)
     for p in prefixes:
-        gw = layer_weights.get(f"{p}.gate_proj.weight")
-        uw = layer_weights.get(f"{p}.up_proj.weight")
-        dw = layer_weights.get(f"{p}.down_proj.weight")
+        gw = layer_weights.get(f"{p}.gate_proj.weight") or layer_weights.get(f"{p}.w1.weight")
+        uw = layer_weights.get(f"{p}.up_proj.weight") or layer_weights.get(f"{p}.w3.weight")
+        dw = layer_weights.get(f"{p}.down_proj.weight") or layer_weights.get(f"{p}.w2.weight")
         if gw is None or uw is None or dw is None:
             continue
         gate = h_norm_mlp @ gw.T
@@ -222,20 +224,37 @@ def run_capture_fp8(model_path, output_path,
     print(f"  Weight map: {len(weight_map)} tensors", flush=True)
 
     # Load tokenizer for tokenizing calibration prompts.
-    # Falling back to byte-level encoding if tokenizer not available.
+    # §JANG_V3 (2026-04-27): transformers ≥4.50 requires `rope_parameters` in
+    # config.json. DSV4 source ships only `rope_scaling`. AutoTokenizer.from_
+    # pretrained tries to construct PreTrainedConfig and fails with
+    # `'PreTrainedConfig' object has no attribute 'max_position_embeddings'`
+    # → byte-level fallback → calibration stats become garbage (h.norm=1e12).
+    # Two-stage fix: (1) try PreTrainedTokenizerFast directly with just
+    # tokenizer.json (no config.json dependency), (2) fall back to a JANG
+    # bundle's tokenizer if the source has the rope_scaling issue, (3) byte
+    # last resort but warn loudly.
+    tok = None
     try:
-        from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
-        print(f"  tokenizer: {tok.__class__.__name__}", flush=True)
-
-        def encode_prompts(texts):
-            all_tokens = []
-            for t in texts:
-                ids = tok.encode(t)[:seq_len]
-                all_tokens.append(ids)
-            return all_tokens
+        from transformers import PreTrainedTokenizerFast
+        tok_json = Path(model_path) / "tokenizer.json"
+        if tok_json.exists():
+            tok = PreTrainedTokenizerFast(tokenizer_file=str(tok_json))
+            print(f"  tokenizer: PreTrainedTokenizerFast (direct from tokenizer.json)", flush=True)
     except Exception as e:
-        print(f"  tokenizer load failed ({e}); using byte-level", flush=True)
+        print(f"  PreTrainedTokenizerFast load failed: {e}", flush=True)
+    if tok is None:
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+            print(f"  tokenizer: {tok.__class__.__name__}", flush=True)
+        except Exception as e:
+            print(f"  AutoTokenizer load failed: {e}", flush=True)
+    if tok is not None:
+        def encode_prompts(texts):
+            return [tok.encode(t)[:seq_len] for t in texts]
+    else:
+        print(f"  ⚠ TOKENIZER LOAD FAILED — falling back to byte-level. "
+              f"AWQ stats will be GARBAGE. Fix tokenizer or pass --tokenizer-path.", flush=True)
         def encode_prompts(texts):
             return [list(t.encode("utf-8"))[:seq_len] for t in texts]
 
@@ -255,7 +274,9 @@ def run_capture_fp8(model_path, output_path,
         model_path, weight_map, "model.embed_tokens.weight"
     )
     if embed is None:
-        raise RuntimeError("embed_tokens not found in weight_map")
+        embed = _load_tensor_by_name(model_path, weight_map, "embed.weight")
+    if embed is None:
+        raise RuntimeError("embed.weight not found in weight_map")
     print(f"    embed: {embed.shape}{embed.dtype}  "
           f"norm={np.linalg.norm(embed):.1f}  "
           f"in {time.time()-t0:.1f}s", flush=True)
@@ -285,6 +306,8 @@ def run_capture_fp8(model_path, output_path,
     ATTN_KEYS = [
         "input_layernorm.weight",
         "post_attention_layernorm.weight",
+        "attn_norm.weight",
+        "ffn_norm.weight",
     ]
     MLP_KEYS_DENSE = [
         "mlp.gate_proj.weight",
@@ -295,6 +318,9 @@ def run_capture_fp8(model_path, output_path,
         "mlp.shared_experts.gate_proj.weight",
         "mlp.shared_experts.up_proj.weight",
         "mlp.shared_experts.down_proj.weight",
+        "ffn.shared_experts.w1.weight",
+        "ffn.shared_experts.w3.weight",
+        "ffn.shared_experts.w2.weight",
     ]
 
     print("  Running layer-by-layer forward...", flush=True)

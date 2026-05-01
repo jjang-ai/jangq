@@ -103,14 +103,21 @@ def make_messages(problem, mode):
 
 def extract_code(text, entry_point):
     """Robust: strip <think>, prefer FIRST non-empty fence containing entry_point,
-    fall back to first fence, unclosed open, then raw text."""
+    fall back to first fence, unclosed open, then raw text.
+
+    §427 (2026-04-25): also handle the case where the model writes
+    multiple fenced blocks, of which only the LAST is the actual answer
+    (common when DSV4 explains, then writes the final code). When the
+    last fence has a `def {entry_point}` header, prefer it.
+    """
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     fences = [f.strip() for f in CODE_FENCE_RE.findall(text) if f.strip()]
     keyed = [f for f in fences if entry_point in f]
     if keyed:
-        code = keyed[0]
+        # Prefer LAST keyed fence (model's final answer in a verbose chat).
+        code = keyed[-1]
     elif fences:
-        code = fences[0]
+        code = fences[-1]
     else:
         m = re.search(r"```(?:python)?\s*\n", text)
         if m:

@@ -55,12 +55,12 @@ from jang_tools.turboquant.linear import tq_quantize_weight
 
 SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else None
-PROFILE = sys.argv[3].upper() if len(sys.argv) > 3 else "JANGTQ2"
+PROFILE = sys.argv[3].upper() if len(sys.argv) > 3 else "JANGTQ"
 SEED = 42
 if SRC is None or OUT is None:
     print(__doc__); sys.exit(1)
 
-_BITS = {"JANGTQ2": 2, "JANGTQ3": 3, "JANGTQ4": 4}
+_BITS = {"JANGTQ": 2, "JANGTQ2": 2, "JANGTQ3": 3, "JANGTQ4": 4}
 if PROFILE not in _BITS:
     raise ValueError(f"unknown profile {PROFILE}")
 BITS = _BITS[PROFILE]

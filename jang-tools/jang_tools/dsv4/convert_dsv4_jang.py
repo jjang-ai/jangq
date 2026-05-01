@@ -94,8 +94,13 @@ def convert(src: Path, dst: Path, profile_bits: int) -> None:
     for i, name in enumerate(weight_keys):
         bits, method = classify(name, profile_bits)
         if method == "passthrough":
-            t = idx.read_tensor(name, out_dtype=torch.float16)
-            arr = t.numpy() if t.dtype != torch.bfloat16 else t.float().numpy().astype(np.float16)
+            src_dtype = idx.dtype_of(name)
+            if src_dtype == torch.float32:
+                t = idx.read_tensor(name, out_dtype=torch.float32)
+                arr = t.numpy().astype(np.float32)
+            else:
+                t = idx.read_tensor(name, out_dtype=torch.float16)
+                arr = t.numpy() if t.dtype != torch.bfloat16 else t.float().numpy().astype(np.float16)
             add_tensor(name, arr)
             totals["passthrough"] += 1
         else:  # affine

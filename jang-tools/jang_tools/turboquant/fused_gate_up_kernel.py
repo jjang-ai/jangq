@@ -157,6 +157,13 @@ _FUSED_SWIGLU_SOURCE = f'''
             float nu = static_cast<float>(norms_up[expert * out_features + oi]);
             float gv = acc_g[o] * ng;
             float uv = acc_u[o] * nu;
+            // §441 (2026-04-26): DSV4 swiglu_limit=10 clamp. Required per
+            // DSV4 design — without it, deep MoE stacks diverge numerically.
+            // Python-side _dsv4_swiglu (mlx_model.py:1280) clamps gate to
+            // (-inf, +10] and up to [-10, +10] BEFORE silu*mul. The fused
+            // Metal path was missing this — fixed now.
+            gv = metal::min(gv, 10.0f);              // gate clamp (max only)
+            uv = metal::clamp(uv, -10.0f, 10.0f);    // up clamp (symmetric)
             out_act[base_off + oi] = (gv / (1.0f + metal::fast::exp(-gv))) * uv;
         }}
     }}

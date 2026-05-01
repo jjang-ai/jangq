@@ -331,7 +331,7 @@ struct TestInferenceSheet: View {
     private func dropTargetView(label: String,
                                 systemImage: String,
                                 types: [UTType],
-                                onDrop onDropCallback: @escaping (URL) -> Void) -> some View {
+                                onDrop onDropCallback: @escaping @Sendable (URL) -> Void) -> some View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
             Text(label).font(.caption).lineLimit(1)

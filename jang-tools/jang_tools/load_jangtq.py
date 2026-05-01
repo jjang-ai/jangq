@@ -677,6 +677,16 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     qw_pat  = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.mlp\.)experts\.(gate_up_proj|down_proj|gate_proj|up_proj)$")
     # DSV4: layers.N.ffn.experts.E.w[123] → map to switch_mlp.{gate_proj,down_proj,up_proj}
     dsv4_pat = re.compile(rf"^({_VLM_PREFIX}layers\.\d+\.ffn\.)experts\.(\d+)\.(w[123])$")
+    # Nemotron-H (Cascade-2 + Nano-Omni): backbone.layers.N.mixer.experts.E.{up_proj|down_proj}
+    # Routed-expert ReLU² activation has only up + down (no gate). mlx_lm
+    # nemotron_h.sanitize stacks per-expert into switch_mlp.fc1/fc2 where
+    # fc1 = up_proj, fc2 = down_proj. Per
+    # research/NEMOTRON-OMNI-RUNTIME-2026-04-28.md §6 + trap #5.
+    # NOTE: Nemotron uses `backbone.` prefix (NOT `model.` like other
+    # families), so we use a dedicated literal-prefix regex here instead
+    # of the generic _VLM_PREFIX.
+    nemo_pat = re.compile(r"^(backbone\.layers\.\d+\.mixer\.)experts\.(\d+)\.(up_proj|down_proj)$")
+    nemo_map = {"up_proj": "fc1", "down_proj": "fc2"}
     mm_map  = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
     grouped_experts = {}
     # Pre-stacked tensors go straight into tq_groups with switch_mlp naming (no stacking).
@@ -704,6 +714,16 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             layer_prefix = m.group(1).replace(".ffn.", ".mlp.")
             expert_id = int(m.group(2))
             proj_name = mm_map[m.group(3)]
+            grouped_experts.setdefault((layer_prefix, proj_name), {})[expert_id] = tq_groups.pop(base)
+            continue
+        m = nemo_pat.match(base)
+        if m:
+            # Nemotron-H: backbone.layers.N.mixer.experts.E.{up,down}_proj →
+            # backbone.layers.N.mixer.switch_mlp.{fc1,fc2}.
+            # CRITICAL: emit under .mixer., NOT .mlp. (NemotronH uses .mixer.).
+            layer_prefix = m.group(1)
+            expert_id = int(m.group(2))
+            proj_name = nemo_map[m.group(3)]  # up_proj→fc1, down_proj→fc2
             grouped_experts.setdefault((layer_prefix, proj_name), {})[expert_id] = tq_groups.pop(base)
             continue
         m = qw_pat.match(base)
@@ -1151,6 +1171,17 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         _patched_attn_classes = set()
         for _, _mod in model.named_modules():
             if not (hasattr(_mod, "q_proj") and hasattr(_mod, "k_proj") and hasattr(_mod, "v_proj")):
+                continue
+            # P18 skip: NemotronHAttention (Cascade-2 + Nano-Omni hybrid).
+            # Its attention class uses `num_heads`/`n_kv_groups` instead of
+            # `num_attention_heads`/`num_key_value_heads` AND has no RoPE
+            # (position info comes from Mamba state). The fused path below
+            # crashes with `AttributeError: 'NemotronHAttention' object has
+            # no attribute 'num_attention_heads'`. Per
+            # research/NEMOTRON-OMNI-RUNTIME-2026-04-28.md §6 trap #4.
+            # Affine 8-bit attention without fusion is fine — only 6 attn
+            # layers in the 52-layer hybrid pattern.
+            if _mod.__class__.__name__ == "NemotronHAttention":
                 continue
             q, k, v = _mod.q_proj, _mod.k_proj, _mod.v_proj
             if not all(isinstance(p, _nn.QuantizedLinear) for p in (q, k, v)):

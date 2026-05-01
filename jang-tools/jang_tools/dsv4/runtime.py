@@ -60,10 +60,10 @@ class GenerateOptions:
 
 # ===== Mode defaults (battle-tested) =====
 MODE_DEFAULTS = {
-    "chat":      {"max_tokens": 1024, "temperature": 0.6,  "enable_thinking": False, "reasoning_effort": None},
+    "chat":      {"max_tokens": 2048, "temperature": 0.6,  "enable_thinking": False, "reasoning_effort": None},
     "think":     {"max_tokens": 4096, "temperature": 0.6,  "enable_thinking": True,  "reasoning_effort": None},
     "think_max": {"max_tokens": 8192, "temperature": 1.0,  "enable_thinking": True,  "reasoning_effort": "max"},
-    "fim":       {"max_tokens": 512,  "temperature": 0.6,  "enable_thinking": None,  "reasoning_effort": None},
+    "fim":       {"max_tokens": 1024, "temperature": 0.6,  "enable_thinking": None,  "reasoning_effort": None},
 }
 
 
@@ -143,8 +143,12 @@ def _sample(logits, T, top_p, min_p, repetition_penalty, recent_tokens):
         max_p = mx.max(probs, axis=-1, keepdims=True)
         lg = mx.where(probs < max_p * min_p, mx.array(-1e9, dtype=lg.dtype), lg)
     if T <= 0:
-        return mx.argmax(lg, axis=-1, keepdims=True)
-    return mx.random.categorical(lg / T, axis=-1)[:, None]
+        # lg is 1D (vocab,); argmax with keepdims returns (1,). Expand to (1,1)
+        # to match the [B=1, T=1] convention of the categorical branch + caller.
+        return mx.argmax(lg, axis=-1, keepdims=True)[None, :]
+    # lg is 1D (vocab,); categorical returns scalar — add batch dim for [:, None] caller convention.
+    sampled = mx.random.categorical((lg / T)[None, :], axis=-1)  # shape (1,)
+    return sampled[:, None]  # shape (1, 1) to match argmax+keepdims output
 
 
 def generate(model, tok, bundle, messages=None, *, opts: Optional[GenerateOptions] = None,
