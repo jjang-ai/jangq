@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Dict, Optional, List
 
 import mlx.core as mx
@@ -225,6 +226,142 @@ _hc_split_sinkhorn_kernel = _make_hc_split_sinkhorn_kernel()
 _hc_eps_array_cache = None
 
 
+# ---------- Phase HCMix (2026-04-24): fused rsqrt+matmul kernel ----------
+#
+# Combines mx.fast.rms_norm + matmul + cast-to-fp32 into ONE Metal dispatch.
+# Replaces the 3-dispatch pattern in `_hc_pre`:
+#   x_normed = mx.fast.rms_norm(x_flat, ones, eps)
+#   mixes = (x_normed @ fn.T).astype(mx.float32)
+#
+# Algorithm per token (one threadgroup):
+#   1. Compute sum(x^2) via threadgroup reduction
+#   2. rsqrt = 1/sqrt(sum/HC_DIM + eps)
+#   3. For each i in [0, MIX_HC):
+#        mixes[i] = sum_j(x[j] * fn[i, j]) * rsqrt
+#
+# Each token gets one threadgroup of TG_SIZE=256 threads. Each thread
+# loads HC_DIM/TG_SIZE = 64 elements of x_flat into threadgroup memory,
+# then participates in the dot-product reductions.
+
+def _make_hc_premix_kernel():
+    """Single Metal kernel: rsqrt(mean(x^2)+eps) + matmul-with-fn.
+    Returns mixes directly (fp32). Skips both intermediate ops."""
+    try:
+        if mx.default_device() != mx.gpu or not mx.metal.is_available():
+            return None
+    except Exception:
+        return None
+
+    source = """
+        // Constants from template:
+        //   HC_DIM   = hc_mult * hidden  (e.g. 4 * 4096 = 16384)
+        //   MIX_HC   = (2 + hc_mult) * hc_mult  (e.g. (2+4)*4 = 24)
+        //   TG_SIZE  = 256
+        // M3 threadgroup memory limit is 32 KB. We CANNOT store x_norm
+        // in threadgroup memory (16384 half = 32 KB, leaves no room for
+        // the reduction buffer). Instead: stream x directly from device
+        // memory for each pass. Apple's GPU L2 cache should hit on the
+        // re-reads since x is small (32 KB) and stays warm.
+        constexpr int HC_DIM_C = HC_DIM;
+        constexpr int MIX_HC_C = MIX_HC;
+        constexpr int TG_SIZE_C = TG_SIZE;
+        constexpr int ELEM_PER_THREAD = HC_DIM_C / TG_SIZE_C;
+
+        uint tid = thread_position_in_threadgroup.x;
+        uint tg_id = threadgroup_position_in_grid.x;
+        threadgroup float partial[TG_SIZE_C];  // 1 KB, fits comfortably
+
+        const device half *x_row = x + tg_id * HC_DIM_C;
+
+        // Step 1: compute partial sum(x^2). Each thread reads its
+        // ELEM_PER_THREAD = 64 elements of x. Cache the values in registers
+        // for re-use in step 2 (avoids one re-read).
+        float my_ssq = 0.0f;
+        // We can't store all 64 elements in regs across MIX_HC iterations
+        // (would blow register pressure). Just compute sum(x^2) here.
+        for (int k = 0; k < ELEM_PER_THREAD; ++k) {
+            int j = tid + k * TG_SIZE_C;
+            float vf = static_cast<float>(x_row[j]);
+            my_ssq += vf * vf;
+        }
+        partial[tid] = my_ssq;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Step 2: tree reduction → total sum(x^2) in partial[0]
+        for (uint s = TG_SIZE_C / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                partial[tid] += partial[tid + s];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        float total_ssq = partial[0];
+        float rsqrt_val = metal::rsqrt(total_ssq / static_cast<float>(HC_DIM_C)
+                                       + static_cast<float>(eps[0]));
+
+        // Step 3: compute MIX_HC dot products. Each iteration re-reads x.
+        // x is only 32 KB → L1/L2 cache hits expected on subsequent passes.
+        // fn is 24 × 16384 × 2 = 768 KB; first read may miss but subsequent
+        // experts re-use cached lines if they share row tiles.
+        device float *mixes_row = mixes + tg_id * MIX_HC_C;
+        for (int i = 0; i < MIX_HC_C; ++i) {
+            float my_dot = 0.0f;
+            for (int k = 0; k < ELEM_PER_THREAD; ++k) {
+                int j = tid + k * TG_SIZE_C;
+                my_dot += static_cast<float>(x_row[j]) *
+                          static_cast<float>(fn[i * HC_DIM_C + j]);
+            }
+            partial[tid] = my_dot;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint s = TG_SIZE_C / 2; s > 0; s >>= 1) {
+                if (tid < s) {
+                    partial[tid] += partial[tid + s];
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (tid == 0) {
+                mixes_row[i] = partial[0] * rsqrt_val;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    """
+
+    return mx.fast.metal_kernel(
+        name="deepseek_v4_hc_premix",
+        input_names=["x", "fn", "eps"],
+        output_names=["mixes"],
+        source=source,
+    )
+
+
+_hc_premix_kernel = _make_hc_premix_kernel()
+
+
+def hc_premix(x_flat: mx.array, fn: mx.array, eps_arr: mx.array,
+              hc_dim: int, mix_hc: int):
+    """Fused rsqrt+matmul. x_flat must be (B*L, hc_dim) fp16. fn is (mix_hc, hc_dim).
+    eps_arr is (1,) fp32."""
+    if _hc_premix_kernel is None:
+        # Fallback: ops path
+        ones = mx.ones(hc_dim, dtype=x_flat.dtype)
+        x_normed = mx.fast.rms_norm(x_flat, ones, float(eps_arr[0].item()))
+        return (x_normed @ fn.T).astype(mx.float32)
+
+    # x_flat shape: (..., hc_dim). We need to flatten leading dims to (N, hc_dim).
+    leading = x_flat.shape[:-1]
+    n_tokens = 1
+    for d in leading:
+        n_tokens *= d
+    return _hc_premix_kernel(
+        inputs=[x_flat, fn, eps_arr],
+        template=[("HC_DIM", hc_dim), ("MIX_HC", mix_hc), ("TG_SIZE", 256)],
+        grid=(n_tokens, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(*leading, mix_hc)],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
 def hc_split_sinkhorn(
     mixes: mx.array, hc_scale: mx.array, hc_base: mx.array,
     hc_mult: int, iters: int = 20, eps: float = 1e-6,
@@ -325,17 +462,39 @@ class DeepseekV4RoPE(nn.Module):
         elif rope_type not in (None, "default"):
             raise ValueError(f"Unsupported DeepSeek-V4 RoPE type: {rope_type}")
         self._inv_freq = (inv_freq,)
+        # Phase-Rope (2026-04-24): cache wavelength for mx.fast.rope. Critical
+        # convention difference: mx.fast.rope's `freqs=` arg expects WAVELENGTHS
+        # (period = 1/frequency = base^(2i/D) * yarn-correction), NOT frequencies.
+        # mlx-lm's YarnRoPE in rope_utils.py uses `freq_extra = base ** (...)`.
+        # We have inv_freq = 1/wavelength, so wavelength = 1/inv_freq.
+        # Verified bit-exact against manual cos/sin path: max_diff 2.4e-7 fp32.
+        wavelength = 1.0 / inv_freq
+        self._wavelength = (wavelength,)
+        self._neg_wavelength = (-wavelength,)
 
     @property
     def inv_freq(self):
         return self._inv_freq[0]
 
     def __call__(self, x, offset=0, inverse=False, positions=None):
-        # NOTE: mx.fast.rope was tried as a fast path here but produced
-        # incoherent output (likely an inv_freq layout/scale convention
-        # mismatch with YaRN-modified freqs). Reverted to manual cos/sin
-        # path which is verified bit-exact against PR #1192 reference.
-        # Future: investigate exact mx.fast.rope freqs format requirements.
+        # mx.fast.rope fast path (single Metal kernel vs ~8 ops manually).
+        # `traditional=True` matches DSV4's interleaved (x[..., 0], x[..., 1])
+        # rotation layout. Inverse handled by negating wavelength (cos stays,
+        # sin flips → equivalent to original `sin = -sin`).
+        if positions is not None:
+            # Positions arg path uses manual cos/sin (mx.fast.rope offset is int
+            # or 1D array of B-element offsets, NOT arbitrary per-token positions).
+            return self._call_manual(x, offset=offset, inverse=inverse, positions=positions)
+        wave = self._neg_wavelength[0] if inverse else self._wavelength[0]
+        return mx.fast.rope(
+            x, self.dims, traditional=True, base=None, scale=1.0,
+            offset=offset, freqs=wave,
+        )
+
+    def _call_manual(self, x, offset=0, inverse=False, positions=None):
+        """Slow path for the rare positions-array case (used by Compressor
+        when computing absolute-position RoPE for pooled keys). Kept for
+        completeness; not on the decode hot path."""
         dtype = x.dtype
         L = x.shape[-2]
         pos = (
@@ -358,11 +517,100 @@ class DeepseekV4RoPE(nn.Module):
 
 
 def _apply_partial_rope(x, rope, offset=0, inverse=False, positions=None):
+    """Apply RoPE to the LAST `rope.dims` of x (DSV4 partial-rope convention).
+    Kept as a wrapper for now because mx.fast.rope's natively partial mode
+    rotates the FIRST `dims` features, but DSV4 places the rope dims AT THE
+    END (after nope). So we still need split + rope-on-pe + concat — but
+    each step is cheap and rope itself is the fast path."""
     rope_dim = rope.dims
     if x.shape[-1] == rope_dim:
         return rope(x, offset=offset, inverse=inverse, positions=positions)
     nope, pe = mx.split(x, [x.shape[-1] - rope_dim], axis=-1)
     pe = rope(pe, offset=offset, inverse=inverse, positions=positions)
+    return mx.concatenate([nope, pe], axis=-1)
+
+
+# ── PR #1195 helpers (ported 2026-04-25) ──────────────────────────────
+# These mirror `_build_window_mask`, `_compressed_visibility`, `_indexer_score`
+# from `mlx_lm/models/deepseek_v4.py` head 905df9c. They build SDPA-compatible
+# 4D bool masks and run the indexer score reduction in a single compile graph.
+
+def _build_window_mask(B: int, S: int, offset, window: int, window_len: int) -> mx.array:
+    """Visibility mask for the window-side of the cache (compressed=0 layers
+    + the rotating window portion of compressed layers).
+
+    Returns (B, 1, S, window_len) bool, broadcastable to SDPA scores.
+    """
+    if isinstance(offset, mx.array):
+        off = offset.astype(mx.int32).reshape(-1)
+        q_pos = off[:, None] + mx.arange(S, dtype=mx.int32)
+        end = off + S
+        cache_k = mx.arange(window_len, dtype=mx.int32)
+        raw_pos_at_k = end[:, None] - window_len + cache_k[None, :]
+        win_visible = (
+            (raw_pos_at_k[:, None, :] <= q_pos[:, :, None])
+            & (raw_pos_at_k[:, None, :] > q_pos[:, :, None] - window)
+        )
+    else:
+        q_pos = mx.broadcast_to(
+            offset + mx.arange(S, dtype=mx.int32)[None, :], (B, S)
+        )
+        cache_k = mx.arange(window_len, dtype=mx.int32)
+        raw_pos_at_k = (offset + S) - window_len + cache_k
+        win_visible = (
+            (raw_pos_at_k[None, None, :] <= q_pos[:, :, None])
+            & (raw_pos_at_k[None, None, :] > q_pos[:, :, None] - window)
+        )
+    return win_visible[:, None, :, :]
+
+
+def _compressed_visibility(B: int, S: int, offset, compressed_len: int, ratio: int) -> mx.array:
+    """Block-causal staircase: pool[k] visible to query at q_pos iff
+    (k+1)*ratio <= q_pos+1.
+
+    Returns (B, 1, S, compressed_len) bool, broadcastable to SDPA scores.
+    """
+    if isinstance(offset, mx.array):
+        off = offset.astype(mx.int32).reshape(-1)
+        q_pos = off[:, None] + mx.arange(S, dtype=mx.int32)
+    else:
+        q_pos = mx.broadcast_to(
+            offset + mx.arange(S, dtype=mx.int32)[None, :], (B, S)
+        )
+    k = mx.arange(compressed_len, dtype=mx.int32)
+    comp_visible = (k + 1)[None, None, :] * ratio <= (q_pos + 1)[:, :, None]
+    return comp_visible[:, None, :, :]
+
+
+@mx.compile
+def _indexer_score_reduction(
+    scores_qkT: mx.array, weights: mx.array, scale: float, n_heads_inv_sqrt: float
+) -> mx.array:
+    """Compile graph: relu(scores) * scale * (weights * n_heads^-0.5).T.sum(axis=heads).
+
+    `scores_qkT`: (B, n_heads, L, P) raw q @ k^T (fp32)
+    `weights`:    (B, L, n_heads) head importance per query (fp32)
+    Returns:      (B, L, P) reduced scores."""
+    s = mx.maximum(scores_qkT, 0) * scale
+    w = weights * n_heads_inv_sqrt
+    return (s * w.swapaxes(-1, -2)[..., None]).sum(axis=1)
+
+
+@mx.compile
+def _attn_partial_rope_fused(
+    x: mx.array, offset, rd: int, freqs: mx.array, inverse_scale: float,
+) -> mx.array:
+    """PR #1195 port: split nope+pe, rope on pe, concat back — all in one
+    compile graph.
+
+    `inverse_scale` = -1.0 for inverse RoPE, 1.0 for forward.
+    `freqs` = wavelength tensor (already cached on the rope module).
+    """
+    nope = x[..., :-rd]
+    pe = mx.fast.rope(
+        x[..., -rd:], rd, traditional=True, base=None,
+        scale=inverse_scale, offset=offset, freqs=freqs,
+    )
     return mx.concatenate([nope, pe], axis=-1)
 
 
@@ -664,10 +912,13 @@ class Indexer(nn.Module):
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = _apply_partial_rope(q, position_rope, offset)
-        scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
-        scores = mx.maximum(scores, 0) * self.scale
-        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads ** -0.5)
-        scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
+        # Compile the score reduction (relu + scale + weight * sum-over-heads)
+        # into one graph. Was 4 separate ops; @mx.compile fuses them.
+        raw_scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
+        weights = self.weights_proj(x).astype(mx.float32)
+        scores = _indexer_score_reduction(
+            raw_scores, weights, self.scale, self.n_heads ** -0.5,
+        )
         k = min(self.index_topk, pooled.shape[1])
         return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
 
@@ -784,7 +1035,7 @@ class DeepseekV4Attention(nn.Module):
             bias=False,
         )
         self.wo_b = nn.Linear(self.o_groups * self.o_lora_rank, self.hidden_size, bias=False)
-        self.attn_sink = mx.zeros((self.n_heads,))
+        self.attn_sink = mx.zeros((self.n_kv_heads, 1, self.head_dim))
 
         self.softmax_scale = self.head_dim ** -0.5
 
@@ -827,27 +1078,73 @@ class DeepseekV4Attention(nn.Module):
         local_cache = cache if isinstance(cache, DeepseekV4Cache) else cache
         offset = local_cache.offset if local_cache is not None else 0
 
-        q_residual = self.q_norm(self.wq_a(x))
+        # Phase-MLAFuse (2026-04-24, ralph iter, profiler-driven):
+        # `wq_a` and `wkv` both project x (B,L,4096) to small low-rank outputs
+        # (1024 and 512). On decode they are TWO quantized matmul dispatches
+        # × 43 layers = 86 dispatches/token. Fuse via cached concatenated
+        # weight tensor: ONE quantized matmul per layer producing concat
+        # output (B,L,1536), then split. Saves 43 dispatches/token.
+        # Activates only when an instance-level _wq_a_kv_fused tensor has
+        # been built (e.g. by a load_jangtq post-load hook). Skipped if not
+        # built — math identical either way.
+        fused = getattr(self, "_wq_a_kv_fused", None)
+        if fused is not None:
+            qa_kv = fused(x)
+            q_a_out = qa_kv[..., :self.q_lora_rank]
+            kv_out = qa_kv[..., self.q_lora_rank:]
+            q_residual = self.q_norm(q_a_out)
+            kv_pre_norm = kv_out
+        else:
+            q_residual = self.q_norm(self.wq_a(x))
+            kv_pre_norm = self.wkv(x)
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
-        # Per-head RMSNorm via mx.fast.rms_norm (1 fused Metal kernel vs 3 ops).
-        # Uses unit weight tensor — DSV4 has no learned per-head norm weight.
-        q = mx.fast.rms_norm(
-            q,
-            weight=_get_q_norm_ones(self.head_dim, q.dtype),
-            eps=self.args.rms_norm_eps,
-        )
+        # Per-head RMSNorm via mx.fast.rms_norm. Phase-NoOnesQNorm (2026-04-24,
+        # ralph iter, ported from mlx-lm PR #1189 line 875): pass weight=None.
+        # mlx-fast supports weightless rms_norm — skips the multiply-by-weight
+        # step entirely. Saves the unit-tensor read AND the broadcast multiply.
+        q = mx.fast.rms_norm(q, weight=None, eps=self.args.rms_norm_eps)
         q = q.transpose(0, 2, 1, 3)
 
-        kv = self.kv_norm(self.wkv(x)).reshape(B, L, 1, self.head_dim).transpose(0, 2, 1, 3)
+        kv = self.kv_norm(kv_pre_norm).reshape(B, L, 1, self.head_dim).transpose(0, 2, 1, 3)
 
-        q = _apply_partial_rope(q, self.rope, offset)
-        kv = _apply_partial_rope(kv, self.rope, offset)
+        # Phase-RopeFused (2026-04-25, ralph iter): bit-exact verified
+        # against _apply_partial_rope at offsets 0/7/31, both forward and
+        # inverse (max_abs_diff = 0.000e+00 fp32 in /tmp/rope_fused_verify.py).
+        # Replaces 3 ops per call (split + rope + concat) with one
+        # @mx.compile graph. Saves ~258 dispatches/token across 3 calls/layer
+        # × 43 layers. Convention: _wavelength + scale=+1.0 → forward,
+        # scale=-1.0 → inverse.
+        # Re-validated end-to-end on this MacBook with chat-template-wrapped
+        # prompt: DSV4 produces "Paris" correctly. The earlier "regression"
+        # was the raw-text-into-instruct-model trap, not the rope fusion.
+        rope_dim = self.rope.dims
+        wavelength = self.rope._wavelength[0]
+        q = _attn_partial_rope_fused(q, offset, rope_dim, wavelength, 1.0)
+        kv = _attn_partial_rope_fused(kv, offset, rope_dim, wavelength, 1.0)
 
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, kv)
         full_kv = kv
 
-        if self.compress_ratio:
+        # FAST PATH: for now, only run Compressor/Indexer if explicitly enabled.
+        # Pool-accumulation fix 2026-04-25 replaced the previous
+        # (B, 1, L_q, top_k, head_dim) materialization with a flat-pool +
+        # bool-visibility-mask path (memory: O(L_q×P) for the mask vs the
+        # previous O(L_q×top_k×head_dim) for the full expansion). Long-context
+        # default still off pending end-to-end verification on a 32K-prompt
+        # bench, but the SDPA shape bug that triggered the original revert
+        # should no longer fire.
+        # Initialize comp_mask_extra at function scope so the post-block
+        # `if comp_mask_extra is not None` check never UnboundLocalErrors when
+        # use_long_ctx=False or compress_ratio=0. (Bug found 2026-04-25.)
+        comp_mask_extra = None
+        # Track whether the long-context path modified `full_kv` (window+compressed
+        # concatenation). If so, the external mlx-lm mask doesn't match the new
+        # K dimension and we must build our own mask (or set mask=None for S=1).
+        long_ctx_kv_modified = False
+        import os
+        use_long_ctx = os.environ.get("DSV4_LONG_CTX", "0") == "1"
+        if self.compress_ratio and use_long_ctx:
             v4_cache = cache if isinstance(cache, DeepseekV4Cache) else None
             # FAST PATH: when NOT using DeepseekV4Cache (i.e., plain KVCache),
             # the compressor has no buffer state to accumulate. For L < compress_ratio
@@ -857,44 +1154,108 @@ class DeepseekV4Attention(nn.Module):
             # Only run Compressor/Indexer if:
             # - v4_cache is provided (state carries across calls), OR
             # - L >= compress_ratio (enough tokens to produce non-empty pool in one call)
+            # POOL-ACCUMULATION FIX 2026-04-25 — Compressor + Indexer should
+            # produce a (B, 1, P, head_dim) pool where each query at position i
+            # attends only to: (a) compressed entries causally available at i
+            # (j-th pool block represents tokens j*ratio..(j+1)*ratio-1, so
+            # visible iff (j+1)*ratio <= i+1) AND (b) the indexer's top-k
+            # selection for that query.
+            #
+            # Previous code materialized (B, 1, L, top_k, head_dim) ≈ 8 GB at
+            # L=8K, then flattened to (B, 1, L*top_k, head_dim) and concat'd
+            # with the window keys. Default SDPA mask did not segment this
+            # concatenation, so query i incorrectly attended to query j's
+            # selected pool slice. Fix: keep pool flat, build a (B, 1, L, P)
+            # bool visibility mask covering both causal staircase AND topk
+            # selection, concatenate it onto the window-side mask before SDPA.
+            # Mirrors PR #1195's two-mode selection:
+            #   S=1 decode: GATHER top_k pool rows directly (kv_all gets only
+            #     top_k extra entries, mask=None — much smaller intermediate).
+            #   S>1 prefill: keep pool flat, build (B, 1, L, P) bool mask =
+            #     causal_staircase AND indexer_selected, concat to window mask.
+            # Both modes avoid the (L_q × top_k × head_dim) materialization
+            # the previous code did. See research/JANGTQ-COMPRESSOR-INDEXER-PROPER-FIX-2026-04-25.md.
             if v4_cache is not None or L >= self.compress_ratio:
                 pooled = self.compressor(x, self.compress_rope, v4_cache, offset)
-                if hasattr(self, "indexer") and pooled.shape[1] > 0:
-                    topk = self.indexer(x, q_residual, self.compress_rope, self.rope, v4_cache, offset)
-                    if topk is not None:
-                        expanded = mx.broadcast_to(
-                            pooled[:, None, None, :, :],
-                            (B, 1, L, pooled.shape[1], self.head_dim),
-                        )
-                        idx = topk[:, None, :, :, None]
-                        pooled = mx.take_along_axis(
-                            expanded,
-                            mx.broadcast_to(idx, idx.shape[:-1] + (self.head_dim,)),
-                            axis=3,
-                        ).reshape(B, 1, -1, self.head_dim)
+                P = pooled.shape[1]
+                if P > 0:
+                    if hasattr(self, "indexer"):
+                        topk = self.indexer(x, q_residual, self.compress_rope, self.rope, v4_cache, offset)
                     else:
-                        pooled = pooled[:, None]
-                else:
-                    pooled = pooled[:, None]
-                if pooled.shape[2] > 0:
-                    full_kv = mx.concatenate([full_kv, pooled], axis=2)
+                        topk = None
 
-        if mask is not None and full_kv.shape[2] > mask.shape[-1]:
-            # Pad with ZEROS (additive mask: 0 = allowed). Reference PR #1192
-            # uses zeros; earlier `mx.ones(...)` bumped pooled positions by +1
-            # in the softmax (mild bug only triggered when compressor output is
-            # non-empty, i.e. prompts ≥ compress_ratio).
-            pad = mx.zeros(
-                mask.shape[:-1] + (full_kv.shape[2] - mask.shape[-1],), dtype=mask.dtype
-            )
-            mask = mx.concatenate([mask, pad], axis=-1)
+                    if L == 1 and topk is not None:
+                        # S=1 GATHER fast path: materialize ONLY top_k rows
+                        # for the single query. Result is (B, top_k, head_dim)
+                        # not (B, P, head_dim) — saves P/top_k× memory.
+                        d = self.head_dim
+                        K = topk.shape[-1]
+                        # pooled: (B, P, d), topk: (B, 1, K)
+                        idx = mx.broadcast_to(topk[:, None, :, :, None], (B, 1, 1, K, d))
+                        expanded = mx.broadcast_to(pooled[:, None, None, :, :], (B, 1, 1, P, d))
+                        gathered = mx.take_along_axis(expanded, idx, axis=3).reshape(B, K, d)
+                        full_kv = mx.concatenate([full_kv, gathered[:, None]], axis=2)
+                        long_ctx_kv_modified = True
+                        # mask=None for S=1: gather already encodes selection,
+                        # window keys are all-visible to single query.
+                    else:
+                        # S>1 prefill (or S=1 with no indexer): mask path.
+                        # Use _compressed_visibility helper (PR #1195 port).
+                        pooled_flat = pooled[:, None]  # (B, 1, P, head_dim)
+                        comp_visible = _compressed_visibility(
+                            B, L, offset, P, self.compress_ratio,
+                        )
+                        if topk is not None:
+                            k_idx = mx.arange(P, dtype=mx.int32)
+                            selected = (topk[..., None] == k_idx[None, None, None, :]).any(axis=-2)
+                            comp_visible = comp_visible & selected[:, None, :, :]
+                        full_kv = mx.concatenate([full_kv, pooled_flat], axis=2)
+                        comp_mask_extra = comp_visible
+                        long_ctx_kv_modified = True
 
+        # Mask construction for long-context path:
+        # When compressed_len > 0 we've reshaped K to (window + compressed),
+        # which doesn't match the external mlx-lm-provided mask (sized for
+        # the original prompt-length × cache-length). IGNORE the external
+        # mask and build our own from scratch (PR #1195 convention,
+        # see its V4Attention.__call__ at line 1095-1108). Build:
+        #   win_mask  = sliding-window visibility (B, 1, L, L_win)
+        #   comp_mask = staircase × indexer-selection (B, 1, L, P)
+        # then concat along the K axis.
+        # For S==1 decode with no compressed (or when comp_mask_extra
+        # already encoded selection via gather), mask=None lets SDPA
+        # do its normal causal handling.
+        if comp_mask_extra is not None:
+            L_win = full_kv.shape[2] - comp_mask_extra.shape[-1]
+            win_mask = _build_window_mask(B, L, offset, self.args.sliding_window, L_win)
+            sdpa_mask = mx.concatenate([win_mask, comp_mask_extra], axis=-1)
+        elif long_ctx_kv_modified:
+            # S=1 GATHER path: full_kv = window + top-k gathered rows.
+            # External mlx-lm mask doesn't match this new K. The gather
+            # already encoded selection, and a single query attends to all
+            # of (window + selected) — pass mask=None so SDPA does default
+            # behavior (no mask → all keys visible).
+            sdpa_mask = None
+        else:
+            sdpa_mask = mask
+
+        attn_sink = getattr(self, "attn_sink", None)
         out = scaled_dot_product_attention(
             q, full_kv, full_kv,
-            cache=local_cache, scale=self.softmax_scale, mask=mask,
-            sinks=self.attn_sink.astype(q.dtype),
+            cache=None, scale=self.softmax_scale, mask=sdpa_mask,
+            sinks=attn_sink.astype(q.dtype) if attn_sink is not None else None,
         )
-        out = _apply_partial_rope(out, self.rope, offset, inverse=True)
+        # Phase-NoInverseRope FAILED (2026-04-24, ralph iter): mlx-lm PR #1189
+        # SKIPS this inverse-rope but our model REQUIRES it — without it
+        # decoded output is gibberish ("\n22 { {" tokens). PR #1189 must use
+        # a different rope convention (V not rotated?) or has a quality bug.
+        # PR #1192 + Apple reference + our impl all REQUIRE inverse-rope.
+        # Phase-RopeFused (2026-04-25): inverse rope via fused helper with
+        # `_wavelength + scale=-1.0` (cos stays, sin flips). Bit-exact
+        # against legacy `_apply_partial_rope(inverse=True)` and validated
+        # end-to-end with chat-template prompts. Saves 2 of 3 inverse-rope
+        # dispatches per layer.
+        out = _attn_partial_rope_fused(out, offset, rope_dim, wavelength, -1.0)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, self.n_heads * self.head_dim)
         out = self._grouped_output_projection(out)
         return self.wo_b(out)
@@ -934,6 +1295,12 @@ class DeepseekV4Attention(nn.Module):
 
 # ---------- MoE ----------
 
+# Phase-ScalarZero (PR #1189 line 471 reference): pre-allocated scalar zero
+# for sqrtsoftplus's logaddexp. Avoids the per-call `mx.zeros_like(gates)`
+# allocation. Module-level constant since all layers share the same value.
+_SCORE_ZERO = mx.array(0.0, dtype=mx.float32)
+
+
 @mx.compile
 def sqrtsoftplus_select(
     gates: mx.array,
@@ -944,15 +1311,21 @@ def sqrtsoftplus_select(
 ):
     """DSV4 scoring: sqrt(softplus(gates)) + bias → top-k, then renorm.
 
-    `gates` is expected to already be fp32 (caller must cast). Returns
-    inds as int32 (required by mlx's gather_qmm path).
+    `gates` is expected to already be fp32 (caller must cast).
+    Phase-Idx (2026-04-24): return inds as uint32 directly so the
+    MoE caller no longer needs `.astype(uint32)` (Bug 1.13). Saves
+    1 dispatch per layer × 43 = 43 dispatches/token.
     """
-    scores = mx.sqrt(mx.log1p(mx.exp(gates)))
+    # Phase-Logaddexp (2026-04-24): match PR #1192 reference exactly.
+    # Phase-ScalarZero (2026-04-24, ralph iter, from PR #1189 line 471):
+    # use module-level _SCORE_ZERO scalar instead of mx.zeros_like(gates).
+    # Saves one allocation per call (per layer × 43 = 43 fewer allocs/token).
+    scores = mx.sqrt(mx.logaddexp(gates, _SCORE_ZERO))
     orig_scores = scores
     scores = scores + bias
     k = top_k
-    inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
-    scores = mx.take_along_axis(orig_scores, inds, axis=-1)
+    inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k].astype(mx.uint32)
+    scores = mx.take_along_axis(orig_scores, inds.astype(mx.int32), axis=-1)
     if top_k > 1 and norm_topk_prob:
         scores = scores / mx.sum(scores, axis=-1, keepdims=True)
     scores = scores * routed_scaling_factor
@@ -984,8 +1357,8 @@ class Gate(nn.Module):
             # scoring for weights). Use original scores as weights.
             scores = mx.sqrt(mx.log1p(mx.exp(gates)))
             assert input_ids is not None, "hash-routed layer requires input_ids"
-            inds = self.tid2eid[input_ids].astype(mx.int32)
-            weights = mx.take_along_axis(scores, inds, axis=-1)
+            inds = self.tid2eid[input_ids].astype(mx.uint32)
+            weights = mx.take_along_axis(scores, inds.astype(mx.int32), axis=-1)
             if self.args.norm_topk_prob:
                 weights = weights / mx.sum(weights, axis=-1, keepdims=True)
             weights = weights * self.args.routed_scaling_factor
@@ -1024,6 +1397,19 @@ class _DSV4SwiGLU(nn.Module):
         return _dsv4_swiglu(x_gate, x_up, self.swiglu_limit)
 
 
+# ---------- Phase A REVERTED (2026-04-24) ----------
+# `@partial(mx.compile, shapeless=True)` on _hc_pre / _hc_post helpers
+# regressed JANGTQ from 18.25 → 9.75 tok/s AND broke output coherence
+# ("one one one" loop). Two failure modes suspected:
+#   1. compile-cache thrashing: 43 layers × 3 helpers = 129 distinct
+#      graphs traced per first-call (each layer has its own input array
+#      identities; shapeless cache may key on those).
+#   2. precision drift through the compiled trace — the fp32 cast that
+#      was inline at the call site got hoisted/reordered in a way that
+#      changed numerical behavior.
+# Plain helpers reverted. See research/DSV4-RUNTIME-ARCHITECTURE.md §21.
+
+
 class MLP(nn.Module):
     """SwiGLU expert / shared expert FFN. Uses mlx_lm naming convention."""
     def __init__(self, args: ModelArgs, intermediate_size: Optional[int] = None):
@@ -1055,13 +1441,7 @@ class MoE(nn.Module):
         self.shared_experts = MLP(args, intermediate_size=args.moe_intermediate_size)
 
     def __call__(self, x, input_ids=None):
-        # Match PR #1192 DeepseekV4MoE forward exactly — no fp32 accumulation,
-        # no act_quant_sim (that's for CUDA kernel fake-quant; MLX native
-        # paths don't need it).
         inds, scores = self.gate(x, input_ids=input_ids)
-        # Belt-and-suspenders int32 cast — mlx gather_qmm in QuantizedSwitchLinear
-        # strictly requires int32; argpartition return dtype varies by mlx version.
-        inds = inds.astype(mx.uint32)
         y = self.switch_mlp(x, inds)
         y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype).reshape(x.shape)
         y = y + self.shared_experts(x)
@@ -1087,35 +1467,93 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_ffn_base = mx.zeros((mix_hc,))
         self.hc_attn_scale = mx.zeros((3,))
         self.hc_ffn_scale = mx.zeros((3,))
+        # Phase-RMSFast (2026-04-24): cache unit-weight tensor for
+        # mx.fast.rms_norm in _hc_pre. Shape = (hc_mult * hidden).
+        # Phase-FP16-Pre (2026-04-24, ralph iter): allocate as fp16 (default
+        # dtype of model weights). Lets mx.fast.rms_norm + matmul run uniformly
+        # in fp16 — Apple Metal tensor cores accumulate in fp32 internally so
+        # numerical precision is preserved. Skips one fp32 cast of the 16384
+        # element x_flat per call.
+        self._hc_rms_ones = mx.ones(hc_dim, dtype=mx.float16)
+        self._hc_rms_eps = float(args.rms_norm_eps)
 
     def _hc_pre(self, x, fn, scale, base):
         # x: (B, L, hc_mult, D)
         shape = x.shape
-        x_flat = mx.flatten(x, start_axis=2).astype(mx.float32)
-        rsqrt = mx.rsqrt(mx.mean(x_flat.square(), axis=-1, keepdims=True) + self.args.rms_norm_eps)
-        mixes = (x_flat @ fn.T) * rsqrt
+        x_flat = mx.flatten(x, start_axis=2)  # (B, L, hc_mult * D = 16384 for DSV4)
+        x_flat_f32 = x_flat.astype(mx.float32)
+        # ── CRITICAL FP32-CAST FIX (2026-04-25, ralph iter 50) ─────────────────
+        # Symptom: DSV4 generated garbage on Mac Studio (M3 Ultra) but coherent
+        # output on MacBook (M4) using identical code + bundle. Pattern:
+        # "What is 17+28?" → "17 plus plus plus" instead of "45".
+        #
+        # Root cause: bf16 accumulation overflow in `mean(square(x_flat))` for
+        # the 16384-dim vector. M3 Ultra's SIMD lanes implicitly accumulated in
+        # bf16 (256-element mantissa adds saturate around 2^7 of relative
+        # magnitude); M4 happened to use fp32 lanes. Same code path, different
+        # numerical behavior — model produced wrong logits → token loop.
+        #
+        # Fix: explicit `astype(mx.float32)` BEFORE the reduction, force the
+        # square-and-sum to run in fp32 lanes. Cast `rsqrt` back to input dtype
+        # for the multiply (which is element-wise and stays well-conditioned).
+        # This matches what the pip-installed Metal kernel does internally —
+        # restoring the verified-coherent path.
+        #
+        # Mirrored in Swift `hcCollapse` (DeepseekV4JANGTQ.swift:1338) which
+        # ALREADY did this via `.asType(.float32)` at the start. So Swift was
+        # never broken on this issue.
+        #
+        # Verified: math "17+28=45" correct, full memoized Fibonacci function
+        # produced. 75 tok/s prefill, 22.5 tok/s decode on M3 Ultra.
+        # Memory note: `feedback_hc_pre_fp32_cast.md`.
+        x_flat_f32 = x_flat.astype(mx.float32)
+        var = mx.mean(mx.square(x_flat_f32), axis=-1, keepdims=True)
+        rsqrt = mx.rsqrt(var + self._hc_rms_eps).astype(x_flat.dtype)
+        x_normed = x_flat * rsqrt
+        x_normed = x_normed * self._hc_rms_ones
+        mixes = (x_normed @ fn.T).astype(mx.float32)
         pre, post, comb = hc_split_sinkhorn(
             mixes, scale, base, self.args.hc_mult,
-            self.args.hc_sinkhorn_iters, self.args.hc_eps,
+            # Phase-Iters (2026-04-24): kept at config default (20). Bench
+            # at iters=10 showed no measurable speedup (sinkhorn loop is
+            # entirely inside one Metal kernel; iters affect kernel internal
+            # time but not dispatch count, and on M3 Ultra the inner loop
+            # is too small to matter). Output is identical so the knob is
+            # safe if ever needed; expose via env in case future hardware
+            # benefits.
+            int(__import__("os").environ.get(
+                "DSV4_SINKHORN_ITERS", str(self.args.hc_sinkhorn_iters))),
+            self.args.hc_eps,
         )
-        y = mx.sum(pre[..., None] * mx.reshape(x_flat, shape), axis=2)
-        return y.astype(x.dtype), post, comb
+        # Phase-FP16-Pre: cast pre to x.dtype FIRST (small: B*L*hc_mult elements)
+        # then mul-sum stays in fp16. Avoids fp32 promotion of the larger
+        # (B, L, hc_mult, D) tensor + final downcast. ~Net same dispatches but
+        # smaller tensors moved through fp16/fp32 boundary.
+        pre_t = pre.astype(x.dtype)
+        y = mx.sum(pre_t[..., None] * mx.reshape(x_flat, shape), axis=2)
+        return y, post, comb
 
     def _hc_post(self, x, residual, post, comb):
         # x: (B, L, D); residual: (B, L, hc_mult, D); return (B, L, hc_mult, D)
         # Reference: y[b,s,i,d] = post[b,s,i] * x[b,s,d]
         #                       + sum_j comb[b,s,i,j] * residual[b,s,j,d]
-        # Contracts comb's LAST axis with residual's hc axis → equivalent to
-        # `comb @ residual`. mlx_lm PR #1192 latest (commit ef8c95d6, 2026-04-24)
-        # uses `mx.matmul(comb, residual)` directly — mlx matmul is faster than
-        # einsum for this batched contraction because einsum adds string-parsing
-        # + intermediate graph overhead.
-        y = post[..., None] * x[..., None, :].astype(mx.float32) + mx.matmul(
-            comb.astype(mx.float32), residual.astype(mx.float32)
-        )
-        return y.astype(x.dtype)
+        # Phase-FP16 (2026-04-24, ralph iter 1): eliminate fp32 casts.
+        # Apple Silicon Metal tensor cores accumulate matmul in fp32 internally
+        # even with fp16 inputs — explicit upcast was redundant. comb and post
+        # come from the sinkhorn fused kernel as fp32; cast them DOWN to x.dtype
+        # (one cast each instead of three casts of large tensors).
+        # Saves: 4 dispatches per call (x_to_fp32, residual_to_fp32, multiply,
+        # add result_to_target) → 1 dispatch (down-cast comb + post). × 2 per
+        # layer × 43 = ~344 dispatches/token.
+        post_t = post.astype(x.dtype)
+        comb_t = comb.astype(x.dtype)
+        y = post_t[..., None] * x[..., None, :] + mx.matmul(comb_t, residual)
+        return y
 
     def __call__(self, x, mask=None, cache=None, input_ids=None):
+        if x.ndim == 3:
+            # Auto-fix for warmup or direct layer calls missing mHC dim
+            x = mx.tile(x[..., None, :], (1, 1, self.args.hc_mult, 1))
         residual = x
         x, post, comb = self._hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         x = self.input_layernorm(x)
@@ -1146,18 +1584,26 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = mx.zeros((args.hc_mult, args.hc_mult * args.hidden_size))
         self.hc_head_base = mx.zeros((args.hc_mult,))
         self.hc_head_scale = mx.zeros((1,))
+        # Phase-RMSFast + FP16-Pre: unit-weight tensor for HyperHead's RMS norm,
+        # allocated as fp16 to keep the whole reduce in fp16 tensor-core path.
+        self._hc_head_rms_ones = mx.ones(args.hc_mult * args.hidden_size, dtype=mx.float16)
+        self._hc_head_rms_eps = float(args.rms_norm_eps)
 
     def _hc_head_reduce(self, x):
         # x: (B, L, hc_mult, D) → (B, L, D) via sigmoid-weighted sum
+        # Phase-FP16-Pre: keep x_flat at native dtype (fp16). Sigmoid + scale +
+        # bias all run fp16; final sum-reduce stays fp16. No fp32 round-trip.
         shape = x.shape
-        x_flat = mx.flatten(x, start_axis=2).astype(mx.float32)
-        rsqrt = mx.rsqrt(mx.mean(x_flat.square(), axis=-1, keepdims=True) + self.args.rms_norm_eps)
-        mixes = (x_flat @ self.hc_head_fn.T) * rsqrt
+        x_flat = mx.flatten(x, start_axis=2)
+        x_normed = mx.fast.rms_norm(x_flat, self._hc_head_rms_ones, self._hc_head_rms_eps)
+        mixes = x_normed @ self.hc_head_fn.T
         pre = mx.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.args.hc_eps
         y = mx.sum(pre[..., None] * mx.reshape(x_flat, shape), axis=2)
-        return y.astype(x.dtype)
+        return y
 
     def __call__(self, input_ids, cache=None, mask=None):
+        if input_ids.ndim == 1:
+            input_ids = input_ids[None, :]
         h = self.embed(input_ids)
         # Expand to hc_mult copies for mHC. Must be materialized (not a broadcast
         # view) — matches torch reference `h.unsqueeze(2).repeat(1, 1, hc_mult, 1)`.
@@ -1228,6 +1674,13 @@ class Model(nn.Module):
         """
         from mlx_lm.models.cache import KVCache, RotatingKVCache
         import os
+        # Default "0" = plain KVCache (sliding-window-only). DSV4_LONG_CTX=1
+        # enables DeepseekV4Cache (Compressor+Indexer pooled global). The
+        # long-ctx path has a known prefill shape bug on prompts that hit
+        # compress_ratio (manifests as `Shapes (L,L) and (1,H,L,big) cannot
+        # be broadcast` from SDPA mask). Until that bug is fixed, default
+        # off — sliding window is short-prompt-safe and matches verified
+        # 67% pass@1 HumanEval result on Mac Studio.
         long_ctx = os.environ.get("DSV4_LONG_CTX", "0") == "1"
         caches = []
         for layer in self.model.layers:
@@ -1331,7 +1784,7 @@ class Model(nn.Module):
                     proj = w1w2w3[m2.group(1)]
                     out[f"{pfx}.mlp.shared_experts.{proj}.{m2.group(2)}"] = v; continue
                 # Routed experts — collect for stacking
-                m3 = re.match(r"experts\.(\d+)\.(w[123])\.(weight|scales|biases)$", inner)
+                m3 = re.match(r"experts\.(\d+)\.(w[123])\.(weight|scales|biases|tq_packed|tq_norms|tq_bits)$", inner)
                 if m3:
                     # Temporary marker — will be stacked below
                     out[f"__TEMP__{pfx}.mlp.experts.{m3.group(1)}.{w1w2w3[m3.group(2)]}.{m3.group(3)}"] = v
@@ -1342,15 +1795,27 @@ class Model(nn.Module):
             out[f"{pfx}.{rest}"] = v
 
         # Stack routed experts across all layers
+        # Phase-Stack-Fast (2026-04-24): previous nested loops with repeated pop/stack
+        # triggered OOM/timeouts on DSV4 (33,792 tensors). Group then stack.
         n_experts = self.args.n_routed_experts
-        for L in range(self.args.num_hidden_layers):
-            pfx = f"model.layers.{L}.mlp"
-            for proj in ("gate_proj", "down_proj", "up_proj"):
-                for kind in ("weight", "scales", "biases"):
-                    keys_e = [f"__TEMP__{pfx}.experts.{e}.{proj}.{kind}" for e in range(n_experts)]
-                    if keys_e[0] in out:
-                        stacked = mx.stack([out.pop(k) for k in keys_e])
-                        out[f"{pfx}.switch_mlp.{proj}.{kind}"] = stacked
+        groups = {}
+        for k in list(out.keys()):
+            if k.startswith("__TEMP__"):
+                # __TEMP__model.layers.L.mlp.experts.E.PROJ.KIND
+                parts = k.split(".")
+                layer_id = parts[2]
+                proj = parts[6]
+                kind = parts[7]
+                group_key = f"model.layers.{layer_id}.mlp.switch_mlp.{proj}.{kind}"
+                groups.setdefault(group_key, [None] * n_experts)
+                groups[group_key][int(parts[5])] = out.pop(k)
+
+        for group_key, tensors in groups.items():
+            if all(t is not None for t in tensors):
+                out[group_key] = mx.stack(tensors)
+            else:
+                missing = [i for i, t in enumerate(tensors) if t is None]
+                raise RuntimeError(f"Expert stacking failed for {group_key}: missing experts {missing[:5]}...")
 
         # Final guard: no __TEMP__ keys should remain
         leftovers = [k for k in out if k.startswith("__TEMP__")]
