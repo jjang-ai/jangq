@@ -17,7 +17,12 @@ from typing import Any
 
 
 EXPERT_KEY_RE = re.compile(
-    r"^model\.layers\.(\d+)\.zaya_block\.experts\.local_experts\.(\d+)\.(linear_fc1|linear_fc2)\.weight$"
+    # ZAYA-text source emits `model.layers.N.zaya_block...`; ZAYA1-VL source
+    # emits `model.layers.N.mlp.zaya_block...` (extra `.mlp.` segment). The
+    # loader's _vlm_quant_weight_key_candidates handles both prefixes at load
+    # time, so the converter strips the `.mlp.` here and emits a unified output
+    # key under `expert_output_base` (no mlp).
+    r"^model\.layers\.(\d+)\.(?:mlp\.)?zaya_block\.experts\.local_experts\.(\d+)\.(linear_fc1|linear_fc2)\.weight$"
 )
 
 PROFILE_BITS = {
@@ -30,6 +35,18 @@ PROFILE_BITS = {
     "JANGTQ4": 4,
     "JANGTQ_4M": 4,
     "JANGTQ_4K": 4,
+    # Mixed-bit. Sentinel "mixed" tells convert_zaya_jangtq.py to consult
+    # ZAYA_JANGTQ_K_BITS for per-projection allocation. Same scheme that
+    # MiniMax-M2.7-JANGTQ_K ships (down=4, gate/up=2). Targets ZAYA's
+    # top-1 + MOD-passthrough sensitivity that breaks plain JANGTQ2.
+    "JANGTQ_K": "mixed",
+    "JANGTQK": "mixed",
+}
+
+ZAYA_JANGTQ_K_BITS = {
+    "gate_proj": 2,
+    "up_proj": 2,
+    "down_proj": 4,
 }
 
 CAPABILITIES = {
@@ -102,21 +119,24 @@ def _classify_tensor(
     shape: list[int],
     sf_path: Path,
     regular: list[tuple[str, list[int], Path]],
-    experts: dict[tuple[int, int], dict[str, tuple[list[int], Path]]],
+    experts: dict[tuple[int, int], dict[str, tuple[list[int], Path, str]]],
 ) -> None:
     m = EXPERT_KEY_RE.match(key)
     if m:
         layer = int(m.group(1))
         expert = int(m.group(2))
         kind = m.group(3)
-        experts.setdefault((layer, expert), {})[kind] = (shape, sf_path)
+        # Preserve the source key so callers can load the tensor without
+        # reconstructing the path themselves (VL bundles use a `.mlp.`
+        # segment that the text bundle doesn't).
+        experts.setdefault((layer, expert), {})[kind] = (shape, sf_path, key)
     else:
         regular.append((key, shape, sf_path))
 
 
-def _scan_source_from_headers(src: Path) -> tuple[list[tuple[str, list[int], Path]], dict[tuple[int, int], dict[str, tuple[list[int], Path]]]]:
+def _scan_source_from_headers(src: Path) -> tuple[list[tuple[str, list[int], Path]], dict[tuple[int, int], dict[str, tuple[list[int], Path, str]]]]:
     regular: list[tuple[str, list[int], Path]] = []
-    experts: dict[tuple[int, int], dict[str, tuple[list[int], Path]]] = {}
+    experts: dict[tuple[int, int], dict[str, tuple[list[int], Path, str]]] = {}
     index_path = src / "model.safetensors.index.json"
     if index_path.exists():
         index = load_json(index_path)
@@ -140,14 +160,14 @@ def _scan_source_from_headers(src: Path) -> tuple[list[tuple[str, list[int], Pat
     return regular, experts
 
 
-def scan_source(src: Path) -> tuple[list[tuple[str, list[int], Path]], dict[tuple[int, int], dict[str, tuple[list[int], Path]]]]:
+def scan_source(src: Path) -> tuple[list[tuple[str, list[int], Path]], dict[tuple[int, int], dict[str, tuple[list[int], Path, str]]]]:
     try:
         from safetensors import safe_open
     except Exception:
         return _scan_source_from_headers(src)
 
     regular: list[tuple[str, list[int], Path]] = []
-    experts: dict[tuple[int, int], dict[str, tuple[list[int], Path]]] = {}
+    experts: dict[tuple[int, int], dict[str, tuple[list[int], Path, str]]] = {}
     for sf_path in sorted(src.glob("model-*.safetensors")):
         with safe_open(str(sf_path), framework="numpy") as f:
             for key in f.keys():

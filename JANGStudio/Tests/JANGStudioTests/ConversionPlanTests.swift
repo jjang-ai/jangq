@@ -25,7 +25,7 @@ final class ConversionPlanTests: XCTestCase {
 
     func test_isJANGTQAllowed_matrix() {
         let p = ConversionPlan()
-        let whitelist = ["qwen3_5_moe", "minimax_m2"]
+        let whitelist = Capabilities.frozen.jangtqWhitelist
 
         p.detected = .init(modelType: "llama", isMoE: false, numExperts: 0, isVL: false,
                            isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
@@ -39,7 +39,11 @@ final class ConversionPlanTests: XCTestCase {
                            isVideoVL: false, hasGenerationConfig: true, dtype: .fp8, totalBytes: 0, shardCount: 1)
         XCTAssertTrue(p.isJANGTQAllowed(for: whitelist))
 
-        // GLM deferred to v1.1
+        p.detected = .init(modelType: "deepseek_v4", isMoE: true, numExperts: 256, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        XCTAssertTrue(p.isJANGTQAllowed(for: whitelist))
+
+        // GLM remains blocked until there is a proven GLM 5.1 runtime path.
         p.detected = .init(modelType: "glm_moe_dsa", isMoE: true, numExperts: 256, isVL: false,
                            isVideoVL: false, hasGenerationConfig: true, dtype: .fp8, totalBytes: 0, shardCount: 1)
         XCTAssertFalse(p.isJANGTQAllowed(for: whitelist))

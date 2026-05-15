@@ -15,8 +15,8 @@ final class CoverageMatrixTests: XCTestCase {
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: tmp) }
 
-    // 11 arch classes covering: dense, MoE (8/256 experts), VL image, VL video, every dtype,
-    // JANGTQ-whitelisted + non-whitelisted, MiniMax-class (custom .py required).
+    // Arch classes covering dense, MoE, VL, every dtype, JANGTQ-compatible
+    // families, and explicitly blocked families.
     private static let archClasses: [(model: String, experts: Int, isVL: Bool, isVideoVL: Bool,
                                       dtype: SourceDtype, label: String)] = [
         ("llama",           0,   false, false, .bf16, "dense llama BF16"),
@@ -28,8 +28,12 @@ final class CoverageMatrixTests: XCTestCase {
         ("qwen3_5_moe",     256, false, false, .fp8,  "qwen 256 experts FP8"),
         ("minimax_m2",      256, false, false, .fp8,  "minimax FP8"),
         ("minimax_m2",      256, false, false, .bf16, "minimax BF16"),
-        ("glm_moe_dsa",     256, false, false, .fp8,  "glm FP8 (JANGTQ blocked in v1)"),
-        ("deepseek_v32",    256, false, false, .bf16, "deepseek BF16"),
+        ("hy_v3",           192, false, false, .bf16, "hy3 BF16"),
+        ("deepseek_v4",     256, false, false, .bf16, "deepseek v4 BF16"),
+        ("zaya1_vl",        16,  true,  false, .bf16, "zaya VL BF16"),
+        ("bailing_hybrid",  256, false, false, .bf16, "ling BF16"),
+        ("glm_moe_dsa",     256, false, false, .fp8,  "glm FP8 (JANGTQ blocked)"),
+        ("deepseek_v32",    256, false, false, .bf16, "deepseek v32 blocked"),
     ]
 
     private func makePlan(_ c: (model: String, experts: Int, isVL: Bool, isVideoVL: Bool,
@@ -69,7 +73,8 @@ final class CoverageMatrixTests: XCTestCase {
     }
 
     func test_preflight_JANGTQ_rejectsNonWhitelistedArchs() throws {
-        let nonWhitelisted = Self.archClasses.filter { $0.model != "qwen3_5_moe" && $0.model != "minimax_m2" }
+        let whitelisted = Set(Capabilities.frozen.jangtqWhitelist)
+        let nonWhitelisted = Self.archClasses.filter { !whitelisted.contains($0.model) }
         for arch in nonWhitelisted {
             for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
                 let p = try makePlan(arch, family: .jangtq, profile: prof)
@@ -82,11 +87,12 @@ final class CoverageMatrixTests: XCTestCase {
     }
 
     func test_preflight_JANGTQ_acceptsWhitelistedWithBF16orFP8() throws {
+        let whitelistedModels = Set(Capabilities.frozen.jangtqWhitelist)
         let whitelisted = Self.archClasses.filter {
-            ($0.model == "qwen3_5_moe" || $0.model == "minimax_m2") && ($0.dtype == .bf16 || $0.dtype == .fp8)
+            whitelistedModels.contains($0.model) && ($0.dtype == .bf16 || $0.dtype == .fp8)
         }
         for arch in whitelisted {
-            for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
+            for prof in Profiles.frozen.jangtqProfileNames(for: arch.model) {
                 let p = try makePlan(arch, family: .jangtq, profile: prof)
                 let checks = PreflightRunner().run(plan: p, capabilities: .frozen)
                 XCTAssertEqual(checks.first { $0.id == .jangtqArchSupported }!.status, .pass,
@@ -104,7 +110,6 @@ final class CoverageMatrixTests: XCTestCase {
                     "JANG_3K", "JANG_3S", "JANG_3M", "JANG_3L",
                     "JANG_4K", "JANG_4S", "JANG_4M", "JANG_4L",
                     "JANG_5K", "JANG_6K", "JANG_6M"]
-        let jangtq = ["JANGTQ2", "JANGTQ3", "JANGTQ4"]
         for arch in Self.archClasses {
             for prof in jang {
                 let p = try makePlan(arch, family: .jang, profile: prof)
@@ -114,8 +119,8 @@ final class CoverageMatrixTests: XCTestCase {
                 XCTAssertTrue(args.contains(prof), "\(arch.label)/\(prof): profile not in args")
                 XCTAssertTrue(args.contains("--progress=json"), "\(arch.label)/\(prof): missing --progress=json")
             }
-            if arch.model == "qwen3_5_moe" || arch.model == "minimax_m2" {
-                for prof in jangtq {
+            if Capabilities.frozen.jangtqWhitelist.contains(arch.model) {
+                for prof in Profiles.frozen.jangtqProfileNames(for: arch.model) {
                     let p = try makePlan(arch, family: .jangtq, profile: prof)
                     let args = CLIArgsBuilder.args(for: p)
                     XCTAssertTrue(args[1].contains("jangtq"),

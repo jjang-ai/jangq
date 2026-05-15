@@ -184,11 +184,11 @@ def main() -> None:
             }
             for expert in range(n_experts):
                 parts = members[expert]
-                fc1_shape, fc1_sf = parts["linear_fc1"]
-                fc2_shape, fc2_sf = parts["linear_fc2"]
-                fc1 = load_tensor(fc1_sf, f"model.layers.{layer}.zaya_block.experts.local_experts.{expert}.linear_fc1.weight", fc1_shape)
+                fc1_shape, fc1_sf, fc1_name = parts["linear_fc1"]
+                fc2_shape, fc2_sf, fc2_name = parts["linear_fc2"]
+                fc1 = load_tensor(fc1_sf, fc1_name, fc1_shape)
                 gate, up = split_expert_fc1(fc1, hidden_size)
-                down = load_tensor(fc2_sf, f"model.layers.{layer}.zaya_block.experts.local_experts.{expert}.linear_fc2.weight", fc2_shape)
+                down = load_tensor(fc2_sf, fc2_name, fc2_shape)
                 stacks["gate_proj"][expert] = gate
                 stacks["up_proj"][expert] = up
                 stacks["down_proj"][expert] = down

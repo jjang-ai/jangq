@@ -1,6 +1,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[1] / "_internal/jang_v3").exists(),
+    reason="_internal/jang_v3 helpers are private and not shipped in the public repo",
+)
+
 
 def test_budget_solver_never_upgrades_dsv4_routed_layers_to_affine_8bit():
     """DSV4 V3 routed layers are only production-proven as 2/4-bit MXTQ."""

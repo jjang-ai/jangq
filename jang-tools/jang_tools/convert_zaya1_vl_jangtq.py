@@ -17,6 +17,7 @@ from jang_tools.convert_zaya1_vl_common import (
 )
 from jang_tools.convert_zaya_common import (
     PROFILE_BITS,
+    ZAYA_JANGTQ_K_BITS,
     affine_quantize,
     expert_output_base,
     finalize_shards,
@@ -63,7 +64,15 @@ def main() -> None:
     src = args.src.expanduser()
     out = args.out.expanduser()
     expert_bits = PROFILE_BITS[profile_key]
-    profile = f"JANGTQ{expert_bits}"
+    if expert_bits == "mixed":
+        # JANGTQ_K: per-projection bit allocation. See convert_zaya_jangtq.py
+        # for the rationale (down_proj 4-bit feeds residual, gate/up 2-bit
+        # gated by SwiGLU). Same scheme that MiniMax-M2.7-JANGTQ_K ships.
+        expert_bits_map = dict(ZAYA_JANGTQ_K_BITS)
+        profile = "JANGTQ_K"
+    else:
+        expert_bits_map = None
+        profile = f"JANGTQ{expert_bits}"
     group = int(args.group_size)
 
     if expert_bits == 3:
@@ -81,7 +90,11 @@ def main() -> None:
         print(f"  Source: {src}")
         print(f"  Output: {out}")
         print(f"  Expert layout: split linear_fc1 -> pre-stacked switch_mlp gate/up/down")
-        print(f"  Profile: routed_expert=mxtq-{expert_bits}, attention/embed=affine-8")
+        if expert_bits_map is not None:
+            bits_summary = ", ".join(f"{k}={v}" for k, v in expert_bits_map.items())
+            print(f"  Profile: routed_expert=mxtq-mixed ({bits_summary}), attention/embed=affine-8")
+        else:
+            print(f"  Profile: routed_expert=mxtq-{expert_bits}, attention/embed=affine-8")
 
         progress.phase(1, 3, "scan")
         regular, experts = scan_source(src)
@@ -95,15 +108,22 @@ def main() -> None:
                 else:
                     affine_count += 1
             layers = sorted({layer for layer, _expert in experts})
-            vals_per_u32 = 32 // expert_bits
-            packed_cols = (hidden_size + vals_per_u32 - 1) // vals_per_u32
             print("\n  Dry run policy:")
             print(f"    regular affine tensors: {affine_count}")
             print(f"    passthrough tensors:    {pass_count}")
             print(f"    expert layers:          {len(layers)}")
             print(f"    MXTQ expert groups:     {len(layers) * 3}")
-            print(f"    expert bits:            {expert_bits}")
-            print(f"    expert packed shape:    [{n_experts}, {hidden_size}, {packed_cols}] per projection")
+            if expert_bits_map is not None:
+                print(f"    expert bits:            mixed ({expert_bits_map})")
+                for proj, b in expert_bits_map.items():
+                    vals_per_u32 = 32 // b
+                    packed_cols = (hidden_size + vals_per_u32 - 1) // vals_per_u32
+                    print(f"      {proj} packed shape:  [{n_experts}, {hidden_size}, {packed_cols}] ({b}-bit)")
+            else:
+                vals_per_u32 = 32 // expert_bits
+                packed_cols = (hidden_size + vals_per_u32 - 1) // vals_per_u32
+                print(f"    expert bits:            {expert_bits}")
+                print(f"    expert packed shape:    [{n_experts}, {hidden_size}, {packed_cols}] per projection")
             print("    no output written")
             progress.done(ok=True, output="dry-run")
             return
@@ -166,14 +186,14 @@ def main() -> None:
             add_tensor(keys[2], qb)
             return True
 
-        def mxtq_emit(base: str, stack: np.ndarray) -> bool:
+        def mxtq_emit(base: str, stack: np.ndarray, bits: int) -> bool:
             keys = (f"{base}.tq_packed", f"{base}.tq_norms", f"{base}.tq_bits")
             if all(key in done_keys for key in keys):
                 return False
-            result = tq_quantize_experts_rowwise(stack, bits=expert_bits, seed=SEED)
+            result = tq_quantize_experts_rowwise(stack, bits=bits, seed=SEED)
             add_tensor(keys[0], result["packed"])
             add_tensor(keys[1], result["norms"])
-            add_tensor(keys[2], np.array([expert_bits], dtype=np.uint8))
+            add_tensor(keys[2], np.array([bits], dtype=np.uint8))
             return True
 
         progress.phase(2, 3, "convert")
@@ -228,7 +248,10 @@ def main() -> None:
                 del fc1, gate, up, down
 
             for proj, stack in stacks.items():
-                if mxtq_emit(expert_output_base(layer, proj), stack):
+                proj_bits = (
+                    expert_bits_map[proj] if expert_bits_map is not None else expert_bits
+                )
+                if mxtq_emit(expert_output_base(layer, proj), stack, proj_bits):
                     total_mxtq += 1
             del stacks
             gc.collect()
@@ -246,8 +269,13 @@ def main() -> None:
         }
         write_json(out / "model.safetensors.index.json", index)
 
+        routed_expert_meta: object
+        if expert_bits_map is not None:
+            routed_expert_meta = dict(expert_bits_map)
+        else:
+            routed_expert_meta = expert_bits
         mxtq_bits = {
-            "routed_expert": expert_bits,
+            "routed_expert": routed_expert_meta,
             "attention": 8,
             "router": 16,
             "embed_tokens": 8,
@@ -271,7 +299,7 @@ def main() -> None:
             "bits": 8,
             "group_size": group,
             "mode": "affine+mxtq",
-            "routed_expert_bits": expert_bits,
+            "routed_expert_bits": routed_expert_meta,
             "mxtq_bits": mxtq_bits,
             "expert_layout": "split_switch_mlp",
         }
@@ -296,7 +324,7 @@ def main() -> None:
             "quantization": {
                 "method": "affine+mxtq",
                 "group_size": group,
-                "bits_default": expert_bits,
+                "bits_default": expert_bits if expert_bits != "mixed" else "mixed",
             },
             "capabilities": zaya1_vl_capabilities(),
         }

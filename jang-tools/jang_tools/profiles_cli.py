@@ -21,6 +21,7 @@ import sys
 from typing import Any
 
 from .allocate import JANG_PROFILES, JANG_K_TARGETS, BIT_TO_PROFILE
+from .jangtq_matrix import family_matrix, profile_catalog
 
 
 # Human-readable descriptions per profile. Kept inline because it pairs with
@@ -43,17 +44,6 @@ _PROFILE_DESCRIPTIONS = {
     "JANG_6K": "K-quant 6-bit (budget-neutral)",
     "JANG_6M": "Near-lossless — 8-bit critical + everything else 6-bit",
 }
-
-# JANGTQ profile metadata. Names correspond to JANGTQ2/3/4 (2/3/4 bits per weight).
-_JANGTQ_PROFILES = [
-    {"name": "JANGTQ2", "bits": 2, "min_source_dtype": ["bfloat16", "float8_e4m3fn"],
-     "description": "2-bit TurboQuant — aggressive codebook, proven on MiniMax/Qwen3.6"},
-    {"name": "JANGTQ3", "bits": 3, "min_source_dtype": ["bfloat16", "float8_e4m3fn"],
-     "description": "3-bit TurboQuant — balanced size vs quality"},
-    {"name": "JANGTQ4", "bits": 4, "min_source_dtype": ["bfloat16", "float8_e4m3fn"],
-     "description": "4-bit TurboQuant — near-lossless TQ"},
-]
-
 
 def list_profiles() -> dict[str, Any]:
     jang = []
@@ -85,7 +75,8 @@ def list_profiles() -> dict[str, Any]:
         })
     return {
         "jang": jang,
-        "jangtq": _JANGTQ_PROFILES,
+        "jangtq": profile_catalog(),
+        "jangtq_families": family_matrix(),
         "default_profile": "JANG_4K",
         "bit_to_profile": {str(k): v for k, v in BIT_TO_PROFILE.items()},
     }
@@ -108,6 +99,10 @@ def cmd_profiles(args) -> None:
         print(f"\nJANGTQ profiles ({len(data['jangtq'])}):")
         for p in data["jangtq"]:
             print(f"  {p['name']:<10} {p['bits']}-bit  {p['description']}")
+        print(f"\nJANGTQ families ({len(data['jangtq_families'])}):")
+        for model_type, info in sorted(data["jangtq_families"].items()):
+            profiles = ", ".join(info["profiles"])
+            print(f"  {model_type:<18} {info['converter']}  [{profiles}]")
 
 
 def register(subparsers) -> None:

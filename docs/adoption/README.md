@@ -33,9 +33,12 @@ Two families of output:
 
 - **JANG** — every architecture supported. Mixed-precision affine quantization using MLX-native
   `uint32` weight packing. Loads via any MLX-compatible runtime with one extra dequant step.
-- **JANGTQ** (TurboQuant) — supported on Qwen 3.6 (`qwen3_5_moe`) and MiniMax 2.7 (`minimax_m2`)
-  in v1. Uses a codebook-based format for expert MLP weights that cuts size by another 30-50% at the
-  same quality. Requires a specialized loader (`jang_tools.load_jangtq.load_jangtq_model` in Python,
+- **JANGTQ** (TurboQuant) — model-family gated support for the converters listed by
+  `python -m jang_tools profiles --json` under `jangtq_families` (Qwen/MiniMax,
+  Hy3, DeepSeek-V4, Kimi K2.6, ZAYA/ZAYA1-VL, Ling/Bailing, Nemotron-H,
+  Laguna, and Mistral3/4 today). Uses a codebook-based format for expert MLP
+  weights that cuts size by another 30-50% at the same quality. Requires a
+  specialized loader (`jang_tools.load_jangtq.load_jangtq_model` in Python,
   or `JANGTQGenerator` from the `JANG` SwiftPM product in Swift — see `jang-runtime/Sources/JANG/JANGTQGenerator.swift`).
 
 ## Frameworks currently supporting JANG

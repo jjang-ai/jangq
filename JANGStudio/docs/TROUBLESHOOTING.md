@@ -3,7 +3,7 @@
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Step 1 says "Not a HuggingFace model" | Folder is missing `config.json` | Point at the actual model directory, not its parent |
-| JANGTQ tab greyed out | Your model type is not `qwen3_5_moe` or `minimax_m2` | Use a JANG profile instead. JANGTQ for GLM lands in v1.1 |
+| JANGTQ tab greyed out | Your model type is not in `jangtq_families` from `python -m jang_tools profiles --json` | Use a JANG profile instead, or add/prove a family-specific JANGTQ converter first |
 | Pre-flight: "Disk free" red | Output volume is too small for the estimated size | Pick a different output folder (external drive is fine) |
 | Pre-flight: "RAM adequate" yellow warn | RAM < 1.5x source size | Conversion may swap or OOM. Close other apps, or pick a higher-bit profile |
 | Run fails with "Killed: 9" or "MemoryError" | Out of RAM. 397B at JANG_1L needs 128 GB+ | Close other apps, or pick a higher-bit profile |

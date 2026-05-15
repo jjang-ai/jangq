@@ -48,7 +48,7 @@ final class CLIArgsBuilderTests: XCTestCase {
     func test_everyJANGTQProfileRoutesCorrectlyByArch() {
         let qwenExpected = "jang_tools.convert_qwen35_jangtq"
         let mmExpected = "jang_tools.convert_minimax_jangtq"
-        for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
+        for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4", "JANGTQ_K"] {
             let qwenArgs = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: prof, modelType: "qwen3_5_moe"))
             XCTAssertEqual(qwenArgs[1], qwenExpected, "qwen JANGTQ \(prof) routes wrong")
             XCTAssertTrue(qwenArgs.contains(prof))
@@ -57,6 +57,39 @@ final class CLIArgsBuilderTests: XCTestCase {
             XCTAssertEqual(mmArgs[1], mmExpected, "minimax JANGTQ \(prof) routes wrong")
             XCTAssertTrue(mmArgs.contains(prof))
         }
+    }
+
+    func test_newJANGTQFamiliesRouteToTheirRealConverters() {
+        let cases: [(String, String, String)] = [
+            ("hy_v3", "JANGTQ_K", "jang_tools.convert_hy3_jangtq"),
+            ("bailing_hybrid", "JANGTQ2", "jang_tools.convert_ling_jangtq"),
+            ("nemotron_h", "JANGTQ4", "jang_tools.convert_nemotron_jangtq"),
+            ("zaya", "JANGTQ_K", "jang_tools.convert_zaya_jangtq"),
+            ("zaya1_vl", "JANGTQ4", "jang_tools.convert_zaya1_vl_jangtq"),
+            ("laguna", "JANGTQ2", "jang_tools.convert_laguna_jangtq"),
+            ("mistral3", "JANGTQ3", "jang_tools.convert_mistral3_jangtq"),
+        ]
+        for (modelType, profile, module) in cases {
+            let args = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: profile, modelType: modelType))
+            XCTAssertEqual(args[1], module, "\(modelType)/\(profile) routes wrong: \(args)")
+            XCTAssertTrue(args.contains("--progress=json"), "\(modelType) should keep JSON progress")
+            XCTAssertTrue(args.contains(profile), "\(modelType)/\(profile): profile not in args")
+        }
+    }
+
+    func test_flagStyleJANGTQConvertersRouteCorrectly() {
+        let dsv4 = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: "JANGTQ_K", modelType: "deepseek_v4"))
+        XCTAssertEqual(dsv4[1], "jang_tools.dsv4.convert_dsv4_jangtq")
+        XCTAssertTrue(dsv4.contains("--src"))
+        XCTAssertTrue(dsv4.contains("--dst"))
+        XCTAssertEqual(dsv4[dsv4.firstIndex(of: "--profile")! + 1], "2")
+        XCTAssertEqual(dsv4[dsv4.firstIndex(of: "--variant")! + 1], "K")
+
+        let kimi = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: "JANGTQ_K", modelType: "kimi_k25"))
+        XCTAssertEqual(kimi[1], "jang_tools.kimi_prune.convert_kimi_jangtq")
+        XCTAssertTrue(kimi.contains("--src"))
+        XCTAssertTrue(kimi.contains("--dst"))
+        XCTAssertEqual(kimi[kimi.firstIndex(of: "--profile")! + 1], "JANGTQ_K")
     }
 
     func test_hadamardFlagOnlyAddedForJANGWhenRequested() {
@@ -98,12 +131,11 @@ final class CLIArgsBuilderTests: XCTestCase {
         XCTAssertTrue(args.contains("/Volumes/Out/Qwen3.6-JANG_2L"))
     }
 
-    func test_unknownJANGTQArchFallsBackToQwenConverter() {
-        // Defensive: if detected.modelType somehow isn't in the whitelist but user reached
-        // the JANGTQ tab (shouldn't happen given preflight), we fall back to the qwen converter
-        // to avoid a crash. Preflight should have already rejected this case.
+    func test_unknownJANGTQArchReturnsNoArgs() {
+        // If preflight somehow lets an unsupported model reach Run, do not run
+        // a random converter against it.
         let args = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: "JANGTQ2", modelType: "some_other_moe"))
-        XCTAssertEqual(args[1], "jang_tools.convert_qwen35_jangtq")
+        XCTAssertEqual(args, [])
     }
 
     // MARK: - Advanced overrides propagate to the JANG CLI

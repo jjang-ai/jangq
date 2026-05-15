@@ -23,6 +23,7 @@ struct PreflightRunner {
         out.append(Self.diskSpace(dst: dst, estimated: estimated))
         out.append(Self.ramAdequate(plan: plan))
         out.append(Self.jangtqArchSupported(plan: plan, whitelist: capabilities.jangtqWhitelist))
+        out.append(Self.jangtqProfileSupported(plan: plan, profiles: profiles))
         out.append(Self.jangtqSourceDtype(plan: plan))
         out.append(Self.bf16For512Experts(plan: plan, types: capabilities.knownExpert512Types))
         out.append(Self.hadamardVsLowBits(plan: plan, profiles: profiles))
@@ -85,7 +86,7 @@ struct PreflightRunner {
     /// tables. Returns 0 on unknown profile (caller falls back to pass).
     static func avgBitsForProfile(_ profile: String, profiles: Profiles) -> Double {
         if let p = profiles.jang.first(where: { $0.name == profile }) { return p.avgBits }
-        if let p = profiles.jangtq.first(where: { $0.name == profile }) { return Double(p.bits) }
+        if let p = profiles.jangtq.first(where: { $0.name == profile }) { return p.avgBits ?? Double(p.bits) }
         return 0
     }
 
@@ -220,6 +221,18 @@ struct PreflightRunner {
         return .init(id: .jangtqArchSupported, title: "JANGTQ arch supported",
                      status: ok ? .pass : .fail,
                      hint: ok ? nil : "JANGTQ supports \(whitelist.joined(separator: ", ")); detected \(mt)")
+    }
+
+    private static func jangtqProfileSupported(plan: ConversionPlan, profiles: Profiles) -> PreflightCheck {
+        if plan.family != .jangtq {
+            return .init(id: .jangtqProfileSupported, title: "JANGTQ profile supported", status: .pass, hint: nil)
+        }
+        let mt = plan.detected?.modelType ?? ""
+        let allowed = profiles.jangtqProfileNames(for: mt)
+        let ok = allowed.contains(plan.profile)
+        return .init(id: .jangtqProfileSupported, title: "JANGTQ profile supported",
+                     status: ok ? .pass : .fail,
+                     hint: ok ? nil : "\(mt) supports \(allowed.joined(separator: ", ")); selected \(plan.profile)")
     }
 
     private static func jangtqSourceDtype(plan: ConversionPlan) -> PreflightCheck {

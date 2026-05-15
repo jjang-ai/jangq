@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .allocate import JANG_PROFILES, JANG_K_TARGETS
-from .profiles_cli import _JANGTQ_PROFILES
+from .jangtq_matrix import profile_catalog
 
 
 def _source_bytes(model_dir: Path) -> int:
@@ -68,9 +68,9 @@ def _predict_avg_bits(profile: str) -> float:
         # Typical distribution: 80% compress, 15% important, 5% critical
         return round(0.80 * comp + 0.15 * imp + 0.05 * crit, 2)
     # JANGTQ
-    for p in _JANGTQ_PROFILES:
+    for p in profile_catalog():
         if p["name"] == profile:
-            return float(p["bits"])
+            return float(p.get("avg_bits") or p["bits"])
     raise ValueError(f"unknown profile: {profile}")
 
 

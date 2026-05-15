@@ -19,7 +19,7 @@ struct ProfileStep: View {
         profilesSvc.profiles.jang.map { $0.name }
     }
     private var jangtqProfileNames: [String] {
-        profilesSvc.profiles.jangtq.map { $0.name }
+        profilesSvc.profiles.jangtqProfileNames(for: coord.plan.detected?.modelType)
     }
     private var isJANGTQAllowed: Bool {
         coord.plan.isJANGTQAllowed(for: capsSvc.capabilities.jangtqWhitelist)
@@ -35,6 +35,11 @@ struct ProfileStep: View {
                 if !isJANGTQAllowed {
                     Label("JANGTQ supports \(capsSvc.capabilities.jangtqWhitelist.joined(separator: ", ")) only.",
                           systemImage: "info.circle").font(.caption)
+                } else if coord.plan.family == .jangtq,
+                          let mt = coord.plan.detected?.modelType,
+                          let info = profilesSvc.profiles.jangtqFamilies[mt],
+                          !info.note.isEmpty {
+                    Label(info.note, systemImage: "info.circle").font(.caption)
                 }
             }
             Section("Profile") {
@@ -102,13 +107,17 @@ struct ProfileStep: View {
             }
             refresh()
         }
-        .onChange(of: coord.plan.family) { _, _ in refresh() }
+        .onChange(of: coord.plan.family) { _, _ in
+            ensureSupportedProfile()
+            refresh()
+        }
         .onChange(of: coord.plan.outputURL) { _, _ in refresh() }
         .onChange(of: coord.plan.hadamard) { _, _ in refresh() }
         .onAppear {
             if coord.plan.outputURL == nil, let src = coord.plan.sourceURL {
                 coord.plan.outputURL = autoOutputURL(for: src, profile: coord.plan.profile)
             }
+            ensureSupportedProfile()
             refresh()
         }
     }
@@ -159,6 +168,14 @@ struct ProfileStep: View {
             capabilities: capsSvc.capabilities,
             profiles: profilesSvc.profiles
         )
+    }
+
+    private func ensureSupportedProfile() {
+        let available = coord.plan.family == .jang ? jangProfileNames : jangtqProfileNames
+        guard !available.isEmpty, !available.contains(coord.plan.profile) else { return }
+        let mt = coord.plan.detected?.modelType
+        let preferred = profilesSvc.profiles.jangtqFamilies[mt ?? ""]?.defaultProfile
+        coord.plan.profile = preferred.flatMap { available.contains($0) ? $0 : nil } ?? available[0]
     }
     private func allMandatoryPass() -> Bool { !preflight.contains { $0.status == .fail } }
 

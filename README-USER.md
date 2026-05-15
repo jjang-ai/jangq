@@ -12,7 +12,7 @@ JANG (Jang Adaptive N-bit Grading) is a mixed-precision quantization format for 
 
 - Converts any HuggingFace model to JANG or JANGTQ format (dense, MoE, VL, video-VL, MLA, hybrid-SSM — every architecture).
 - Ships a self-contained Python 3.11 + MLX runtime inside the `.app` — no Python install needed.
-- Runs a 14-row post-convert audit so you know the output is real before you use it.
+- Runs a post-convert audit so you know the output is real before you use it.
 - Lets you chat with the converted model inside the app.
 - Generates Python/Swift/Server/HuggingFace code snippets for your use case.
 - Generates a HuggingFace model card and pushes to Hub in one click.
@@ -57,7 +57,7 @@ Screenshots below show the wizard in its empty state (before picking a model). O
 
 Click **Choose Folder…** and pick a HuggingFace model directory (one containing `config.json` and `.safetensors` shards). JANG Studio auto-detects:
 
-- `model_type` (llama, qwen3_5_moe, minimax_m2, deepseek_v32, idefics3, gemma3, …)
+- `model_type` (llama, qwen3_5_moe, minimax_m2, deepseek_v4, kimi_k25, zaya1_vl, idefics3, gemma3, …)
 - Parameter count (approximate, in billions)
 - Expert count for MoE models
 - Source dtype (BF16 / FP16 / FP8)
@@ -78,19 +78,20 @@ Review the auto-detected architecture card. The **Advanced overrides** section i
 
 ![Step 3](docs/screenshots/step3-profile.png)
 
-Pick a **JANG** profile (works on every architecture) or **JANGTQ** profile (Qwen 3.6 + MiniMax today, GLM in v1.1). Each profile has a plain-English description visible on hover.
+Pick a **JANG** profile (works on every architecture) or a family-filtered **JANGTQ** profile. JANGTQ appears only when the detected model has a real converter in `jangtq_families`.
 
 **Options:**
 - **Method** — MSE is the default (best quality). RTN is fastest. MSE (all) squeezes out extra quality at the cost of time.
 - **Hadamard rotation** — turns on at 3-bit+, off at 2-bit and below (it hurts low-bit quality). JANG Studio auto-picks the right default.
 
-**Pre-flight panel** runs 10 checks live as you change options:
+**Pre-flight panel** runs 11 checks live as you change options:
 - Source dir exists & readable
 - config.json parses
 - Output dir valid
 - Free disk space sufficient
 - RAM adequate (>= 1.5× source)
 - JANGTQ arch supported
+- JANGTQ profile supported
 - JANGTQ source dtype (bf16 or fp8)
 - BF16 forced for 512+ expert models
 - Hadamard sanity at 2-bit
@@ -232,14 +233,15 @@ curl http://localhost:8080/v1/chat/completions \
 
 | Bit tier | JANG | JANGTQ |
 |---:|:---|:---|
-| 1-bit | JANG_1L | — |
+| 1-bit | JANG_1L | JANGTQ1 (family-gated experimental) |
 | 2-bit | JANG_2S · JANG_2M · JANG_2L | JANGTQ2 |
 | 3-bit | JANG_3K · JANG_3S · JANG_3M · JANG_3L | JANGTQ3 |
 | 4-bit | **JANG_4K (default)** · JANG_4S · JANG_4M · JANG_4L | JANGTQ4 |
+| mixed | — | JANGTQ_K (4/2/2 routed experts) |
 | 5/6-bit | JANG_5K · JANG_6K · JANG_6M | — |
 
 - **JANG** works on every architecture.
-- **JANGTQ** (TurboQuant) supports Qwen 3.6 (`qwen3_5_moe`) and MiniMax 2.7 (`minimax_m2`) in v1. GLM JANGTQ is coming in v1.1.
+- **JANGTQ** (TurboQuant) is gated by `jangtq_families` from `python -m jang_tools profiles --json`; unsupported family/profile pairs are blocked before conversion.
 - **K-suffix profiles** (`JANG_3K/4K/5K/6K`) use K-quant style budget-neutral allocation.
 - **L-suffix profiles** are the best-quality at a given bit tier.
 

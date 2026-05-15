@@ -40,10 +40,12 @@ VL_SIDECARS = (
 
 
 def zaya1_vl_capabilities() -> dict:
+    # VL trunk wraps the same ZAYA LM that reasons by default (measured live:
+    # enable_thinking=False default render still produces chain-of-thought).
+    # Match the text-bundle stamp so picker UIs and the test suite agree.
     caps = CAPABILITIES.copy()
     caps["family"] = "zaya1_vl"
     caps["modality"] = "vision"
-    caps["supports_thinking"] = False
     return caps
 
 

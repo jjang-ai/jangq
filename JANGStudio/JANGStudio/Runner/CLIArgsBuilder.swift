@@ -24,13 +24,68 @@ enum CLIArgsBuilder {
             }
             return args
         case .jangtq:
-            let mod: String = switch plan.detected?.modelType ?? "" {
-                case "qwen3_5_moe": "jang_tools.convert_qwen35_jangtq"
-                case "minimax_m2":  "jang_tools.convert_minimax_jangtq"
-                default: "jang_tools.convert_qwen35_jangtq"
-            }
-            return ["-m", mod, "--progress=json", "--quiet-text", src, out, plan.profile]
+            return jangtqArgs(modelType: plan.detected?.modelType ?? "",
+                              src: src,
+                              out: out,
+                              profile: plan.profile)
         }
+    }
+
+    private static func jangtqArgs(modelType: String, src: String, out: String, profile: String) -> [String] {
+        switch modelType {
+        case "qwen3_5_moe":
+            return positionalProgress("jang_tools.convert_qwen35_jangtq", src: src, out: out, profile: profile)
+        case "minimax_m2", "minimax_m2_5", "minimax":
+            return positionalProgress("jang_tools.convert_minimax_jangtq", src: src, out: out, profile: profile)
+        case "hy_v3":
+            return positionalProgress("jang_tools.convert_hy3_jangtq", src: src, out: out, profile: profile)
+        case "bailing_hybrid", "bailing_moe_v2_5":
+            return positionalProgress("jang_tools.convert_ling_jangtq", src: src, out: out, profile: profile)
+        case "nemotron_h", "nemotron_h_v2":
+            return positionalProgress("jang_tools.convert_nemotron_jangtq", src: src, out: out, profile: profile)
+        case "zaya":
+            return positionalProgress("jang_tools.convert_zaya_jangtq", src: src, out: out, profile: profile)
+        case "zaya1_vl":
+            return positionalProgress("jang_tools.convert_zaya1_vl_jangtq", src: src, out: out, profile: profile)
+        case "laguna":
+            return positionalProgress("jang_tools.convert_laguna_jangtq", src: src, out: out, profile: profile)
+        case "mistral3", "mistral4":
+            return positionalProgress("jang_tools.convert_mistral3_jangtq", src: src, out: out, profile: profile)
+        case "deepseek_v4":
+            return dsv4Args(src: src, out: out, profile: profile)
+        case "kimi_k25":
+            return ["-m", "jang_tools.kimi_prune.convert_kimi_jangtq",
+                    "--src", src, "--dst", out, "--profile", profile]
+        default:
+            return []
+        }
+    }
+
+    private static func positionalProgress(_ module: String, src: String, out: String, profile: String) -> [String] {
+        ["-m", module, "--progress=json", "--quiet-text", src, out, profile]
+    }
+
+    private static func dsv4Args(src: String, out: String, profile: String) -> [String] {
+        let profileBits: String
+        let variant: String
+        switch profile {
+        case "JANGTQ_K":
+            profileBits = "2"
+            variant = "K"
+        case "JANGTQ3":
+            profileBits = "3"
+            variant = "V3"
+        case "JANGTQ4":
+            profileBits = "4"
+            variant = "V3"
+        default:
+            profileBits = "2"
+            variant = "V3"
+        }
+        return ["-m", "jang_tools.dsv4.convert_dsv4_jangtq",
+                "--src", src, "--dst", out,
+                "--profile", profileBits,
+                "--variant", variant]
     }
 
     /// Map SourceDtype → the alias Python's `jang_tools convert --force-dtype`

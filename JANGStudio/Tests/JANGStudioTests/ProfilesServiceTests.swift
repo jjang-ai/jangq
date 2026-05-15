@@ -6,8 +6,16 @@ final class ProfilesServiceTests: XCTestCase {
         XCTAssertEqual(Profiles.frozen.jang.count, 15)
     }
 
-    func test_frozen_has_3_jangtq_profiles() {
-        XCTAssertEqual(Profiles.frozen.jangtq.count, 3)
+    func test_frozen_has_jangtq_profile_catalog_and_family_matrix() {
+        let names = Set(Profiles.frozen.jangtq.map(\.name))
+        XCTAssertTrue(names.isSuperset(of: ["JANGTQ1", "JANGTQ2", "JANGTQ3", "JANGTQ4", "JANGTQ_K"]))
+        XCTAssertEqual(
+            Profiles.frozen.jangtqFamilies["deepseek_v4"]?.converter,
+            "jang_tools.dsv4.convert_dsv4_jangtq"
+        )
+        XCTAssertTrue(Profiles.frozen.jangtqProfileNames(for: "minimax_m2").contains("JANGTQ_K"))
+        XCTAssertFalse(Profiles.frozen.jangtqProfileNames(for: "zaya").contains("JANGTQ3"))
+        XCTAssertFalse(Profiles.frozen.jangtqProfileNames(for: "bailing_hybrid").contains("JANGTQ3"))
     }
 
     func test_default_profile_is_jang_4k() {

@@ -3,7 +3,7 @@ import Foundation
 
 enum PreflightID: String, CaseIterable {
     case sourceReadable, configJSONValid, outputUsable, diskSpace, ramAdequate,
-         jangtqArchSupported, jangtqSourceDtype, bf16For512Experts, hadamardVsLowBits,
+         jangtqArchSupported, jangtqProfileSupported, jangtqSourceDtype, bf16For512Experts, hadamardVsLowBits,
          bundledPythonHealthy
 }
 

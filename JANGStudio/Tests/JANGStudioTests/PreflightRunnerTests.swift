@@ -34,6 +34,21 @@ final class PreflightRunnerTests: XCTestCase {
         XCTAssertTrue(checks.contains { $0.id == .jangtqArchSupported && $0.status == .fail })
     }
 
+    func test_jangtqProfileUnsupportedForFamilyFails() throws {
+        let src = tmp.appendingPathComponent("src-zaya")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"zaya"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out")
+        plan.detected = .init(modelType: "zaya", isMoE: true, numExperts: 16, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        plan.family = .jangtq
+        plan.profile = "JANGTQ3"
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen, profiles: .frozen)
+        XCTAssertTrue(checks.contains { $0.id == .jangtqProfileSupported && $0.status == .fail })
+    }
+
     func test_outputSameAsSourceFails() throws {
         let src = tmp.appendingPathComponent("model"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
         try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)

@@ -5,8 +5,9 @@ import json
 import sys
 from pathlib import Path
 
-# v1 JANGTQ whitelist — synced with JANG Studio spec §2.5
-_JANGTQ_V1_WHITELIST = {"qwen3_5_moe", "minimax_m2"}
+from .jangtq_matrix import supported_model_types
+
+_JANGTQ_V1_WHITELIST = set(supported_model_types())
 
 
 def _sniff_dtype(model_path: Path) -> str:

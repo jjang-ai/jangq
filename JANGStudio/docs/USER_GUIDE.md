@@ -5,7 +5,7 @@
 ## Step 1 — Source model
 
 Click **Choose Folder...** and pick a HuggingFace model directory (one containing `config.json` and `.safetensors` shards). JANG Studio auto-detects:
-- `model_type` (e.g., `qwen3_5_moe`, `minimax_m2`, `llama`, `deepseek_v32`)
+- `model_type` (e.g., `qwen3_5_moe`, `minimax_m2`, `deepseek_v4`, `kimi_k25`, `zaya1_vl`, `llama`)
 - Dense vs MoE (expert count when MoE)
 - Source dtype (BF16 / FP16 / FP8)
 - Image-VL (preprocessor_config.json) and video-VL (video_preprocessor_config.json)
@@ -22,10 +22,10 @@ Confirm the summary. Use **Advanced overrides** only when auto-detection gets so
 
 Two tabs:
 - **JANG** — every architecture supported. Pick by bit tier (1/2/3/4/5/6-bit) and sensitivity letter (S/M/L/K).
-- **JANGTQ** — enabled only when `model_type` is `qwen3_5_moe` or `minimax_m2` (v1 whitelist). GLM support is coming in v1.1.
+- **JANGTQ** — enabled only when the detected `model_type` has a family entry in `jangtq_families`. The profile menu is filtered per family, so unsupported combinations such as ZAYA `JANGTQ3` are not selectable.
 
-Pre-flight panel runs 10 checks live as you change options:
-source readable · config.json parses · output dir valid · disk space · RAM adequate · JANGTQ arch supported · JANGTQ dtype (BF16/FP8) · bf16 forced for 512+ expert models · hadamard-vs-2bit sanity · bundled Python healthy.
+Pre-flight panel runs live checks as you change options:
+source readable · config.json parses · output dir valid · disk space · RAM adequate · JANGTQ arch supported · JANGTQ profile supported · JANGTQ dtype (BF16/FP8) · bf16 forced for 512+ expert models · hadamard-vs-2bit sanity · bundled Python healthy.
 
 You can't click **Start Conversion** until all required checks are green.
 

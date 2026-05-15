@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .inspect_source import _JANGTQ_V1_WHITELIST
+from .jangtq_matrix import family_matrix, supported_model_types
 
 
 # Known architectures with 512+ experts. JANG forces bfloat16 for these to
@@ -41,7 +41,8 @@ _METHODS = [
 
 def capabilities() -> dict[str, Any]:
     return {
-        "jangtq_whitelist": sorted(_JANGTQ_V1_WHITELIST),
+        "jangtq_whitelist": supported_model_types(),
+        "jangtq_families": family_matrix(),
         "known_512_expert_types": _KNOWN_512_EXPERT_TYPES,
         "supported_source_dtypes": _SUPPORTED_SOURCE_DTYPES,
         "block_sizes": _BLOCK_SIZES,
@@ -61,6 +62,9 @@ def cmd_capabilities(args) -> None:
         print("JANGTQ whitelist:")
         for a in data["jangtq_whitelist"]:
             print(f"  {a}")
+        print("\nJANGTQ family profiles:")
+        for model_type, info in sorted(data["jangtq_families"].items()):
+            print(f"  {model_type:<18} {', '.join(info['profiles'])}")
         print(f"\n512+ expert types: {', '.join(data['known_512_expert_types'])}")
         print(f"\nSupported source dtypes:")
         for d in data["supported_source_dtypes"]:

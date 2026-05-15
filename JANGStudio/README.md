@@ -12,7 +12,7 @@ Download the latest `JANGStudio.dmg` from [Releases](https://github.com/jjang-ai
 
 1. **Pick your model folder** (BF16, FP16, or FP8 HuggingFace directory)
 2. **Confirm the detected architecture** (dense vs MoE, MLA vs full attention, image-VL vs video-VL)
-3. **Choose a profile** — JANG (all architectures) or JANGTQ (Qwen 3.6 & MiniMax in v1)
+3. **Choose a profile** — JANG (all architectures) or JANGTQ (shown only for families with a real converter)
 4. **Run** — live logs, phase progress, cancel if you need to
 5. **Verify** — 12-row post-convert checklist proves `jang_config.json`, tokenizer, chat template (inline / `.jinja` / `.json`), shards match the index, `generation_config.json`, and `num_hidden_layers > 0` all landed before you can finish
 
@@ -29,13 +29,16 @@ See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for step-by-step screenshots.
 
 | Bit tier | JANG profiles | JANGTQ profiles |
 |---:|:---|:---|
-| 1-bit | JANG_1L | — |
+| 1-bit | JANG_1L | JANGTQ1 (family-gated experimental) |
 | 2-bit | JANG_2S, JANG_2M, JANG_2L | JANGTQ2 |
 | 3-bit | JANG_3K, JANG_3S, JANG_3M, JANG_3L | JANGTQ3 |
 | 4-bit | JANG_4K (default), JANG_4S, JANG_4M, JANG_4L | JANGTQ4 |
+| mixed | — | JANGTQ_K (4/2/2 routed experts) |
 | 5/6-bit | JANG_5K, JANG_6K, JANG_6M | — |
 
-JANG works on every architecture. JANGTQ v1 supports `qwen3_5_moe` (Qwen 3.6) and `minimax_m2` only; GLM is coming in v1.1.
+JANG works on every architecture. JANGTQ is enabled per `jangtq_families` from
+`python -m jang_tools profiles --json`; GLM stays disabled until its runtime
+path is proven.
 
 ## Docs
 
