@@ -11,6 +11,13 @@
   the legacy prefill path for A/B timing.
 - Added regression coverage for default prefill dispatch and explicit opt-out
   on both fused gate/up SwiGLU and down-proj gather.
+- Added `jang-minimax-kernel-compare`, a fresh-process MiniMax JANGTQ versus
+  affine JANG/JANG_2L harness that records pp/s, decode tok/s, generated text,
+  and kernel counters.
+- Fixed ambiguous affine JANG metadata repair to prefer the JANG sidecar block
+  size before stale per-module config overrides. This lets MiniMax JANG_2L
+  expert tensors shaped as 2-bit/group-128 run through MLX native
+  `quantized_matmul` even when config overrides incorrectly say 8-bit/group-32.
 
 ## 2.5.30 — 2026-05-15
 

@@ -61,9 +61,18 @@ so a 2048-token prompt with top-8 routing gives roughly 16384 sorted rows.
     default.
 - `jang-tools/jang_tools/turboquant/gather_tq_kernel.py`
   - routes sorted down-proj gather prefill through grouped MPP/NAX by default.
+- `jang-tools/jang_tools/loader.py`
+  - resolves ambiguous affine JANG module metadata by preferring the JANG
+    sidecar block size before stale per-module `config.json` overrides.
+    This fixes MiniMax JANG_2L expert tensors whose physical shape is
+    2-bit/group-128 but whose config override says 8-bit/group-32.
+- `jang-tools/jang_tools/minimax_kernel_compare.py`
+  - runs JANGTQ and JANG/JANG_2L comparisons in fresh worker processes,
+    records pp/s, decode tok/s, generated text, and kernel counters.
 - `jang-tools/tests/test_turboquant_mpp_nax_kernel.py`
   - covers default dispatch, opt-out, grouped kernel correctness, and full
-    expert-cluster equivalence against the existing JANGTQ path.
+    expert-cluster equivalence against the existing JANGTQ path. It also
+    covers the ambiguous affine JANG metadata fix.
 
 ## Verification Commands
 
@@ -94,6 +103,19 @@ uv run --extra mlx python jangtq_live_nax_probe.py \
   --json-out /tmp/minimax_small_jangtq_prefill_nax_probe_2048.json
 ```
 
+Fresh-process JANGTQ versus affine JANG_2L comparison:
+
+```sh
+cd /Users/eric/jang/jang-tools
+uv run --extra mlx python -m jang_tools.minimax_kernel_compare \
+  --jangtq /Users/eric/models/JANGQ/MiniMax-M2.7-Small-JANGTQ \
+  --jang /Users/eric/models/dealignai/MiniMax-M2.7-JANG_2L-CRACK \
+  --prompt-tokens 2048 \
+  --max-tokens 16 \
+  --no-global-auto \
+  --json-out /tmp/minimax_compare_2048_after_fix.json
+```
+
 Do not count a load-only test as success. The proof needs prompt-processing
 tokens per second, decode tokens per second, real generated text, and a cache
 freshness guard.
@@ -109,8 +131,30 @@ new default path improving prefill without moving decode materially:
 | 2048 body tokens | 138.1 pp/s | 230.8 pp/s | 35.7 -> 35.4 tok/s |
 
 This proves the sorted routed prefill path is active and beneficial. It does
-not yet prove JANG2L-class prefill. The remaining gap is expected to be in the
-TQ-specific grouped path: it still has codebook unpack work and currently builds
-same-expert tile metadata from sorted expert indices. Closing the gap to the
-affine JANG2L baseline likely needs a no-CPU-sync tile planner or an affine-like
-TQ tile sidecar that preserves the JANGTQ storage contract.
+not yet prove JANG2L-class prefill.
+
+The fresh-process comparison harness gives the clearer kernel-level proof:
+
+| Rendered prompt | Mode | Prefill | Decode | Kernel proof |
+|---:|---|---:|---:|---|
+| ~574 tokens | JANGTQ legacy | 153.7 pp/s | 40.6 tok/s | 0 grouped NAX calls |
+| ~574 tokens | JANGTQ default | 225.5 pp/s | 40.5 tok/s | 62 grouped fused + 62 grouped gather |
+| ~572 tokens | JANG_2L affine | 696.6 pp/s | 54.5 tok/s | 4482 `mx.quantized_matmul` calls |
+| ~2125 tokens | JANGTQ legacy | 146.5 pp/s | 37.7 tok/s | 0 grouped NAX calls |
+| ~2125 tokens | JANGTQ default | 253.3 pp/s | 37.6 tok/s | 124 grouped fused + 124 grouped gather |
+| ~2123 tokens | JANG_2L affine | 1044.3 pp/s | 51.7 tok/s | 4731 `mx.quantized_matmul` calls |
+| ~8263 tokens | JANGTQ legacy | 130.9 pp/s | 26.7 tok/s | 0 grouped NAX calls |
+| ~8263 tokens | JANGTQ default | 219.6 pp/s | 26.4 tok/s | 310 grouped fused + 310 grouped gather |
+| ~8261 tokens | JANG_2L affine | 830.9 pp/s | 37.1 tok/s | 3486 `mx.quantized_matmul` calls |
+
+Saved local evidence:
+
+- `/tmp/minimax_compare_512_after_fix.json`
+- `/tmp/minimax_compare_2048_after_fix.json`
+- `/tmp/minimax_compare_8192_after_fix.json`
+
+The remaining gap is expected to be in the TQ-specific grouped path: it still
+does codebook unpack plus row-norm scaling and currently builds same-expert tile
+metadata from sorted expert indices. Closing the gap to the affine JANG_2L
+baseline likely needs a no-CPU-sync tile planner or an affine-like TQ tile
+sidecar that preserves the JANGTQ storage contract.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jang"
 version = "2.5.31"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.31: MiniMax/JANGTQ sorted routed prefill defaults to MPP/NAX auto while decode stays on the proven low-overhead path. v2.5.30: JANGTQ MPP/NAX health checks avoid smoke Metal evals and Kimi/VLM warmup compiles the trained-router prefill shape."
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.31: MiniMax/JANGTQ sorted routed prefill defaults to MPP/NAX auto, MiniMax kernel comparison harness added, and ambiguous affine JANG metadata repair prefers sidecar block size. v2.5.30: JANGTQ MPP/NAX health checks avoid smoke Metal evals and Kimi/VLM warmup compiles the trained-router prefill shape."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
@@ -48,6 +48,7 @@ jang-mmlu = "jang_tools.eval.mmlu:main"
 jang-dsv4-codesign-smoke = "jang_tools.dsv4.experiments.codesign_smoke:main"
 jang-dsv4-build-role-codebooks = "jang_tools.dsv4.build_role_codebooks:main"
 jang-patch-dsv4-compressor-dtypes = "jang_tools.patch_dsv4_compressor_dtypes:main"
+jang-minimax-kernel-compare = "jang_tools.minimax_kernel_compare:main"
 [project.urls]
 Homepage = "https://jangq.ai"
 Repository = "https://github.com/jjang-ai/jangq"

@@ -1,3 +1,5 @@
+import json
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -1232,3 +1234,123 @@ def test_full_expert_cluster_nax_matches_existing_broadcast_topk(monkeypatch):
 
     mx.eval(current, nax)
     np.testing.assert_allclose(np.array(nax), np.array(current), rtol=4e-2, atol=8e-2)
+
+
+def test_minimax_kernel_compare_detects_jangtq_metadata(tmp_path):
+    from jang_tools.minimax_kernel_compare import detect_model_kind, model_summary
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "minimax_m2",
+                "weight_format": "mxtq",
+                "hidden_size": 3072,
+                "intermediate_size": 1536,
+                "num_hidden_layers": 62,
+                "num_local_experts": 160,
+                "num_experts_per_tok": 8,
+            }
+        )
+    )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({"profile": "JANGTQ2", "mxtq_bits": {"routed": 2}})
+    )
+
+    assert detect_model_kind(tmp_path) == "jangtq"
+    summary = model_summary(tmp_path)
+    assert summary["kind"] == "jangtq"
+    assert summary["profile"] == "JANGTQ2"
+    assert summary["weight_format"] == "mxtq"
+    assert summary["hidden_size"] == 3072
+    assert summary["intermediate_size"] == 1536
+    assert summary["num_local_experts"] == 160
+    assert summary["num_experts_per_tok"] == 8
+
+
+def test_minimax_kernel_compare_detects_affine_jang_metadata(tmp_path):
+    from jang_tools.minimax_kernel_compare import detect_model_kind, model_summary
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "minimax_m2",
+                "hidden_size": 3072,
+                "intermediate_size": 1536,
+                "num_hidden_layers": 62,
+                "num_local_experts": 256,
+                "num_experts_per_tok": 8,
+                "quantization": {"bits": 2, "group_size": 64, "mode": "affine"},
+            }
+        )
+    )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "format": "jang-v2",
+                "quantization": {
+                    "method": "jang-importance",
+                    "profile": "JANG_2L",
+                    "target_bits": 2.0,
+                    "actual_bits": 2.1,
+                },
+            }
+        )
+    )
+
+    assert detect_model_kind(tmp_path) == "jang"
+    summary = model_summary(tmp_path)
+    assert summary["kind"] == "jang"
+    assert summary["profile"] == "JANG_2L"
+    assert summary["weight_format"] == "affine"
+    assert summary["quantization_bits"] == 2
+    assert summary["quantization_group_size"] == 64
+
+
+def test_minimax_kernel_compare_modes_and_env_are_explicit():
+    from jang_tools.minimax_kernel_compare import env_for_mode, mode_labels
+
+    assert mode_labels("jangtq", include_global_auto=True) == [
+        "legacy_prefill",
+        "default_prefill",
+        "global_auto",
+    ]
+    assert mode_labels("jang") == ["affine_default"]
+
+    legacy = env_for_mode("legacy_prefill")
+    assert legacy["JANGTQ_MPP_NAX_PREFILL"] == "0"
+    assert legacy["JANGTQ_MPP_NAX"] is None
+    assert legacy["JANGTQ_MPP_NAX_STRICT"] is None
+
+    default = env_for_mode("default_prefill")
+    assert default["JANGTQ_MPP_NAX_PREFILL"] is None
+    assert default["JANGTQ_MPP_NAX"] is None
+    assert default["JANGTQ_MPP_NAX_STRICT"] == "1"
+
+    affine = env_for_mode("affine_default")
+    assert affine == {}
+
+
+def test_fix_quantized_bits_prefers_jang_block_size_for_ambiguous_switch_shapes():
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+
+    from jang_tools.loader import _fix_quantized_bits
+
+    switch = QuantizedSwitchLinear(
+        input_dims=768,
+        output_dims=8,
+        num_experts=2,
+        group_size=32,
+        bits=8,
+        bias=False,
+    )
+    assert switch.weight.shape == (2, 8, 192)
+    assert switch.scales.shape == (2, 8, 24)
+
+    class Model:
+        def named_modules(self):
+            yield "model.layers.0.block_sparse_moe.switch_mlp.up_proj", switch
+
+    _fix_quantized_bits(Model(), {}, preferred_group_size=128)
+
+    assert switch.bits == 2
+    assert switch.group_size == 128
