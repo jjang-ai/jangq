@@ -1,5 +1,17 @@
 ## Unreleased
 
+## 2.5.31 — 2026-05-15
+
+- MiniMax/JANGTQ sorted routed prefill now defaults to the MPP/NAX auto path.
+  This targets the long-prompt MoE shape where expert rows can be grouped into
+  same-expert TensorOps tiles, while single-token decode and non-sorted gather
+  remain on the existing P15/P17 kernels unless explicitly opted in.
+- Added `JANGTQ_MPP_NAX_PREFILL` as the prefill-specific control. The default is
+  `auto`; set `JANGTQ_MPP_NAX_PREFILL=0` or global `JANGTQ_MPP_NAX=0` to force
+  the legacy prefill path for A/B timing.
+- Added regression coverage for default prefill dispatch and explicit opt-out
+  on both fused gate/up SwiGLU and down-proj gather.
+
 ## 2.5.30 — 2026-05-15
 
 - JANGTQ MPP/NAX availability checks no longer run a smoke Metal dispatch.

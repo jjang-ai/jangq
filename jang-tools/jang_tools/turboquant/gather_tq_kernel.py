@@ -351,6 +351,17 @@ def _auto_mpp_nax_wins(dispatches: int, in_features: int, out_features: int) -> 
     return dispatches >= 256 and (int(in_features) * int(out_features)) >= (2048 * 2048)
 
 
+def _prefill_mpp_nax_wins(dispatches: int, in_features: int, out_features: int) -> bool:
+    from .mpp_nax_kernel import mpp_nax_mode_allows, mpp_nax_prefill_mode
+
+    return mpp_nax_mode_allows(
+        mpp_nax_prefill_mode(),
+        dispatches,
+        in_features,
+        out_features,
+    )
+
+
 def _as_uint32_indices(indices: mx.array) -> mx.array:
     if indices.dtype == mx.uint32:
         return indices
@@ -566,6 +577,10 @@ def gather_tq_matmul(
             or (
                 _mpp_nax_mode() == "auto"
                 and _auto_mpp_nax_wins(int(idx_flat.shape[0]), in_features, out_features)
+            )
+            or (
+                _mpp_nax_mode() == ""
+                and _prefill_mpp_nax_wins(int(idx_flat.shape[0]), in_features, out_features)
             )
         )
     ):

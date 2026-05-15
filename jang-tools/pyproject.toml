@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.30"
-description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.30: JANGTQ MPP/NAX auto dispatch is prefill-gated, health checks avoid smoke Metal evals, and Kimi/VLM warmup compiles the trained-router prefill shape. v2.5.29: Kimi K2.6 JANGTQ_K conversion adds mixed routed bits, VL aux-file preservation, and prestacked runtime metadata."
+version = "2.5.31"
+description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.31: MiniMax/JANGTQ sorted routed prefill defaults to MPP/NAX auto while decode stays on the proven low-overhead path. v2.5.30: JANGTQ MPP/NAX health checks avoid smoke Metal evals and Kimi/VLM warmup compiles the trained-router prefill shape."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [{name = "Jinho Jang", email = "eric@jangq.ai"}]
