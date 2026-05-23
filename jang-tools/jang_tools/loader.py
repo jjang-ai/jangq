@@ -487,7 +487,9 @@ def _load_jang_v2(path: Path, jang_cfg: dict):
         del weights
         gc.collect()
 
-    _fix_quantized_bits(model, {})
+    _fix_quantized_bits(
+        model, {}, preferred_group_size=_jang_quant_block_size(jang_cfg)
+    )
 
     if not hasattr(model, "config"):
         model.config = config
@@ -883,7 +885,9 @@ def _load_jang_v2_vlm(path: Path, jang_cfg: dict):
         del shard_weights
         gc.collect()
 
-    _fix_quantized_bits(model, {})
+    _fix_quantized_bits(
+        model, {}, preferred_group_size=_jang_quant_block_size(jang_cfg)
+    )
 
     # Post-load fixup: replace QuantizedLinear gates with plain Linear
     # when gate weights were dequantized to float by our loader.
@@ -1149,7 +1153,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
             del weights
             gc.collect()
 
-        _fix_quantized_bits(model, {})
+        _fix_quantized_bits(model, {}, preferred_group_size=block_size)
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1255,7 +1259,7 @@ def _load_jang_v1_vlm(path: Path, jang_cfg: dict, config_path: Path):
             del weights
             gc.collect()
 
-        _fix_quantized_bits(model, {})
+        _fix_quantized_bits(model, {}, preferred_group_size=block_size)
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1807,7 +1811,7 @@ def _upgrade_switch_to_quantized(model, bits, group_size):
             setattr(parent, parts[1], ql)
 
 
-def _fix_quantized_bits(model, weights):
+def _fix_quantized_bits(model, weights, preferred_group_size: int | None = None):
     import mlx.nn as nn
     import mlx.core as mx
     try:
@@ -1887,11 +1891,20 @@ def _fix_quantized_bits(model, weights):
             name_lower = name.lower()
             is_router = (".gate." in name_lower or name_lower.endswith(".gate")
                          or "shared_expert_gate" in name_lower)
+            gs_candidates = []
+            if preferred_group_size is not None:
+                try:
+                    preferred_gs = int(preferred_group_size)
+                    if preferred_gs > 0:
+                        gs_candidates.append(preferred_gs)
+                except (TypeError, ValueError):
+                    pass
             if is_router:
-                gs_candidates = [64, module.group_size, 128]
+                for gs in (64, module.group_size, 128):
+                    if gs not in gs_candidates:
+                        gs_candidates.append(gs)
             else:
-                gs_candidates = [module.group_size]
-                for gs in (64, 128):
+                for gs in (module.group_size, 64, 128):
                     if gs not in gs_candidates:
                         gs_candidates.append(gs)
             for try_gs in gs_candidates:

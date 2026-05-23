@@ -30,8 +30,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip build
-          pip install -e jang-tools
-          pip install pytest
+          pip install -e "jang-tools[all]" pytest
 
       - name: Run Python tests
         run: pytest jang-tools/tests -v

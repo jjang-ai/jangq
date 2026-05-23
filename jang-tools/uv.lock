@@ -712,7 +712,7 @@ wheels = [
 
 [[package]]
 name = "jang"
-version = "2.5.30"
+version = "2.5.31"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },

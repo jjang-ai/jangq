@@ -1,3 +1,5 @@
+import json
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -378,6 +380,114 @@ def test_gather_sorted_auto_uses_grouped_nax_only_for_measured_win_shapes(monkey
     )
     mx.eval(large)
     assert called["grouped"] == 1
+
+
+def test_gather_sorted_prefill_defaults_to_grouped_nax(monkeypatch):
+    import jang_tools.turboquant.gather_tq_kernel as gather_kernel
+
+    rng = np.random.default_rng(2050)
+    in_features = 64
+    out_features = 16
+    n_experts = 3
+    bits = 4
+    signs = mx.ones((in_features,), dtype=mx.float32)
+    packed_rows = []
+    norm_rows = []
+    codebook = None
+    for expert in range(n_experts):
+        packed, norms, cb = _quantize_rows(
+            rng.standard_normal((out_features, in_features)).astype(np.float32),
+            bits,
+        )
+        packed_rows.append(packed)
+        norm_rows.append(norms)
+        codebook = cb
+    packed = mx.stack(packed_rows, axis=0)
+    norms = mx.stack(norm_rows, axis=0)
+    x = mx.array(rng.standard_normal((512, 1, in_features)).astype(np.float32))
+    indices = mx.array(np.array([0] * 512, dtype=np.uint32))
+
+    called = {"grouped": 0}
+
+    def fake_grouped(x_rot, packed_arg, norms_arg, codebook_arg, idx_flat, in_f, out_f, bits_arg):
+        called["grouped"] += 1
+        assert in_f == in_features
+        assert out_f == out_features
+        assert bits_arg == bits
+        return mx.zeros((idx_flat.size, out_features), dtype=mx.float32)
+
+    monkeypatch.delenv("JANGTQ_MPP_NAX", raising=False)
+    monkeypatch.delenv("JANGTQ_MPP_NAX_PREFILL", raising=False)
+    monkeypatch.setattr(gather_kernel, "_gather_tq_mpp_nax_grouped_from_rot", fake_grouped)
+
+    out = gather_tq_matmul(
+        x,
+        packed,
+        norms,
+        codebook,
+        signs,
+        indices,
+        bits,
+        sorted_indices=True,
+    )
+
+    mx.eval(out)
+    assert called["grouped"] == 1
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value"),
+    [("JANGTQ_MPP_NAX", "0"), ("JANGTQ_MPP_NAX_PREFILL", "0")],
+)
+def test_gather_sorted_prefill_can_disable_default_nax(monkeypatch, env_name, env_value):
+    import jang_tools.turboquant.gather_tq_kernel as gather_kernel
+
+    rng = np.random.default_rng(2052)
+    in_features = 64
+    out_features = 16
+    n_experts = 3
+    bits = 4
+    signs = mx.ones((in_features,), dtype=mx.float32)
+    packed_rows = []
+    norm_rows = []
+    codebook = None
+    for expert in range(n_experts):
+        packed, norms, cb = _quantize_rows(
+            rng.standard_normal((out_features, in_features)).astype(np.float32),
+            bits,
+        )
+        packed_rows.append(packed)
+        norm_rows.append(norms)
+        codebook = cb
+    packed = mx.stack(packed_rows, axis=0)
+    norms = mx.stack(norm_rows, axis=0)
+    x = mx.array(rng.standard_normal((512, 1, in_features)).astype(np.float32))
+    indices = mx.array(np.array([0] * 512, dtype=np.uint32))
+
+    called = {"grouped": 0}
+
+    def fake_grouped(*_args, **_kwargs):
+        called["grouped"] += 1
+        return mx.zeros((512, out_features), dtype=mx.float32)
+
+    monkeypatch.delenv("JANGTQ_MPP_NAX", raising=False)
+    monkeypatch.delenv("JANGTQ_MPP_NAX_PREFILL", raising=False)
+    monkeypatch.setenv(env_name, env_value)
+    monkeypatch.setattr(gather_kernel, "_gather_tq_mpp_nax_grouped_from_rot", fake_grouped)
+
+    out = gather_tq_matmul(
+        x,
+        packed,
+        norms,
+        codebook,
+        signs,
+        indices,
+        bits,
+        sorted_indices=True,
+    )
+
+    mx.eval(out)
+    assert called["grouped"] == 0
 
 
 def test_sorted_group_tile_metadata_reused_for_same_indices(monkeypatch):
@@ -768,6 +878,142 @@ def test_fused_gate_up_swiglu_auto_uses_grouped_nax_only_for_measured_win_shapes
     assert called["grouped"] == 1
 
 
+def test_fused_gate_up_swiglu_sorted_prefill_defaults_to_grouped_nax(monkeypatch):
+    import jang_tools.turboquant.fused_gate_up_kernel as fused_kernel
+
+    rng = np.random.default_rng(2058)
+    in_features = 64
+    out_features = 16
+    n_experts = 3
+    bits = 4
+    signs = mx.ones((in_features,), dtype=mx.float32)
+    packed_rows = []
+    norm_rows = []
+    codebook = None
+    for expert in range(n_experts):
+        packed, norms, cb = _quantize_rows(
+            rng.standard_normal((out_features, in_features)).astype(np.float32),
+            bits,
+        )
+        packed_rows.append(packed)
+        norm_rows.append(norms)
+        codebook = cb
+    packed = mx.stack(packed_rows, axis=0)
+    norms = mx.stack(norm_rows, axis=0)
+    x = mx.array(rng.standard_normal((512, 1, in_features)).astype(np.float32))
+    indices = mx.array(np.array([0] * 512, dtype=np.uint32))
+
+    called = {"grouped": 0}
+
+    def fake_grouped(
+        x_rot,
+        packed_gate,
+        norms_gate,
+        packed_up,
+        norms_up,
+        codebook_arg,
+        idx_flat,
+        in_f,
+        out_f,
+        bits_arg,
+        swiglu_limit=0.0,
+    ):
+        called["grouped"] += 1
+        assert in_f == in_features
+        assert out_f == out_features
+        assert bits_arg == bits
+        return mx.zeros((idx_flat.size, out_features), dtype=mx.float32)
+
+    monkeypatch.delenv("JANGTQ_MPP_NAX", raising=False)
+    monkeypatch.delenv("JANGTQ_MPP_NAX_PREFILL", raising=False)
+    monkeypatch.setattr(
+        fused_kernel,
+        "_fused_gate_up_swiglu_mpp_nax_grouped_from_rot",
+        fake_grouped,
+        raising=False,
+    )
+
+    y = fused_kernel.fused_gate_up_swiglu_matmul(
+        x,
+        packed,
+        norms,
+        packed,
+        norms,
+        codebook,
+        signs,
+        indices,
+        bits,
+    )
+
+    mx.eval(y)
+    assert called["grouped"] == 1
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value"),
+    [("JANGTQ_MPP_NAX", "0"), ("JANGTQ_MPP_NAX_PREFILL", "0")],
+)
+def test_fused_gate_up_swiglu_sorted_prefill_can_disable_default_nax(
+    monkeypatch,
+    env_name,
+    env_value,
+):
+    import jang_tools.turboquant.fused_gate_up_kernel as fused_kernel
+
+    rng = np.random.default_rng(2060)
+    in_features = 64
+    out_features = 16
+    n_experts = 3
+    bits = 4
+    signs = mx.ones((in_features,), dtype=mx.float32)
+    packed_rows = []
+    norm_rows = []
+    codebook = None
+    for expert in range(n_experts):
+        packed, norms, cb = _quantize_rows(
+            rng.standard_normal((out_features, in_features)).astype(np.float32),
+            bits,
+        )
+        packed_rows.append(packed)
+        norm_rows.append(norms)
+        codebook = cb
+    packed = mx.stack(packed_rows, axis=0)
+    norms = mx.stack(norm_rows, axis=0)
+    x = mx.array(rng.standard_normal((512, 1, in_features)).astype(np.float32))
+    indices = mx.array(np.array([0] * 512, dtype=np.uint32))
+
+    called = {"grouped": 0}
+
+    def fake_grouped(*_args, **_kwargs):
+        called["grouped"] += 1
+        return mx.zeros((512, out_features), dtype=mx.float32)
+
+    monkeypatch.delenv("JANGTQ_MPP_NAX", raising=False)
+    monkeypatch.delenv("JANGTQ_MPP_NAX_PREFILL", raising=False)
+    monkeypatch.setenv(env_name, env_value)
+    monkeypatch.setattr(
+        fused_kernel,
+        "_fused_gate_up_swiglu_mpp_nax_grouped_from_rot",
+        fake_grouped,
+        raising=False,
+    )
+
+    y = fused_kernel.fused_gate_up_swiglu_matmul(
+        x,
+        packed,
+        norms,
+        packed,
+        norms,
+        codebook,
+        signs,
+        indices,
+        bits,
+    )
+
+    mx.eval(y)
+    assert called["grouped"] == 0
+
+
 @pytest.mark.parametrize("swiglu_limit", [0.0, 10.0])
 def test_fused_gate_up_swiglu_nax_matches_existing_kernel(monkeypatch, swiglu_limit):
     import jang_tools.turboquant.fused_gate_up_kernel as fused_kernel
@@ -988,3 +1234,123 @@ def test_full_expert_cluster_nax_matches_existing_broadcast_topk(monkeypatch):
 
     mx.eval(current, nax)
     np.testing.assert_allclose(np.array(nax), np.array(current), rtol=4e-2, atol=8e-2)
+
+
+def test_minimax_kernel_compare_detects_jangtq_metadata(tmp_path):
+    from jang_tools.minimax_kernel_compare import detect_model_kind, model_summary
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "minimax_m2",
+                "weight_format": "mxtq",
+                "hidden_size": 3072,
+                "intermediate_size": 1536,
+                "num_hidden_layers": 62,
+                "num_local_experts": 160,
+                "num_experts_per_tok": 8,
+            }
+        )
+    )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({"profile": "JANGTQ2", "mxtq_bits": {"routed": 2}})
+    )
+
+    assert detect_model_kind(tmp_path) == "jangtq"
+    summary = model_summary(tmp_path)
+    assert summary["kind"] == "jangtq"
+    assert summary["profile"] == "JANGTQ2"
+    assert summary["weight_format"] == "mxtq"
+    assert summary["hidden_size"] == 3072
+    assert summary["intermediate_size"] == 1536
+    assert summary["num_local_experts"] == 160
+    assert summary["num_experts_per_tok"] == 8
+
+
+def test_minimax_kernel_compare_detects_affine_jang_metadata(tmp_path):
+    from jang_tools.minimax_kernel_compare import detect_model_kind, model_summary
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "minimax_m2",
+                "hidden_size": 3072,
+                "intermediate_size": 1536,
+                "num_hidden_layers": 62,
+                "num_local_experts": 256,
+                "num_experts_per_tok": 8,
+                "quantization": {"bits": 2, "group_size": 64, "mode": "affine"},
+            }
+        )
+    )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "format": "jang-v2",
+                "quantization": {
+                    "method": "jang-importance",
+                    "profile": "JANG_2L",
+                    "target_bits": 2.0,
+                    "actual_bits": 2.1,
+                },
+            }
+        )
+    )
+
+    assert detect_model_kind(tmp_path) == "jang"
+    summary = model_summary(tmp_path)
+    assert summary["kind"] == "jang"
+    assert summary["profile"] == "JANG_2L"
+    assert summary["weight_format"] == "affine"
+    assert summary["quantization_bits"] == 2
+    assert summary["quantization_group_size"] == 64
+
+
+def test_minimax_kernel_compare_modes_and_env_are_explicit():
+    from jang_tools.minimax_kernel_compare import env_for_mode, mode_labels
+
+    assert mode_labels("jangtq", include_global_auto=True) == [
+        "legacy_prefill",
+        "default_prefill",
+        "global_auto",
+    ]
+    assert mode_labels("jang") == ["affine_default"]
+
+    legacy = env_for_mode("legacy_prefill")
+    assert legacy["JANGTQ_MPP_NAX_PREFILL"] == "0"
+    assert legacy["JANGTQ_MPP_NAX"] is None
+    assert legacy["JANGTQ_MPP_NAX_STRICT"] is None
+
+    default = env_for_mode("default_prefill")
+    assert default["JANGTQ_MPP_NAX_PREFILL"] is None
+    assert default["JANGTQ_MPP_NAX"] is None
+    assert default["JANGTQ_MPP_NAX_STRICT"] == "1"
+
+    affine = env_for_mode("affine_default")
+    assert affine == {}
+
+
+def test_fix_quantized_bits_prefers_jang_block_size_for_ambiguous_switch_shapes():
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+
+    from jang_tools.loader import _fix_quantized_bits
+
+    switch = QuantizedSwitchLinear(
+        input_dims=768,
+        output_dims=8,
+        num_experts=2,
+        group_size=32,
+        bits=8,
+        bias=False,
+    )
+    assert switch.weight.shape == (2, 8, 192)
+    assert switch.scales.shape == (2, 8, 24)
+
+    class Model:
+        def named_modules(self):
+            yield "model.layers.0.block_sparse_moe.switch_mlp.up_proj", switch
+
+    _fix_quantized_bits(Model(), {}, preferred_group_size=128)
+
+    assert switch.bits == 2
+    assert switch.group_size == 128

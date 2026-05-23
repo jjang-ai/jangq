@@ -17,6 +17,52 @@ import numpy as np
 from .hadamard_kernel import hadamard_rotate_metal
 
 
+_MPP_NAX_ON_MODES = {"1", "true", "yes", "on"}
+_MPP_NAX_OFF_MODES = {"0", "false", "no", "off", "disable", "disabled"}
+
+
+def _env_mode(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    return value.strip().lower()
+
+
+def mpp_nax_prefill_mode() -> str:
+    """Return the effective MPP/NAX mode for sorted routed prefill.
+
+    Decode and non-sorted gather remain opt-in through ``JANGTQ_MPP_NAX``.
+    Sorted routed prefill is the shape that can fill 16-row TensorOps tiles, so
+    it defaults to ``auto`` unless explicitly disabled.
+    """
+    explicit = _env_mode("JANGTQ_MPP_NAX_PREFILL")
+    if explicit is not None:
+        return "" if explicit in _MPP_NAX_OFF_MODES else explicit
+
+    global_mode = _env_mode("JANGTQ_MPP_NAX")
+    if global_mode in _MPP_NAX_OFF_MODES:
+        return ""
+    if global_mode:
+        return global_mode
+    return "auto"
+
+
+def mpp_nax_mode_allows(
+    mode: str,
+    dispatches: int,
+    in_features: int,
+    out_features: int,
+) -> bool:
+    """Return whether an MPP/NAX mode should run for this routed shape."""
+    if mode in _MPP_NAX_ON_MODES:
+        return True
+    if mode != "auto":
+        return False
+    if dispatches >= 512:
+        return True
+    return dispatches >= 256 and (int(in_features) * int(out_features)) >= (2048 * 2048)
+
+
 _MPP_NAX_HEADER = r"""
 #include <metal_stdlib>
 #include <metal_simdgroup>

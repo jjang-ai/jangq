@@ -156,11 +156,34 @@ def main() -> int:
         "runs": [],
     }
 
-    for mode in [None, "auto"]:
-        with _env("JANGTQ_MPP_NAX", mode), _env(
-            "JANGTQ_MPP_NAX_STRICT", "1" if mode == "auto" else None
+    run_modes = [
+        {
+            "label": "legacy_prefill",
+            "global": None,
+            "prefill": "0",
+            "strict": None,
+        },
+        {
+            "label": "default_prefill",
+            "global": None,
+            "prefill": None,
+            "strict": "1",
+        },
+        {
+            "label": "global_auto",
+            "global": "auto",
+            "prefill": None,
+            "strict": "1",
+        },
+    ]
+
+    for mode in run_modes:
+        with _env("JANGTQ_MPP_NAX", mode["global"]), _env(
+            "JANGTQ_MPP_NAX_PREFILL", mode["prefill"]
+        ), _env(
+            "JANGTQ_MPP_NAX_STRICT", mode["strict"]
         ):
-            label = "off" if mode is None else mode
+            label = mode["label"]
             # Warm compile on the same prompt so measured rows are not just
             # kernel compilation. This deliberately does not reuse KV cache.
             _run_once(model, tokenizer, prompt, max_tokens=2)
