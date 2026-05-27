@@ -59,6 +59,30 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             failures.append(f"config.json missing required top-level key: {k}")
     if cfg.get("capabilities", {}).get("cache_type") != "kv":
         failures.append(f"capabilities.cache_type = {cfg.get('capabilities', {}).get('cache_type')} (want kv)")
+    tool_parser = cfg.get("capabilities", {}).get("tools", {}).get("parser")
+    if tool_parser != "xml_function":
+        failures.append(
+            f"capabilities.tools.parser = {tool_parser!r} (want 'xml_function')"
+        )
+    reasoning_parser = cfg.get("capabilities", {}).get("reasoning", {}).get("parser")
+    if reasoning_parser != "think_xml":
+        failures.append(
+            f"capabilities.reasoning.parser = {reasoning_parser!r} (want 'think_xml')"
+        )
+    cache_topology = cfg.get("runtime", {}).get("cache_topology", {})
+    expected_cache_topology = {
+        "family": "hybrid_full_swa_kv",
+        "prefix_cache": True,
+        "l2_disk_cache": True,
+        "turboquant_kv": "full_attention_layers_only",
+        "swa_layers": "rotating_kv_native",
+    }
+    for key, expected in expected_cache_topology.items():
+        actual = cache_topology.get(key)
+        if actual != expected:
+            failures.append(
+                f"runtime.cache_topology.{key} = {actual!r} (want {expected!r})"
+            )
     bundle_has_mtp = bool(cfg.get("runtime", {}).get("bundle_has_mtp", True))
     expected_mtp_mode = "preserved_disabled" if bundle_has_mtp else "absent"
     if cfg.get("runtime", {}).get("mtp_mode") != expected_mtp_mode:
