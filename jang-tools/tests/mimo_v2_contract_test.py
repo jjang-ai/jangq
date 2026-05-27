@@ -114,3 +114,26 @@ def test_mimo_k_profile_metadata_targets_runtime_switch_mlp_modules(tmp_path):
     assert cfg["capabilities"]["tools"]["parser"] == "xml_function"
     assert cfg["runtime"]["mtp_mode"] == "preserved_disabled"
     assert cfg["runtime"]["cache_topology"]["family"] == "hybrid_full_swa_kv"
+
+
+def test_mimo_v2_shared_capability_resolver_preserves_parser_and_cache_policy():
+    from jang_tools.capabilities import build_capabilities
+
+    caps = build_capabilities(
+        {"source_model": {"architecture": "mimo_v2"}},
+        {"model_type": "mimo_v2"},
+    )
+
+    assert caps == {
+        "reasoning_parser": "think_xml",
+        "tool_parser": "xml_function",
+        "think_in_template": False,
+        "supports_tools": True,
+        "supports_thinking": True,
+        "family": "mimo_v2",
+        "modality": "text",
+        "cache_type": "kv",
+    }
+
+    flash_caps = build_capabilities({}, {"model_type": "mimo_v2_flash"})
+    assert flash_caps == caps

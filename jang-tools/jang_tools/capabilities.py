@@ -43,6 +43,11 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax":          ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
+    # MiMo V2.5 — hybrid full-attention + SWA KV. Cache topology details
+    # live in the MiMo converter/runtime metadata; the shared capability stamp
+    # keeps generic JANG restamping on the XML reasoning/tool parser path.
+    "mimo_v2":          ("mimo_v2",     "think_xml",   "xml_function", False, "kv"),
+    "mimo_v2_flash":    ("mimo_v2",     "think_xml",   "xml_function", False, "kv"),
     # GLM 5.x (MLA + DSA)
     "glm_moe_dsa":      ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
     "glm5":             ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
