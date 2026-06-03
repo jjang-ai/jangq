@@ -1,5 +1,27 @@
 ## Unreleased
 
+- Gemma 4 12B (`gemma4_unified`) support. New `convert_gemma4_mxfp` (MXFP4/MXFP8)
+  and `convert_gemma4_jang` (JANG_4M: 8-bit affine attention + 4-bit affine
+  MLP/embed) converters for the dense, omni-modal release. Both handle the
+  Gemma-4-specific traps: `scale_shift=0` RMSNorm (norms passed through with NO
+  `+1`), `attention_k_eq_v` on the 8 full-attention layers (no `v_proj`), the
+  early-fusion vision/audio embedders kept fp16 passthrough (all 5 multimodal
+  fragments: `vision_embedder`/`embed_vision`/`embed_audio`/`vision_tower`/
+  `audio_tower`), and the key remap (strip `model.`, then
+  `language_model.`→`language_model.model.`). No native MTP.
+- `convert_gemma4_jang` writes a correct mixed-bit `config.json["quantization"]`
+  (top-level `{group_size,bits:8,mode:affine}` + per-module 4-bit overrides) so
+  loaders dequantize 8-bit attention and 4-bit MLP with the right kernels —
+  avoids the config-metadata bit bug.
+- Registered `gemma4_unified` / `gemma4_unified_text` in the capability
+  `FAMILY_MAP` (resolve to the `gemma4` family without leaning on the substring
+  fallback).
+- Local (gitignored) validation helpers under `jang-tools/scripts/gemma4/`:
+  `g4_coherence.py` (text-decoder coherence via a `gemma4_text` shim),
+  `verify_bundle_integrity.py` (multimodal/tokenizer/audio faithfulness + fp16
+  range safety), `validate_dequant.py` (dequant round-trip vs source). Runtime
+  contract: `docs/runtime/2026-06-03-gemma4-12b-unified-runtime-spec.md`.
+
 ## 2.5.30 — 2026-05-15
 
 - JANGTQ MPP/NAX availability checks no longer run a smoke Metal dispatch.

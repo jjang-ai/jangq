@@ -62,8 +62,14 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "mistral3":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
     "mistral4":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
     # Gemma 4 / 3
+    # gemma4_unified* is the official 2026-06 release naming for the
+    # omni-modal (text+image+audio+video) line; the preview shipped as
+    # plain gemma4*. Same backbone — register both so capability
+    # resolution + verify_directory don't lean on the substring fallback.
     "gemma4":           ("gemma4",      "gemma4",      "gemma4",   False, "kv"),
     "gemma4_text":      ("gemma4",      "gemma4",      "gemma4",   False, "kv"),
+    "gemma4_unified":      ("gemma4",   "gemma4",      "gemma4",   False, "kv"),
+    "gemma4_unified_text": ("gemma4",   "gemma4",      "gemma4",   False, "kv"),
     "gemma3":           ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3_text":      ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3n":          ("gemma4",      "gemma4",      "gemma4",   False, "hybrid"),
