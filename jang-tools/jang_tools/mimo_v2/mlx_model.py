@@ -35,8 +35,111 @@ from mlx_lm.models.base import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.cache import KVCache
+from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx_lm.models.switch_layers import SwitchGLU
+
+
+def regularize_jangtq_update_weights(weights: dict[str, Any]) -> dict[str, Any]:
+    """Map on-disk `.tq_*` triplets to TurboQuant module parameter names.
+
+    `hydrate_jangtq` swaps modules and assigns arrays, but MLX strict
+    `load_weights` still requires the new module parameters to be present in
+    the update dict. The `.tq_bits` scalar is construction metadata only.
+    """
+    out: dict[str, Any] = {}
+    for key, value in weights.items():
+        if key.endswith(".tq_packed"):
+            out[key[: -len(".tq_packed")] + ".packed"] = value
+        elif key.endswith(".tq_norms"):
+            out[key[: -len(".tq_norms")] + ".norms"] = value
+        elif key.endswith(".tq_bits"):
+            continue
+        else:
+            out[key] = value
+    return out
+
+
+def prepare_mimo_jangtq_runtime(
+    model: nn.Module,
+    weights: dict[str, Any],
+    *,
+    mxtq_seed: int,
+) -> dict[str, Any]:
+    """Hydrate MiMo JANGTQ modules and enable the fast inference path."""
+    # MiMo's decode shape is hidden=4096, moe_intermediate=2048, top_k=8.
+    # Synthetic sweeps on the local M5 Max showed gather OPT=16 is faster than
+    # the generic JANGTQ default of 20 for this shape. Set before hydrate imports
+    # gather_tq_kernel; callers can still override explicitly.
+    os.environ.setdefault("JANGTQ_GATHER_OPT", "16")
+    from jang_tools.jangrt.inference_mode import ensure_inference_mode
+    from jang_tools.jangrt.jangtq_hydrate import hydrate_jangtq
+    from jang_tools.jangrt.switchglu_decode import install_switchglu_fused_decode
+
+    raw_tq_weights = weights
+    regular = hydrate_jangtq(model, weights, mxtq_seed=mxtq_seed)
+    install_switchglu_fused_decode()
+    ensure_inference_mode(model, label="MiMo-JANGTQ")
+    regular.update(regularize_jangtq_update_weights(raw_tq_weights))
+    return regular
+
+
+def maybe_weighted_jangtq_decode(
+    switch_mlp: Any,
+    x: Any,
+    indices: Any,
+    scores: Any,
+    *,
+    batch: int,
+) -> Any | None:
+    """Return weighted JANGTQ decode output for single-token decode if available."""
+    weighted_decode = getattr(switch_mlp, "_jangtq_weighted_decode", None)
+    if weighted_decode is None or batch != 1 or getattr(switch_mlp, "training", False):
+        return None
+    return weighted_decode(x, indices, scores)
+
+
+_MIMO_ROUTER_CACHE: dict[tuple[int, bool, int], Any] = {}
+
+
+def get_compiled_mimo_decode_router(
+    top_k: int,
+    norm_topk_prob: bool,
+    routed_scaling: float,
+) -> Any:
+    scaling_milli = int(round(float(routed_scaling) * 1000.0))
+    key = (int(top_k), bool(norm_topk_prob), scaling_milli)
+    if key in _MIMO_ROUTER_CACHE:
+        return _MIMO_ROUTER_CACHE[key]
+
+    def _router(x_fp32, weight_fp32, bias_fp32):
+        logits = x_fp32 @ weight_fp32.T
+        scores = mx.sigmoid(logits)
+        corrected = scores + bias_fp32.reshape(1, -1)
+        inds = mx.argpartition(-corrected, kth=top_k - 1, axis=-1)[..., :top_k]
+        weights = mx.take_along_axis(scores, inds, axis=-1)
+        if norm_topk_prob:
+            weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
+        return inds, weights * (float(scaling_milli) * 0.001)
+
+    compiled = mx.compile(_router)
+    _MIMO_ROUTER_CACHE[key] = compiled
+    return compiled
+
+
+def run_compiled_mimo_decode_router(
+    x_fp32: Any,
+    weight_fp32: Any,
+    bias_fp32: Any,
+    *,
+    top_k: int,
+    norm_topk_prob: bool,
+    routed_scaling: float,
+    batch: int,
+) -> Any | None:
+    if batch != 1:
+        return None
+    router = get_compiled_mimo_decode_router(top_k, norm_topk_prob, routed_scaling)
+    return router(x_fp32, weight_fp32, bias_fp32)
 
 
 # --------------------------------------------------------------------------
@@ -91,6 +194,7 @@ class ModelArgs(BaseModelArgs):
     # Quantization metadata.
     quantization: Optional[dict] = None
     mxtq_bits: Optional[int] = None
+    mxtq_seed: int = 42
     routed_expert_bits: Optional[int] = None
     debug_disable_attention_sink: bool = False
 
@@ -185,6 +289,8 @@ class MiMoV2Attention(nn.Module):
     ) -> mx.array:
         B, T, _ = x.shape
         qkv = self.qkv_proj(x)
+        if qkv.dtype != x.dtype:
+            qkv = qkv.astype(x.dtype)
         q = qkv[..., : self.q_size]
         k = qkv[..., self.q_size : self.q_size + self.k_size]
         v = qkv[..., self.q_size + self.k_size :]
@@ -201,7 +307,17 @@ class MiMoV2Attention(nn.Module):
         if cache is not None:
             k, v = cache.update_and_fetch(k, v)
 
-        if self.use_sink:
+        if self.use_sink and os.environ.get("JANG_MIMO_MANUAL_SINK_SDPA") not in {"1", "true", "yes"}:
+            attn_out = scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                cache=None,
+                scale=self.scale,
+                mask=mask,
+                sinks=self.attention_sink_bias,
+            )
+        elif self.use_sink:
             attn_out = _sdpa_with_sink(
                 q, k, v, mask, self.scale, self.attention_sink_bias,
                 sliding_window=self.sliding_window,
@@ -209,6 +325,8 @@ class MiMoV2Attention(nn.Module):
         else:
             attn_out = scaled_dot_product_attention(q, k, v, cache=cache, scale=self.scale, mask=mask)
         attn_out = attn_out.transpose(0, 2, 1, 3).reshape(B, T, self.o_hidden)
+        if attn_out.dtype != x.dtype:
+            attn_out = attn_out.astype(x.dtype)
         return self.o_proj(attn_out)
 
 
@@ -286,6 +404,19 @@ class MiMoV2MoEGate(nn.Module):
         # Compute in fp32 for routing precision.
         x_fp32 = x.astype(mx.float32)
         w_fp32 = self.weight.astype(mx.float32)
+        compiled = run_compiled_mimo_decode_router(
+            x_fp32,
+            w_fp32,
+            self.e_score_correction_bias.astype(mx.float32),
+            top_k=self.top_k,
+            norm_topk_prob=self.norm_topk_prob,
+            routed_scaling=self.routed_scaling,
+            batch=x_fp32.shape[0],
+        )
+        if compiled is not None:
+            topk_indices, topk_weights = compiled
+            return topk_indices, topk_weights.astype(x.dtype)
+
         logits = x_fp32 @ w_fp32.T  # (N, n_experts)
         scores = mx.sigmoid(logits)
         # noaux_tc with n_group=1 degenerates to plain top-k over all experts.
@@ -315,6 +446,15 @@ class MiMoV2MoE(nn.Module):
         B, T, H = x.shape
         x_flat = x.reshape(-1, H)
         topk_idx, topk_w = self.gate(x_flat)
+        weighted = maybe_weighted_jangtq_decode(
+            self.switch_mlp,
+            x_flat,
+            topk_idx,
+            topk_w,
+            batch=x_flat.shape[0],
+        )
+        if weighted is not None:
+            return weighted.reshape(B, T, H)
         # SwitchGLU returns per-token per-expert outputs of shape (N, K, H).
         out = self.switch_mlp(x_flat, topk_idx)
         # Weighted sum across the K selected experts.
@@ -387,12 +527,17 @@ class MiMoV2Backbone(nn.Module):
         mask: Optional[mx.array] = None,
     ) -> mx.array:
         h = self.embed_tokens(input_ids)
-        if mask is None:
-            mask = create_attention_mask(h, cache)
         if cache is None:
             cache = [None] * len(self.layers)
         for layer, c in zip(self.layers, cache):
-            h = layer(h, mask=mask, cache=c)
+            layer_mask = mask
+            if layer_mask is None:
+                layer_mask = create_attention_mask(
+                    h,
+                    c,
+                    window_size=layer.self_attn.sliding_window,
+                )
+            h = layer(h, mask=layer_mask, cache=c)
         return self.norm(h)
 
 
@@ -419,14 +564,32 @@ class Model(nn.Module):
     def layers(self) -> list[nn.Module]:
         return self.model.layers
 
+    def make_cache(self) -> list[KVCache]:
+        caches: list[KVCache] = []
+        for layer in self.model.layers:
+            if layer.is_swa:
+                caches.append(RotatingKVCache(max_size=self.args.sliding_window, keep=4))
+            else:
+                caches.append(KVCache())
+        return caches
+
     def sanitize(self, weights: dict[str, mx.array]) -> dict[str, mx.array]:
         """Adapt JANG bundle weights to this MLX layout.
 
         Mainly: stack the 256 individual `experts.{0..255}.{gate,up,down}_proj.weight`
         tensors per MoE layer into the SwitchGLU's three batched weight tensors.
+        JANGTQ bundles are already pre-stacked under `switch_mlp.*.tq_*`; hydrate
+        those modules before the regular affine update path.
         Also drops MTP weights, vision weights, and audio weights (loaded in
         separate multimodal runtime, see future mimo_v2_multimodal.py).
         """
+        if any(key.endswith(".tq_packed") for key in weights):
+            weights = prepare_mimo_jangtq_runtime(
+                self,
+                weights,
+                mxtq_seed=int(self.args.mxtq_seed),
+            )
+
         new_weights: dict[str, mx.array] = {}
         # Defer expert stacking — collect them by (layer, projection) first.
         expert_stash: dict[tuple[int, str], dict[int, mx.array]] = {}
