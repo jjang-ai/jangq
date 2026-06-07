@@ -49,6 +49,8 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             )
         if not isinstance(jang_cfg.get("mxtq_bits"), dict):
             failures.append("jang_config.json missing required mxtq_bits object")
+    else:
+        jang_cfg = {}
     expected_top = ["quantization", "mxtq_bits", "routed_expert_bits", "jang_profile", "rope_parameters"]
     for k in expected_top:
         if k not in cfg:
@@ -179,7 +181,10 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
     if is_jangtq:
         spot_groups["attn_o_proj"] = "model.layers.0.self_attn.o_proj"
     if not is_jangtq:
-        spot_groups["routed_expert"] = "model.layers.1.mlp.experts.0.gate_proj"
+        if "model.layers.1.mlp.switch_mlp.gate_proj.weight" in weight_map:
+            spot_groups["routed_expert"] = "model.layers.1.mlp.switch_mlp.gate_proj"
+        else:
+            spot_groups["routed_expert"] = "model.layers.1.mlp.experts.0.gate_proj"
     if bundle_has_mtp:
         spot_groups["mtp_qkv"] = "model.mtp.layers.0.self_attn.qkv_proj"
     for label, base in spot_groups.items():
@@ -263,12 +268,51 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         else:
             print(f"[verify] JANGTQ routed switch_mlp triplet count = {expected_tq} x packed/norms/bits")
     else:
-        # Affine JANG bundles keep one per-expert weight triplet:
-        # 47 layers × 256 experts × 3 mats = 36096.
+        # Preferred affine JANG bundles are pre-stacked:
+        # 47 layers × 3 mats = 141 switch_mlp weight triplets.
+        stacked_expert_weights = [
+            k for k in weight_map
+            if ".mlp.switch_mlp." in k and k.endswith(".weight")
+        ]
         expert_weights = [k for k in weight_map if ".mlp.experts." in k and k.endswith(".weight")]
-        if len(expert_weights) != 47 * 256 * 3:
+        expected_layout = (
+            cfg.get("runtime", {}).get("expert_layout")
+            or jang_cfg.get("expert_layout")
+        )
+        if (
+            expected_layout == "stacked_affine_switch_mlp"
+            and expert_weights
+        ):
             failures.append(
-                f"routed expert .weight count = {len(expert_weights)}, expected {47*256*3}"
+                "stacked affine bundle contains legacy per-expert weights: "
+                f"{len(expert_weights)} .mlp.experts.*.weight tensors"
+            )
+        if (
+            expected_layout == "per_expert_affine"
+            and stacked_expert_weights
+        ):
+            failures.append(
+                "per-expert affine bundle contains stacked switch_mlp weights: "
+                f"{len(stacked_expert_weights)} .mlp.switch_mlp.*.weight tensors"
+            )
+        if len(stacked_expert_weights) == 47 * 3:
+            missing_sidecars = []
+            for k in stacked_expert_weights:
+                base = k[: -len(".weight")]
+                for suffix in ("scales", "biases"):
+                    if f"{base}.{suffix}" not in weight_map:
+                        missing_sidecars.append(f"{base}.{suffix}")
+            if missing_sidecars:
+                failures.append(
+                    f"stacked routed expert sidecars missing: {missing_sidecars[:5]}"
+                )
+            else:
+                print(f"[verify] stacked routed expert .weight count = {len(stacked_expert_weights)} ✓")
+        elif len(expert_weights) != 47 * 256 * 3:
+            failures.append(
+                "routed expert .weight count mismatch: "
+                f"stacked={len(stacked_expert_weights)} per_expert={len(expert_weights)}, "
+                f"expected stacked {47*3} or per-expert {47*256*3}"
             )
         else:
             print(f"[verify] routed expert .weight count = {len(expert_weights)} ✓")

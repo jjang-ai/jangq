@@ -342,6 +342,7 @@ def _write_config_json(
     profile: QuantProfile,
     quant_overrides: dict[str, dict],
     include_mtp: bool = True,
+    stack_experts: bool = True,
 ) -> None:
     cfg = json.loads((src / "config.json").read_text())
     cfg.pop("quantization_config", None)
@@ -409,6 +410,7 @@ def _write_config_json(
         "bundle_has_mtp": include_mtp,
         "multimodal_mode": "weights_preserved_text_runtime",
         "quantization_profile": profile.name,
+        "expert_layout": "stacked_affine_switch_mlp" if stack_experts else "per_expert_affine",
         "routed_expert_bits": profile.routed_expert_bits,
         "routed_expert_group_size": profile.expert_group_size,
         "routed_expert_bit_plan": cfg.get("routed_expert_bit_plan"),
@@ -422,6 +424,7 @@ def write_jang_metadata(
     profile: QuantProfile,
     quant_overrides: dict[str, dict],
     include_mtp: bool = False,
+    stack_experts: bool = True,
 ) -> None:
     """Write the classic affine MiMo JANG metadata pair.
 
@@ -429,7 +432,14 @@ def write_jang_metadata(
     small explicit contract for release/verifier tooling so classic affine JANG
     bundles are not confused with JANGTQ prestacked expert bundles.
     """
-    _write_config_json(src, dst, profile, quant_overrides, include_mtp=include_mtp)
+    _write_config_json(
+        src,
+        dst,
+        profile,
+        quant_overrides,
+        include_mtp=include_mtp,
+        stack_experts=stack_experts,
+    )
     jang_cfg = {
         "format": "jang",
         "family": "mimo_v2",
@@ -438,7 +448,7 @@ def write_jang_metadata(
         "routed_expert_bits": profile.routed_expert_bits,
         "routed_expert_group_size": profile.expert_group_size,
         "num_experts": _MIMO_NUM_EXPERTS,
-        "expert_layout": "per_expert_affine",
+        "expert_layout": "stacked_affine_switch_mlp" if stack_experts else "per_expert_affine",
         "runtime_expert_module": "switch_mlp",
         "bookend_bits": profile.default_bits,
         "bookend_group_size": profile.default_group_size,
@@ -495,6 +505,7 @@ def convert(
     profile_bits: str | int,
     max_shard_bytes: int = 1_000_000_000,
     include_mtp: bool = False,
+    stack_experts: bool = True,
 ) -> None:
     import mlx.core as mx
 
@@ -537,13 +548,28 @@ def convert(
     shard_bytes = 0
     shard_buf: dict[str, torch.Tensor] = {}
     shard_map: dict[str, str] = {}
+    expert_stash: dict[tuple[int, str], dict[int, dict[str, torch.Tensor]]] = {}
     quant_overrides: dict[str, dict] = {}
     method_totals: dict[str, int] = {"affine": 0, "passthrough_bf16": 0, "passthrough_fp32": 0}
     bit_totals: dict[int, int] = {}
     state_path = dst / ".convert_state.json"
     start_i = 0
+    resume_contract = {
+        "profile": profile.name,
+        "src": str(src.resolve()),
+        "include_mtp": bool(include_mtp),
+        "stack_experts": bool(stack_experts),
+        "logical_tensors": len(weight_keys),
+    }
     if state_path.exists():
         state = json.loads(state_path.read_text())
+        state_contract = state.get("resume_contract")
+        if state_contract != resume_contract:
+            raise RuntimeError(
+                "refusing to resume MiMo conversion with mismatched state; "
+                f"state={state_contract!r} requested={resume_contract!r}. "
+                "Delete the incomplete target directory and rerun."
+            )
         start_i = int(state["next_i"])
         shard_idx = int(state["shard_idx"])
         shard_map = dict(state["shard_map"])
@@ -596,6 +622,7 @@ def convert(
             "quant_overrides": quant_overrides,
             "method_totals": method_totals,
             "bit_totals": bit_totals,
+            "resume_contract": resume_contract,
         }))
         tmp.replace(state_path)
 
@@ -656,6 +683,35 @@ def convert(
             torch.from_numpy(bias),
         )
 
+    def stash_or_add_affine(name: str, qw_t: torch.Tensor, qs_t: torch.Tensor, qb_t: torch.Tensor) -> None:
+        if not stack_experts or not is_routed_expert_weight(name):
+            base = name[: -len(".weight")] if name.endswith(".weight") else name
+            add_tensor(f"{base}.weight", qw_t)
+            add_tensor(f"{base}.scales", qs_t.to(torch.float16))
+            add_tensor(f"{base}.biases", qb_t.to(torch.float16))
+            return
+        m = _EXPERT_RUNTIME_PAT.match(name)
+        if m is None:
+            raise RuntimeError(f"routed expert pattern mismatch: {name}")
+        layer = int(m.group("layer"))
+        expert = int(m.group("expert"))
+        proj = m.group("proj")
+        group = expert_stash.setdefault((layer, proj), {})
+        group[expert] = {
+            "weight": qw_t.cpu(),
+            "scales": qs_t.to(torch.float16).cpu(),
+            "biases": qb_t.to(torch.float16).cpu(),
+        }
+        if len(group) != _MIMO_NUM_EXPERTS:
+            return
+        base = f"model.layers.{layer}.mlp.switch_mlp.{proj}"
+        for suffix in ("weight", "scales", "biases"):
+            add_tensor(
+                f"{base}.{suffix}",
+                torch.stack([group[i][suffix] for i in range(_MIMO_NUM_EXPERTS)], dim=0),
+            )
+        del expert_stash[(layer, proj)]
+
     for i, name in enumerate(weight_keys):
         if i < start_i:
             continue
@@ -685,13 +741,10 @@ def convert(
                 qs_t = _mx_to_torch(qs, torch.float16)
                 qb_t = _mx_to_torch(qb, torch.float16)
                 del w, qw, qs, qb
-            base = name[: -len(".weight")] if name.endswith(".weight") else name
             # mx.quantize returns uint32 packed weights and float sidecars.
             # Store sidecars as f16, matching the other JANG converters. bf16
             # loses too much mantissa for 2-bit affine expert groups.
-            add_tensor(f"{base}.weight", qw_t)
-            add_tensor(f"{base}.scales", qs_t.to(torch.float16))
-            add_tensor(f"{base}.biases", qb_t.to(torch.float16))
+            stash_or_add_affine(name, qw_t, qs_t, qb_t)
             if bits != DEFAULT_BITS or group_size != DEFAULT_GROUP:
                 runtime_base = runtime_quant_base_for_weight(name)
                 quant_overrides[runtime_base] = {"bits": bits, "group_size": group_size, "mode": "affine"}
@@ -719,6 +772,13 @@ def convert(
             )
             checkpoint(i + 1)
 
+    if expert_stash:
+        missing = [
+            f"layer={layer} proj={proj} got={len(group)}"
+            for (layer, proj), group in sorted(expert_stash.items())[:8]
+        ]
+        raise RuntimeError(f"incomplete stacked expert groups: {', '.join(missing)}")
+
     flush_shard()
 
     # Rename shards to final NNNNN-of-NNNNN form.
@@ -735,7 +795,14 @@ def convert(
     )
 
     _copy_aux_files(src, dst)
-    write_jang_metadata(src, dst, profile, quant_overrides, include_mtp=include_mtp)
+    write_jang_metadata(
+        src,
+        dst,
+        profile,
+        quant_overrides,
+        include_mtp=include_mtp,
+        stack_experts=stack_experts,
+    )
     state_path.unlink(missing_ok=True)
 
     elapsed = time.time() - t_start
@@ -748,6 +815,7 @@ def convert(
           + ", ".join(f"{b}b={c}" for b, c in sorted(bit_totals.items())))
     print(f"[convert] {total_shards} shards, total {total_bytes / 1e9:.2f} GB")
     print(f"[convert] quant_overrides: {len(quant_overrides)} non-default classifications")
+    print(f"[convert] expert_layout: {'stacked_affine_switch_mlp' if stack_experts else 'per_expert_affine'}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -762,6 +830,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Do not include model.mtp.* speculative decoding tensors. This is the default.")
     p.add_argument("--include-mtp", action="store_true",
                    help="Preserve model.mtp.* tensors as disabled/opaque weights.")
+    p.add_argument("--no-stack-experts", action="store_true",
+                   help="Write legacy per-expert affine tensors instead of stacked switch_mlp tensors.")
     args = p.parse_args(argv)
 
     convert(
@@ -770,6 +840,7 @@ def main(argv: list[str] | None = None) -> int:
         args.profile,
         args.max_shard_bytes,
         include_mtp=bool(args.include_mtp and not args.drop_mtp),
+        stack_experts=not args.no_stack_experts,
     )
     return 0
 

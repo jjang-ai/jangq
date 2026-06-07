@@ -159,6 +159,7 @@ def test_mimo_classic_jang_metadata_writes_jang_config_and_defaults_mtp_absent(t
     assert cfg["jang_profile"] == "JANG_2L"
     assert cfg["runtime"]["mtp_mode"] == "absent"
     assert cfg["runtime"]["bundle_has_mtp"] is False
+    assert cfg["runtime"]["expert_layout"] == "stacked_affine_switch_mlp"
     assert cfg["quantization"]["model.layers.1.mlp.switch_mlp.gate_proj"] == {
         "bits": 4,
         "group_size": 128,
@@ -179,7 +180,7 @@ def test_mimo_classic_jang_metadata_writes_jang_config_and_defaults_mtp_absent(t
         "routed_expert_bits": {"gate_proj": 4, "up_proj": 2, "down_proj": 3},
         "routed_expert_group_size": 128,
         "num_experts": 256,
-        "expert_layout": "per_expert_affine",
+        "expert_layout": "stacked_affine_switch_mlp",
         "runtime_expert_module": "switch_mlp",
         "bookend_bits": 8,
         "bookend_group_size": 64,
@@ -206,6 +207,44 @@ def test_mimo_classic_converter_refuses_incomplete_source_before_output(tmp_path
         convert(src, dst, "2")
 
     assert not dst.exists()
+
+
+def test_mimo_sanitize_preserves_pre_stacked_affine_switch_mlp_weights():
+    from jang_tools.mimo_v2.mlx_model import Model, ModelArgs
+    import mlx.core as mx
+
+    args = ModelArgs(
+        hidden_size=4,
+        intermediate_size=8,
+        num_hidden_layers=2,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=4,
+        v_head_dim=4,
+        swa_num_attention_heads=1,
+        swa_num_key_value_heads=1,
+        swa_head_dim=4,
+        swa_v_head_dim=4,
+        moe_intermediate_size=8,
+        n_routed_experts=2,
+        num_experts_per_tok=1,
+        moe_layer_freq=[False, True],
+        hybrid_layer_pattern=[0, 1],
+        sliding_window=8,
+        vocab_size=16,
+        partial_rotary_factor=1.0,
+    )
+    model = Model(args)
+    weights = {
+        "model.layers.1.mlp.switch_mlp.gate_proj.weight": mx.zeros((2, 8, 1), dtype=mx.uint32),
+        "model.layers.1.mlp.switch_mlp.gate_proj.scales": mx.zeros((2, 8, 1), dtype=mx.float16),
+        "model.layers.1.mlp.switch_mlp.gate_proj.biases": mx.zeros((2, 8, 1), dtype=mx.float16),
+    }
+
+    out = model.sanitize(weights)
+
+    assert set(out) == set(weights)
+    assert out["model.layers.1.mlp.switch_mlp.gate_proj.weight"].shape == (2, 8, 1)
 
 
 def test_mimo_jangtq_contract_emits_prestacked_switch_mlp_metadata(tmp_path):
