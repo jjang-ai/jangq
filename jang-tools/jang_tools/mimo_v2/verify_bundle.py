@@ -174,9 +174,10 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         "embed": "model.embed_tokens",
         "lm_head": "lm_head",
         "attn_qkv":      "model.layers.0.self_attn.qkv_proj",
-        "attn_o_proj":   "model.layers.0.self_attn.o_proj",
         "layer0_dense":  "model.layers.0.mlp.gate_proj",
     }
+    if is_jangtq:
+        spot_groups["attn_o_proj"] = "model.layers.0.self_attn.o_proj"
     if not is_jangtq:
         spot_groups["routed_expert"] = "model.layers.1.mlp.experts.0.gate_proj"
     if bundle_has_mtp:
@@ -202,9 +203,13 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
                 failures.append(
                     f"{label}: weight shape={w_shape}, expected q8 packed shape (152576, 1024)"
                 )
-            if label == "attn_qkv" and w_shape != (13568, 512):
+            if label == "attn_qkv" and is_jangtq and w_shape != (13568, 512):
                 failures.append(
                     f"{label}: weight shape={w_shape}, expected q4 packed full-layer shape (13568, 512)"
+                )
+            if label == "attn_qkv" and not is_jangtq and w_shape != (13568, 1024):
+                failures.append(
+                    f"{label}: weight shape={w_shape}, expected q8 packed full-layer shape (13568, 1024)"
                 )
             if label == "attn_o_proj" and w_shape != (4096, 1024):
                 failures.append(
@@ -226,6 +231,8 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         "audio_encoder.input_local_transformer.layers.0.input_layernorm.weight": ("bf16", "audio norm"),
         "speech_embeddings.0.weight":                          ("bf16", "speech emb"),
     }
+    if not is_jangtq:
+        passthrough_spot["model.layers.0.self_attn.o_proj.weight"] = ("bf16", "text o_proj")
     if bundle_has_mtp:
         passthrough_spot.update({
             "model.mtp.layers.0.self_attn.o_proj.weight": ("bf16", "MTP o_proj"),

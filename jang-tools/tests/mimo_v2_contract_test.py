@@ -131,6 +131,83 @@ def test_mimo_k_profile_metadata_targets_runtime_switch_mlp_modules(tmp_path):
     assert cfg["runtime"]["cache_topology"]["swa_layers"] == "rotating_kv_native"
 
 
+def test_mimo_classic_jang_metadata_writes_jang_config_and_defaults_mtp_absent(tmp_path):
+    from jang_tools.mimo_v2.convert_jang import QuantProfile, write_jang_metadata
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (src / "config.json").write_text(json.dumps({
+        "model_type": "mimo_v2",
+        "rope_theta": 10_000_000.0,
+        "partial_rotary_factor": 0.334,
+        "sliding_window": 128,
+        "quantization_config": {"ignored": True},
+    }))
+    (src / "tokenizer_config.json").write_text(json.dumps({"chat_template": "x"}))
+
+    profile = QuantProfile.parse("2")
+    write_jang_metadata(src, dst, profile, {
+        "model.layers.1.mlp.switch_mlp.gate_proj": {"bits": 4, "group_size": 128, "mode": "affine"},
+        "model.layers.1.mlp.switch_mlp.up_proj": {"bits": 2, "group_size": 128, "mode": "affine"},
+        "model.layers.1.mlp.switch_mlp.down_proj": {"bits": 3, "group_size": 128, "mode": "affine"},
+    })
+
+    cfg = json.loads((dst / "config.json").read_text())
+    jang_cfg = json.loads((dst / "jang_config.json").read_text())
+    assert cfg["jang_profile"] == "JANG_2L"
+    assert cfg["runtime"]["mtp_mode"] == "absent"
+    assert cfg["runtime"]["bundle_has_mtp"] is False
+    assert cfg["quantization"]["model.layers.1.mlp.switch_mlp.gate_proj"] == {
+        "bits": 4,
+        "group_size": 128,
+    }
+    assert cfg["quantization"]["model.layers.1.mlp.switch_mlp.up_proj"] == {
+        "bits": 2,
+        "group_size": 128,
+    }
+    assert cfg["quantization"]["model.layers.1.mlp.switch_mlp.down_proj"] == {
+        "bits": 3,
+        "group_size": 128,
+    }
+    assert jang_cfg == {
+        "format": "jang",
+        "family": "mimo_v2",
+        "profile": "JANG_2L",
+        "mxtq_bits": {"gate_proj": 4, "up_proj": 2, "down_proj": 3},
+        "routed_expert_bits": {"gate_proj": 4, "up_proj": 2, "down_proj": 3},
+        "routed_expert_group_size": 128,
+        "num_experts": 256,
+        "expert_layout": "per_expert_affine",
+        "runtime_expert_module": "switch_mlp",
+        "bookend_bits": 8,
+        "bookend_group_size": 64,
+        "mtp_mode": "absent",
+        "bundle_has_mtp": False,
+    }
+
+
+def test_mimo_classic_converter_refuses_incomplete_source_before_output(tmp_path):
+    from jang_tools.mimo_v2.convert_jang import convert
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    (src / "config.json").write_text(json.dumps({"model_type": "mimo_v2"}))
+    (src / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": 1},
+        "weight_map": {
+            "model.embed_tokens.weight": "missing-shard.safetensors",
+        },
+    }))
+
+    with pytest.raises(FileNotFoundError, match="source checkpoint is incomplete"):
+        convert(src, dst, "2")
+
+    assert not dst.exists()
+
+
 def test_mimo_jangtq_contract_emits_prestacked_switch_mlp_metadata(tmp_path):
     from jang_tools.mimo_v2.convert_jangtq import (
         JANGTQProfile,

@@ -1,9 +1,12 @@
 """MiMo-V2.5 → JANG bundle converter.
 
 Profiles:
-    JANG_2L  routed experts: 2-bit affine, everything else 8-bit affine, ViT/audio/o_proj bf16
+    JANG_2L  JANG 8/6/2 profile; routed experts use 256-expert floors
+             gate=4, up=2, down=3, expert group_size=128
     JANG_4M  routed experts: 4-bit affine, everything else 8-bit affine, ViT/audio/o_proj bf16
     JANG_2K  routed experts: gate/up 2-bit, down 4-bit, everything else as above
+    JANG_2S  JANG 6/4/2 profile with the same 256-expert floors, text o_proj 8-bit
+    JANG_2L_322_G64  fit profile: gate/up/down = 3/2/2, expert group_size=64
 
 Tensor classification (in priority order):
 
@@ -17,7 +20,7 @@ Tensor classification (in priority order):
     8. speech_embeddings.* ............ bf16 passthrough (20 channel embeddings)
     9. *.o_proj.weight ................ bf16 passthrough (49 layers, all bf16 in source)
    10. mtp.*.eh_proj.weight ........... bf16 passthrough (bf16 in source)
-   11. mlp.experts.*.{gate,up,down}_proj.weight ..... `profile_bits` affine, group_size 64
+   11. mlp.experts.*.{gate,up,down}_proj.weight ..... profile affine, group_size 128
    12. EVERYTHING ELSE .weight ........ 8-bit affine, group_size 64
        (qkv_proj, layer-0 dense MLP, embed_tokens, lm_head, MTP qkv/mlp)
 
@@ -40,6 +43,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import re
 import shutil
@@ -66,6 +70,9 @@ _EXPERT_RUNTIME_PAT = re.compile(
     r"^(model\.layers\.(?P<layer>\d+)\.mlp)\.experts\.(?P<expert>\d+)\."
     r"(?P<proj>gate_proj|up_proj|down_proj)\.weight$"
 )
+_MIMO_NUM_EXPERTS = 256
+_MIMO_EXPERT_GROUP_SIZE = 128
+_MIMO_2BIT_EXPERT_FLOORS = {"gate_proj": 4, "down_proj": 3}
 _PASSTHROUGH_NAME_TAILS = (
     "norm.weight",
     "post_attention_layernorm.weight",
@@ -88,28 +95,162 @@ class QuantProfile:
     name: str
     routed_expert_bits: int | dict[str, int]
     expert_proj_bits: dict[str, int]
+    expert_layer_bits: dict[int, dict[str, int]] | None = None
+    bookend_bits: int = 8
+    o_proj_bits: int | None = None
+    critical_bits: int = 8
+    important_bits: int = 6
+    compress_bits: int = 2
+    expert_group_size: int = _MIMO_EXPERT_GROUP_SIZE
+    default_group_size: int = 64
 
     @classmethod
     def parse(cls, raw: str | int) -> "QuantProfile":
         key = str(raw).strip().lower().replace("_", "").replace("-", "").replace("/", "")
         if key in {"2", "2l", "jang2l"}:
-            return cls("JANG_2L", 2, {"gate_proj": 2, "up_proj": 2, "down_proj": 2})
+            bits = _mimo_expert_bits_for_compress(2)
+            return cls("JANG_2L", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        early_match = re.fullmatch(r"(?:jang)?2l?e(?:arly)?(\d+)", key)
+        if early_match:
+            end_layer = int(early_match.group(1))
+            if end_layer < 1 or end_layer > 47:
+                raise ValueError(f"invalid early-layer end {end_layer}; expected 1..47")
+            base = {"gate_proj": 2, "up_proj": 2, "down_proj": 2}
+            early = {"gate_proj": 4, "up_proj": 4, "down_proj": 4}
+            return cls(
+                f"JANG_2L_E{end_layer}",
+                base,
+                base,
+                {layer: early for layer in range(1, end_layer + 1)},
+                critical_bits=8,
+                important_bits=6,
+                compress_bits=2,
+            )
+        if key in {"2c4l4", "2crit4last4", "crit4last4", "jang2lc4l4"}:
+            base = {"gate_proj": 2, "up_proj": 2, "down_proj": 2}
+            critical = {"gate_proj": 8, "up_proj": 8, "down_proj": 8}
+            late = {"gate_proj": 4, "up_proj": 4, "down_proj": 4}
+            layer_bits = {
+                **{layer: critical for layer in range(1, 5)},
+                **{layer: late for layer in range(44, 48)},
+            }
+            return cls(
+                "JANG_2L_C4L4",
+                base,
+                base,
+                layer_bits,
+                critical_bits=8,
+                important_bits=6,
+                compress_bits=2,
+            )
+        if key in {"2g32", "2l32", "jang2lg32"}:
+            bits = _mimo_expert_bits_for_compress(2)
+            return cls(
+                "JANG_2L_G32",
+                bits,
+                bits,
+                critical_bits=8,
+                important_bits=6,
+                compress_bits=2,
+                expert_group_size=32,
+            )
+        if key in {"2s", "slim", "jang2s"}:
+            bits = _mimo_expert_bits_for_compress(2)
+            return cls(
+                "JANG_2S",
+                bits,
+                bits,
+                bookend_bits=6,
+                o_proj_bits=8,
+                critical_bits=6,
+                important_bits=4,
+                compress_bits=2,
+            )
         if key in {"4", "4m", "jang4m"}:
-            return cls("JANG_4M", 4, {"gate_proj": 4, "up_proj": 4, "down_proj": 4})
-        if key in {"k", "2k", "422", "242", "jang2k"}:
+            bits = {"gate_proj": 4, "up_proj": 4, "down_proj": 4}
+            return cls("JANG_4M", 4, bits, critical_bits=8, important_bits=4, compress_bits=4)
+        if key in {"3", "333", "3e", "jang3e"}:
+            bits = {"gate_proj": 3, "up_proj": 3, "down_proj": 3}
+            return cls("JANG_3E", bits, bits, critical_bits=8, important_bits=4, compress_bits=3)
+        if key in {"322", "2fit", "fit", "jang322", "jang2fit"}:
+            bits = {"gate_proj": 3, "up_proj": 2, "down_proj": 2}
+            return cls("JANG_2L_322", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        if key in {"322g64", "2fitg64", "fitg64", "jang322g64", "jang2fitg64"}:
+            bits = {"gate_proj": 3, "up_proj": 2, "down_proj": 2}
+            return cls(
+                "JANG_2L_322_G64",
+                bits,
+                bits,
+                critical_bits=8,
+                important_bits=6,
+                compress_bits=2,
+                expert_group_size=64,
+            )
+        d3e_match = re.fullmatch(r"(?:jang)?322d(?:own)?3e(?:arly)?(\d+)", key)
+        if d3e_match:
+            end_layer = int(d3e_match.group(1))
+            if end_layer < 1 or end_layer > 47:
+                raise ValueError(f"invalid early down3 end {end_layer}; expected 1..47")
+            base = {"gate_proj": 3, "up_proj": 2, "down_proj": 2}
+            early = {"gate_proj": 3, "up_proj": 2, "down_proj": 3}
+            return cls(
+                f"JANG_2L_322_D3E{end_layer}",
+                base,
+                base,
+                {layer: early for layer in range(1, end_layer + 1)},
+                critical_bits=8,
+                important_bits=6,
+                compress_bits=2,
+            )
+        if key in {"323", "jang323"}:
+            bits = {"gate_proj": 3, "up_proj": 2, "down_proj": 3}
+            return cls("JANG_2L_323", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        if key in {"233", "jang233"}:
+            bits = {"gate_proj": 2, "up_proj": 3, "down_proj": 3}
+            return cls("JANG_233", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        if key in {"k", "2k", "224", "jang2k"}:
             bits = {"gate_proj": 2, "up_proj": 2, "down_proj": 4}
-            return cls("JANG_2K", bits, bits)
-        raise ValueError(f"unknown MiMo quant profile {raw!r}; use 2, 4, or 2k")
+            return cls("JANG_2K", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        if key in {"422", "jang422"}:
+            bits = {"gate_proj": 4, "up_proj": 2, "down_proj": 2}
+            return cls("JANG_422", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        if key in {"242", "jang242"}:
+            bits = {"gate_proj": 2, "up_proj": 4, "down_proj": 2}
+            return cls("JANG_242", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        if key in {"423", "jang423", "2lfloor", "floor"}:
+            bits = {"gate_proj": 4, "up_proj": 2, "down_proj": 3}
+            return cls("JANG_423", bits, bits, critical_bits=8, important_bits=6, compress_bits=2)
+        raise ValueError(
+            f"unknown MiMo quant profile {raw!r}; use 2, 322/2fit, 322g64, 322d3eN, 323, 2e4, 2c4l4, 2g32, 2s, 2k/224, 422, 242, 423, 333, or 4"
+        )
 
     @property
     def default_bits(self) -> int:
-        return 8
+        return self.bookend_bits
 
     def bits_for_expert_name(self, name: str) -> int:
         m = _EXPERT_PAT.search(name)
         if not m:
             raise ValueError(f"not a routed expert weight: {name}")
+        lm = _EXPERT_RUNTIME_PAT.match(name)
+        if lm and self.expert_layer_bits:
+            layer_bits = self.expert_layer_bits.get(int(lm.group("layer")))
+            if layer_bits is not None:
+                return layer_bits[m.group(1)]
         return self.expert_proj_bits[m.group(1)]
+
+
+def _mimo_expert_bits_for_compress(compress_bits: int) -> dict[str, int]:
+    """Apply current JANG 256-expert MLP floors to MiMo routed experts."""
+    bits = {
+        "gate_proj": compress_bits,
+        "up_proj": compress_bits,
+        "down_proj": compress_bits,
+    }
+    if _MIMO_NUM_EXPERTS >= 256:
+        for proj, floor in _MIMO_2BIT_EXPERT_FLOORS.items():
+            bits[proj] = max(bits[proj], floor)
+    return bits
 
 
 def runtime_quant_base_for_weight(name: str) -> str:
@@ -143,17 +284,30 @@ def classify(name: str, profile_bits: QuantProfile | int | str) -> tuple[int, st
     if name.startswith("visual.") or name.startswith("audio_encoder.") or name.startswith("speech_embeddings."):
         return 16, "passthrough_bf16", 0
 
-    # bf16 passthrough: all o_proj.weight (in source `ignored_layers`) + MTP eh_proj (bf16 in source).
-    if name.endswith(".o_proj.weight") or name.endswith(".eh_proj.weight"):
+    # MiMo decode pays lm_head every token and embed_tokens is part of the text
+    # runtime contract. Keep both as affine bookends so rebuilt bundles do not
+    # rely on post-load runtime quantization to repair missing sidecars.
+    if name in {"model.embed_tokens.weight", "lm_head.weight"}:
+        return profile_bits.default_bits, "affine", profile_bits.default_group_size
+
+    # bf16 passthrough: MTP eh_proj (bf16 in source).
+    if name.endswith(".eh_proj.weight"):
+        return 16, "passthrough_bf16", 0
+    # Text o_proj is bf16 in source ignored_layers. Slim profiles can quantize it
+    # explicitly; default profiles keep it passthrough.
+    if name.endswith(".o_proj.weight"):
+        if profile_bits.o_proj_bits is not None and name.startswith("model.layers."):
+            return profile_bits.o_proj_bits, "affine", profile_bits.default_group_size
         return 16, "passthrough_bf16", 0
 
     # Routed experts → profile_bits affine.
     if is_routed_expert_weight(name):
-        return profile_bits.bits_for_expert_name(name), "affine", 64
+        return profile_bits.bits_for_expert_name(name), "affine", profile_bits.expert_group_size
 
-    # Everything else (qkv_proj, layer-0 dense MLP, embed, lm_head, MTP qkv/mlp) → 8-bit affine.
+    # Everything else (qkv_proj, layer-0 dense MLP, embed, lm_head, MTP qkv/mlp)
+    # uses the profile's bookend bit width.
     if name.endswith(".weight"):
-        return 8, "affine", 64
+        return profile_bits.default_bits, "affine", profile_bits.default_group_size
 
     # Unknown — passthrough bf16 to be safe.
     return 16, "passthrough_bf16", 0
@@ -186,19 +340,21 @@ def _write_config_json(
     src: Path,
     dst: Path,
     profile: QuantProfile,
-    routed_group_size: int,
     quant_overrides: dict[str, dict],
     include_mtp: bool = True,
 ) -> None:
     cfg = json.loads((src / "config.json").read_text())
     cfg.pop("quantization_config", None)
+    tokenizer_config = json.loads((src / "tokenizer_config.json").read_text())
+    if tokenizer_config.get("chat_template"):
+        cfg["chat_template"] = tokenizer_config["chat_template"]
     _normalize_rope(cfg)
     # mlx-lm load_model expects per-tensor overrides AT THE TOP LEVEL of `quantization`,
     # keyed by module path. The `class_predicate` does `config["quantization"][p]`.
     # Nesting under `overrides` makes mlx-lm fall back to default bits → shape mismatch.
     quant_dict: dict[str, Any] = {
         "bits": profile.default_bits,
-        "group_size": routed_group_size,
+        "group_size": profile.default_group_size,
         "quant_method": "affine",
         "mode": "affine",
     }
@@ -212,6 +368,20 @@ def _write_config_json(
     cfg["mxtq_bits"] = profile.routed_expert_bits
     cfg["routed_expert_bits"] = profile.routed_expert_bits
     cfg["jang_profile"] = profile.name
+    cfg["jang_tier_bits"] = {
+        "critical": profile.critical_bits,
+        "important": profile.important_bits,
+        "compress": profile.compress_bits,
+    }
+    cfg["jang_expert_group_size"] = profile.expert_group_size
+    cfg["routed_expert_group_size"] = profile.expert_group_size
+    if profile.expert_layer_bits:
+        cfg["routed_expert_bit_plan"] = {
+            "default": profile.expert_proj_bits,
+            "layer_overrides": {
+                str(layer): bits for layer, bits in sorted(profile.expert_layer_bits.items())
+            },
+        }
     cfg["jang_version"] = "v2"
     cfg["capabilities"] = {
         "family": "mimo_v2",
@@ -239,8 +409,50 @@ def _write_config_json(
         "bundle_has_mtp": include_mtp,
         "multimodal_mode": "weights_preserved_text_runtime",
         "quantization_profile": profile.name,
+        "routed_expert_bits": profile.routed_expert_bits,
+        "routed_expert_group_size": profile.expert_group_size,
+        "routed_expert_bit_plan": cfg.get("routed_expert_bit_plan"),
     }
     (dst / "config.json").write_text(json.dumps(cfg, indent=2))
+
+
+def write_jang_metadata(
+    src: Path,
+    dst: Path,
+    profile: QuantProfile,
+    quant_overrides: dict[str, dict],
+    include_mtp: bool = False,
+) -> None:
+    """Write the classic affine MiMo JANG metadata pair.
+
+    ``config.json`` is consumed by MLX/vMLX loaders. ``jang_config.json`` is a
+    small explicit contract for release/verifier tooling so classic affine JANG
+    bundles are not confused with JANGTQ prestacked expert bundles.
+    """
+    _write_config_json(src, dst, profile, quant_overrides, include_mtp=include_mtp)
+    jang_cfg = {
+        "format": "jang",
+        "family": "mimo_v2",
+        "profile": profile.name,
+        "mxtq_bits": profile.routed_expert_bits,
+        "routed_expert_bits": profile.routed_expert_bits,
+        "routed_expert_group_size": profile.expert_group_size,
+        "num_experts": _MIMO_NUM_EXPERTS,
+        "expert_layout": "per_expert_affine",
+        "runtime_expert_module": "switch_mlp",
+        "bookend_bits": profile.default_bits,
+        "bookend_group_size": profile.default_group_size,
+        "mtp_mode": "preserved_disabled" if include_mtp else "absent",
+        "bundle_has_mtp": include_mtp,
+    }
+    if profile.expert_layer_bits:
+        jang_cfg["routed_expert_bit_plan"] = {
+            "default": profile.expert_proj_bits,
+            "layer_overrides": {
+                str(layer): bits for layer, bits in sorted(profile.expert_layer_bits.items())
+            },
+        }
+    (dst / "jang_config.json").write_text(json.dumps(jang_cfg, indent=2))
 
 
 def _copy_aux_files(src: Path, dst: Path) -> None:
@@ -282,19 +494,42 @@ def convert(
     dst: Path,
     profile_bits: str | int,
     max_shard_bytes: int = 1_000_000_000,
-    include_mtp: bool = True,
+    include_mtp: bool = False,
 ) -> None:
     import mlx.core as mx
 
     profile = QuantProfile.parse(profile_bits)
-    dst.mkdir(parents=True, exist_ok=True)
     idx = MiMoShardIndex(src)
     weight_keys = idx.weight_keys
+    required_tensor_names = set()
+    for name in weight_keys:
+        if not include_mtp and name.startswith("model.mtp."):
+            continue
+        required_tensor_names.add(name)
+        if idx.is_fp8_weight(name):
+            required_tensor_names.add(name[: -len(".weight")] + ".weight_scale_inv")
+    missing_shards = sorted(
+        {
+            idx.weight_map[name]
+            for name in required_tensor_names
+            if not (idx.src / idx.weight_map[name]).exists()
+        }
+    )
+    if missing_shards:
+        sample = ", ".join(missing_shards[:5])
+        more = "" if len(missing_shards) <= 5 else f", ... +{len(missing_shards) - 5} more"
+        raise FileNotFoundError(
+            f"MiMo source checkpoint is incomplete: missing {len(missing_shards)} shard file(s): "
+            f"{sample}{more}"
+        )
+    dst.mkdir(parents=True, exist_ok=True)
 
     print(f"[convert] source: {src}")
     print(f"[convert] target: {dst}")
     print(f"[convert] profile: {profile.name} (routed_experts={profile.routed_expert_bits}, "
-          f"bookend=8-bit, group_size=64)")
+          f"tiers={profile.critical_bits}/{profile.important_bits}/{profile.compress_bits}, "
+          f"bookend={profile.default_bits}-bit/group{profile.default_group_size}, "
+          f"experts_group={profile.expert_group_size})")
     print(f"[convert] MTP tensors: {'preserve' if include_mtp else 'drop'}")
     print(f"[convert] {len(weight_keys)} logical tensors", flush=True)
 
@@ -305,6 +540,24 @@ def convert(
     quant_overrides: dict[str, dict] = {}
     method_totals: dict[str, int] = {"affine": 0, "passthrough_bf16": 0, "passthrough_fp32": 0}
     bit_totals: dict[int, int] = {}
+    state_path = dst / ".convert_state.json"
+    start_i = 0
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        start_i = int(state["next_i"])
+        shard_idx = int(state["shard_idx"])
+        shard_map = dict(state["shard_map"])
+        quant_overrides = dict(state["quant_overrides"])
+        method_totals = {k: int(v) for k, v in state["method_totals"].items()}
+        bit_totals = {int(k): int(v) for k, v in state["bit_totals"].items()}
+        for stale in dst.glob("model-*-of-XXXXX.safetensors"):
+            try:
+                stale_idx = int(stale.name.split("-")[1])
+            except (IndexError, ValueError):
+                continue
+            if stale_idx >= shard_idx:
+                stale.unlink()
+        print(f"[convert] resume checkpoint: next tensor {start_i + 1}, next shard {shard_idx}", flush=True)
     t_start = time.time()
 
     def flush_shard() -> None:
@@ -321,6 +574,7 @@ def convert(
         shard_buf = {}
         shard_bytes = 0
         shard_idx += 1
+        gc.collect()
 
     def add_tensor(name: str, t: torch.Tensor) -> None:
         nonlocal shard_bytes
@@ -332,8 +586,21 @@ def convert(
         if shard_bytes >= max_shard_bytes:
             flush_shard()
 
+    def checkpoint(next_i: int) -> None:
+        flush_shard()
+        tmp = state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "next_i": next_i,
+            "shard_idx": shard_idx,
+            "shard_map": shard_map,
+            "quant_overrides": quant_overrides,
+            "method_totals": method_totals,
+            "bit_totals": bit_totals,
+        }))
+        tmp.replace(state_path)
+
     DEFAULT_BITS = profile.default_bits
-    DEFAULT_GROUP = 64
+    DEFAULT_GROUP = profile.default_group_size
 
     def _mx_to_torch(arr_mx, dtype: torch.dtype | None = None) -> torch.Tensor:
         """Convert mx.array → torch.Tensor without going through numpy when possible."""
@@ -342,7 +609,56 @@ def convert(
             t = t.to(dtype)
         return t
 
+    def _quantize_affine_cpu_u32(t: torch.Tensor, *, group_size: int, bits: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """CPU affine packer for MLX-compatible uint32 quantized weights.
+
+        MLX's runtime kernels only require packed values plus affine
+        scales/biases; they do not require that the pack was produced by
+        ``mx.quantize``. Use explicit min/max affine for routed experts so the
+        built bundle matches the source-side quantization probe. This also
+        avoids repeated low-bit Metal quantize work during conversion.
+        """
+        if bits not in {2, 3, 4, 5, 6, 8}:
+            raise ValueError(f"unsupported affine bits={bits}")
+        x = t.detach().cpu().float().numpy()
+        if x.ndim != 2:
+            raise ValueError(f"expected 2D weight for CPU affine pack, got shape {x.shape}")
+        rows, cols = x.shape
+        if cols % group_size != 0:
+            raise ValueError(f"weight cols {cols} not divisible by group_size {group_size}")
+        groups = cols // group_size
+        if (group_size * bits) % 32 != 0:
+            raise ValueError(f"group_size={group_size} and bits={bits} do not pack into whole uint32 words")
+        words_per_group = (group_size * bits) // 32
+        xr = x.reshape(rows, groups, group_size)
+        maxv = xr.max(axis=2).astype(np.float32)
+        minv = xr.min(axis=2).astype(np.float32)
+        scale = ((minv - maxv) / float((1 << bits) - 1)).astype(np.float32)
+        scale = np.minimum(scale, np.float32(-1e-7))
+        bias = maxv.astype(np.float32)
+        q = np.rint((xr - bias[:, :, None]) / scale[:, :, None])
+        q = np.clip(q, 0, (1 << bits) - 1).astype(np.uint32)
+        packed_words = np.zeros((rows, groups, words_per_group), dtype=np.uint32)
+        mask = np.uint32((1 << bits) - 1)
+        for i_col in range(group_size):
+            bit_offset = i_col * bits
+            word_idx = bit_offset // 32
+            shift = bit_offset % 32
+            vals = q[:, :, i_col] & mask
+            packed_words[:, :, word_idx] |= vals << np.uint32(shift)
+            spill = shift + bits - 32
+            if spill > 0:
+                packed_words[:, :, word_idx + 1] |= vals >> np.uint32(bits - spill)
+        packed = packed_words.reshape(rows, groups * words_per_group)
+        return (
+            torch.from_numpy(packed),
+            torch.from_numpy(scale),
+            torch.from_numpy(bias),
+        )
+
     for i, name in enumerate(weight_keys):
+        if i < start_i:
+            continue
         if not include_mtp and name.startswith("model.mtp."):
             continue
         bits, method, group_size = classify(name, profile)
@@ -359,22 +675,37 @@ def convert(
             method_totals["passthrough_fp32"] += 1
         elif method == "affine":
             t = idx.read_tensor(name, out_dtype=torch.float32)
-            w = mx.array(t.numpy())
-            qw, qs, qb = mx.quantize(w, group_size=group_size, bits=bits)
+            use_cpu_affine = group_size == profile.expert_group_size and ".mlp.experts." in name
+            if use_cpu_affine:
+                qw_t, qs_t, qb_t = _quantize_affine_cpu_u32(t, group_size=group_size, bits=bits)
+            else:
+                w = mx.array(t.numpy())
+                qw, qs, qb = mx.quantize(w, group_size=group_size, bits=bits)
+                qw_t = _mx_to_torch(qw)
+                qs_t = _mx_to_torch(qs, torch.float16)
+                qb_t = _mx_to_torch(qb, torch.float16)
+                del w, qw, qs, qb
             base = name[: -len(".weight")] if name.endswith(".weight") else name
-            # mx.quantize returns: qw=uint32 packed, qs=fp16/fp32 scales, qb=fp16/fp32 biases
-            add_tensor(f"{base}.weight", _mx_to_torch(qw))
-            add_tensor(f"{base}.scales", _mx_to_torch(qs, torch.bfloat16))
-            add_tensor(f"{base}.biases", _mx_to_torch(qb, torch.bfloat16))
+            # mx.quantize returns uint32 packed weights and float sidecars.
+            # Store sidecars as f16, matching the other JANG converters. bf16
+            # loses too much mantissa for 2-bit affine expert groups.
+            add_tensor(f"{base}.weight", qw_t)
+            add_tensor(f"{base}.scales", qs_t.to(torch.float16))
+            add_tensor(f"{base}.biases", qb_t.to(torch.float16))
             if bits != DEFAULT_BITS or group_size != DEFAULT_GROUP:
                 runtime_base = runtime_quant_base_for_weight(name)
                 quant_overrides[runtime_base] = {"bits": bits, "group_size": group_size, "mode": "affine"}
             bit_totals[bits] = bit_totals.get(bits, 0) + 1
             method_totals["affine"] += 1
+            del t, qw_t, qs_t, qb_t
+            try:
+                mx.clear_cache()
+            except Exception:
+                pass
         else:
             raise RuntimeError(f"unknown classification method {method!r} for {name}")
 
-        if (i + 1) % 500 == 0:
+        if (i + 1) % 250 == 0:
             elapsed = time.time() - t_start
             done_pct = 100 * (i + 1) / len(weight_keys)
             rate = (i + 1) / max(elapsed, 1e-3)
@@ -386,6 +717,7 @@ def convert(
                 f"({elapsed:.0f}s elapsed, ~{eta:.0f}s left)",
                 flush=True,
             )
+            checkpoint(i + 1)
 
     flush_shard()
 
@@ -402,8 +734,9 @@ def convert(
         json.dumps({"metadata": {"total_size": total_bytes}, "weight_map": final_map}, indent=2)
     )
 
-    _write_config_json(src, dst, profile, DEFAULT_GROUP, quant_overrides, include_mtp=include_mtp)
     _copy_aux_files(src, dst)
+    write_jang_metadata(src, dst, profile, quant_overrides, include_mtp=include_mtp)
+    state_path.unlink(missing_ok=True)
 
     elapsed = time.time() - t_start
     print()
@@ -422,11 +755,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--src", required=True, type=Path, help="Source HF checkpoint dir.")
     p.add_argument("--dst", required=True, type=Path, help="Output JANG bundle dir.")
     p.add_argument("--profile", required=True,
-                   help="Quant profile: 2/JANG_2L, 4/JANG_4M, or 2k/422/JANG_2K.")
+                   help="Quant profile: 2, 322/2fit, 322g64, 322d3eN, 323, 2e4, 2c4l4, 2g32, 2s, 2k/224, 422, 242, 423, 333, or 4.")
     p.add_argument("--max-shard-bytes", type=int, default=1_000_000_000,
                    help="Max bytes per output shard (default 1 GB).")
     p.add_argument("--drop-mtp", action="store_true",
-                   help="Do not include model.mtp.* speculative decoding tensors.")
+                   help="Do not include model.mtp.* speculative decoding tensors. This is the default.")
+    p.add_argument("--include-mtp", action="store_true",
+                   help="Preserve model.mtp.* tensors as disabled/opaque weights.")
     args = p.parse_args(argv)
 
     convert(
@@ -434,7 +769,7 @@ def main(argv: list[str] | None = None) -> int:
         args.dst.expanduser(),
         args.profile,
         args.max_shard_bytes,
-        include_mtp=not args.drop_mtp,
+        include_mtp=bool(args.include_mtp and not args.drop_mtp),
     )
     return 0
 
