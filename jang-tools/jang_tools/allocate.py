@@ -144,6 +144,8 @@ TIER_RULES = [
     ("k_proj", Tier.CRITICAL),
     ("v_proj", Tier.CRITICAL),
     ("o_proj", Tier.CRITICAL),
+    ("self_attn.out_proj", Tier.CRITICAL),
+    ("self_attn.g_proj", Tier.CRITICAL),
 
     # ── SSM State Matrices (Mamba) ───────────────────────────
     ("a_log", Tier.CRITICAL),
@@ -185,6 +187,9 @@ TIER_RULES = [
     # Must come BEFORE generic "proj" catch-all.
     ("mixer.in_proj", Tier.IMPORTANT),
     ("mixer.out_proj", Tier.IMPORTANT),
+    ("conv.in_proj", Tier.IMPORTANT),
+    ("conv.out_proj", Tier.IMPORTANT),
+    ("conv.conv", Tier.CRITICAL),
     ("x_proj", Tier.IMPORTANT),
     ("conv1d", Tier.COMPRESS),
 
@@ -275,6 +280,9 @@ def classify_tensor(tensor_name: str, num_experts: int = 0, has_shared_mlp: bool
         for mlp_pat in ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
                         "mlp.fc1", "mlp.fc2"):
             if mlp_pat in name_lower:
+                return Tier.CRITICAL
+        for lfm_dense_pat in (".feed_forward.w1.", ".feed_forward.w2.", ".feed_forward.w3."):
+            if lfm_dense_pat in name_lower:
                 return Tier.CRITICAL
 
     for pattern, tier in TIER_RULES:

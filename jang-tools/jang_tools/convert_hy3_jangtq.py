@@ -68,6 +68,24 @@ OUT = Path(sys.argv[2])
 PROFILE = sys.argv[3] if len(sys.argv) > 3 else "JANGTQ2"
 SEED = 42
 
+# 2026-05-20 live vMLX proof:
+# Hy3-preview-JANG_2L with source defaults temperature=0.9/top_p=1/top_k=-1
+# loops into repeated phrases around 1.5K-2.2K output tokens even with
+# reasoning off and prefix cache bypassed. The same bundle at temperature=0.0
+# stops cleanly. This is a model-bundle chat default, not a hidden engine guard;
+# stamp it into JANG metadata and generation_config so future uploads are
+# self-consistent and do not require re-quantizing weights.
+HY3_CHAT_SAMPLING_DEFAULTS = {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "top_k": 0,
+    "max_new_tokens": 2048,
+}
+HY3_GENERATION_CONFIG_OVERRIDES = {
+    **HY3_CHAT_SAMPLING_DEFAULTS,
+    "do_sample": False,
+}
+
 _PROFILE_BITS = {
     "JANGTQ1": 1,
     "JANGTQ2": 2,
@@ -448,7 +466,7 @@ config_out["quantization"] = {
 config_out["capabilities"] = {
     "reasoning_parser": "qwen3",
     "tool_parser": "hunyuan",
-    "think_in_template": True,
+    "think_in_template": False,
     "supports_tools": True,
     "supports_thinking": True,
     "family": "hy_v3",
@@ -490,6 +508,19 @@ jang_config = {
     "bundle_has_mtp": bool(n_mtp_layers),
     "mtp_layers": n_mtp_layers,
     "capabilities": config_out["capabilities"],
+    "chat": {
+        "reasoning": {
+            "supported": True,
+            "parser": "qwen3",
+            "default_mode": "no_think",
+            "modes": ["no_think", "low", "high"],
+        },
+        "tool_calling": {
+            "supported": True,
+            "parser": "hunyuan",
+        },
+        "sampling_defaults": HY3_CHAT_SAMPLING_DEFAULTS,
+    },
 }
 with open(OUT / "jang_config.json", "w") as f:
     json.dump(jang_config, f, indent=2)
@@ -510,6 +541,23 @@ for fname in SIDECARS:
     p = SRC / fname
     if p.exists():
         shutil.copy2(str(p), str(OUT / fname))
+
+gen_cfg_path = OUT / "generation_config.json"
+try:
+    if gen_cfg_path.exists():
+        with open(gen_cfg_path) as f:
+            gen_cfg = json.load(f)
+            if not isinstance(gen_cfg, dict):
+                gen_cfg = {}
+    else:
+        gen_cfg = {}
+    gen_cfg.update(HY3_GENERATION_CONFIG_OVERRIDES)
+    with open(gen_cfg_path, "w") as f:
+        json.dump(gen_cfg, f, indent=2)
+except Exception as exc:
+    raise SystemExit(
+        f"failed to patch Hy3 generation_config.json sampling defaults: {exc}"
+    ) from exc
 
 # Inline chat_template into tokenizer_config if jinja exists but tokenizer_config.chat_template is empty
 tok_cfg = OUT / "tokenizer_config.json"

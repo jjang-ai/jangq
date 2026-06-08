@@ -1,0 +1,73 @@
+{
+  "interpretation": [
+    "Run speed_candidate lanes for proposed runtime fixes; run negative_control lanes as guards after related changes.",
+    "WATCH means proof wiring is usable but host/readiness warnings should be handled before loading the 98G bundle.",
+    "BLOCKED means missing or stale proof files must be refreshed before a candidate suite."
+  ],
+  "lanes": [
+    {
+      "candidate_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "IMPROVED"
+      ],
+      "failure_count": 0,
+      "failures": [],
+      "id": "moe-routed-shared-scheduling",
+      "kind": "speed_candidate",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "status": "READY",
+      "title": "MoE routed/shared scheduling",
+      "warning_count": 0,
+      "warnings": []
+    },
+    {
+      "candidate_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-mamba-dispatch --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id mamba-projection-dispatch --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "IMPROVED"
+      ],
+      "failure_count": 0,
+      "failures": [],
+      "id": "mamba-projection-dispatch",
+      "kind": "speed_candidate",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id mamba-projection-dispatch --candidate-log-dir docs/runtime/logs/candidate-mamba-dispatch --out docs/runtime/logs/candidate-mamba-dispatch/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-mamba-dispatch/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "status": "READY",
+      "title": "Mamba projection/dispatch fusion",
+      "warning_count": 0,
+      "warnings": []
+    },
+    {
+      "candidate_command": "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH=1 PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-disable-weighted-moe --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id weighted-moe-ablation --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "FAIL",
+        "UNCHANGED"
+      ],
+      "failure_count": 0,
+      "failures": [],
+      "id": "weighted-moe-ablation",
+      "kind": "negative_control",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id weighted-moe-ablation --candidate-log-dir docs/runtime/logs/candidate-disable-weighted-moe --out docs/runtime/logs/candidate-disable-weighted-moe/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-disable-weighted-moe/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "status": "READY",
+      "title": "Weighted MoE fast-path A/B",
+      "warning_count": 0,
+      "warnings": []
+    },
+    {
+      "candidate_command": "JANGTQ_DISABLE_NEMOTRON_ACTIVATION_BF16=1 PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-disable-activation-bf16 --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id activation-bf16-ablation --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "FAIL"
+      ],
+      "failure_count": 0,
+      "failures": [],
+      "id": "activation-bf16-ablation",
+      "kind": "negative_control",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id activation-bf16-ablation --candidate-log-dir docs/runtime/logs/candidate-disable-activation-bf16 --out docs/runtime/logs/candidate-disable-activation-bf16/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-disable-activation-bf16/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "status": "READY",
+      "title": "BF16 activation retention guard",
+      "warning_count": 0,
+      "warnings": []
+    }
+  ],
+  "log_dir": "docs/runtime/logs",
+  "queue": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json",
+  "status": "READY"
+}

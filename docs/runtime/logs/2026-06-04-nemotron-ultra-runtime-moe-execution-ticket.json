@@ -1,0 +1,99 @@
+{
+  "acceptance_checks": [
+    "runtime-speed compare status is IMPROVED.",
+    "MoE bucket drops enough to move target token/s budget without Mamba or coherence regression.",
+    "long coherence leak/repeat/EOS counts do not regress."
+  ],
+  "candidate_status": "MISSING",
+  "cleanup_status": "READY",
+  "commands": {
+    "candidate": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+    "post_candidate_index": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/runtime_candidate_index.py --log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --out docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-index.md --json-out docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-index.json",
+    "post_candidate_refresh": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/refresh_runtime_proof_bundle.py --log-dir docs/runtime/logs --summary-out docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-proof-refresh.md",
+    "post_check": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+    "refresh_after_cleanup": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/refresh_runtime_proof_bundle.py --log-dir docs/runtime/logs --summary-out docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-proof-refresh.md"
+  },
+  "contract_status": "READY",
+  "do_not": [
+    "do not run the Mamba lane until this MoE lane has accepted evidence",
+    "do not treat an improved short live row as accepted without long coherence and experiment_result_check",
+    "do not change MTP, VL/audio, parser, or hybrid cache assumptions for this speed lane"
+  ],
+  "execution_order": [
+    "confirm this ticket status is READY",
+    "run candidate command exactly once for the selected MoE lane",
+    "run post_check command to write ACCEPTED/REJECTED/BLOCKED verdict",
+    "rerun candidate index to surface lane status",
+    "rerun proof refresh to update manifest, ledger, and next runbook"
+  ],
+  "failures": [],
+  "guard_status": "READY",
+  "invariants": {
+    "drops_mtp": true,
+    "hidden_shape": [
+      1,
+      1,
+      8192
+    ],
+    "indices_shape": [
+      1,
+      1,
+      22
+    ],
+    "keeps_latent_moe_bf16": true,
+    "keeps_router_gates_source_precision": true,
+    "latent_shape": [
+      1,
+      1,
+      2048
+    ],
+    "routed_expert_bits": {
+      "down_proj": 1,
+      "up_proj": 1
+    },
+    "routed_shape": [
+      1,
+      1,
+      22,
+      2048
+    ],
+    "scores_shape": [
+      1,
+      1,
+      22
+    ],
+    "shared_expert_bits": 8
+  },
+  "lane_id": "moe-routed-shared-scheduling",
+  "log_dir": "docs/runtime/logs",
+  "manifest_status": "PARTIAL",
+  "required_outputs": [
+    "2026-06-04-nemotron-ultra-jangtq1l-bf16-activation-live-probe.json",
+    "2026-06-04-nemotron-ultra-layer-decode-weighted-moe-probe.json",
+    "2026-06-04-nemotron-ultra-long-coherence-greedy-probe.json",
+    "2026-06-04-nemotron-ultra-mamba-component-probe.json",
+    "2026-06-04-nemotron-ultra-moe-weighted-decode-component-probe.json",
+    "2026-06-04-nemotron-ultra-projection-tradeoff-probe.json",
+    "2026-06-04-nemotron-ultra-runtime-speed-compare.json",
+    "2026-06-04-nemotron-ultra-runtime-speed-gate.json",
+    "2026-06-04-nemotron-ultra-token-speed-budget.json",
+    "2026-06-04-nemotron-ultra-agent-handoff.json",
+    "2026-06-04-nemotron-ultra-runtime-cache-parser-contract.json"
+  ],
+  "source_files": [
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-launch-guard.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-cleanup-ready-check.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-candidate-contract.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-index.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-proof-manifest.json"
+  ],
+  "status": "READY",
+  "target": {
+    "moe_cut_ms_proportional": 21.887616388322158,
+    "moe_cut_pct_of_current_moe": 33.27727649986701,
+    "moe_per_layer_cut_ms": 0.455992008090045,
+    "required_total_cut_ms": 43.237248819787055,
+    "target_tps": 10.0
+  },
+  "warnings": []
+}

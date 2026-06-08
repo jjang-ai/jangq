@@ -1,0 +1,574 @@
+{
+  "bundle": "/Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L",
+  "decode_token": 42,
+  "decode_warmup_steps": 1,
+  "layer_rows": [
+    {
+      "block_type": "M",
+      "layer_index": 0,
+      "ms": 1.4032080071046948
+    },
+    {
+      "block_type": "E",
+      "layer_index": 1,
+      "ms": 1.4853339525870979
+    },
+    {
+      "block_type": "M",
+      "layer_index": 2,
+      "ms": 1.9040000042878091
+    },
+    {
+      "block_type": "E",
+      "layer_index": 3,
+      "ms": 1.3380000018514693
+    },
+    {
+      "block_type": "M",
+      "layer_index": 4,
+      "ms": 1.2002080329693854
+    },
+    {
+      "block_type": "E",
+      "layer_index": 5,
+      "ms": 1.201292034238577
+    },
+    {
+      "block_type": "M",
+      "layer_index": 6,
+      "ms": 1.2374999932944775
+    },
+    {
+      "block_type": "*",
+      "layer_index": 7,
+      "ms": 0.769208010751754
+    },
+    {
+      "block_type": "E",
+      "layer_index": 8,
+      "ms": 1.60995899932459
+    },
+    {
+      "block_type": "M",
+      "layer_index": 9,
+      "ms": 1.6135000041685998
+    },
+    {
+      "block_type": "E",
+      "layer_index": 10,
+      "ms": 1.2435420067049563
+    },
+    {
+      "block_type": "M",
+      "layer_index": 11,
+      "ms": 1.182416977826506
+    },
+    {
+      "block_type": "E",
+      "layer_index": 12,
+      "ms": 1.3252919889055192
+    },
+    {
+      "block_type": "M",
+      "layer_index": 13,
+      "ms": 1.3159590307623148
+    },
+    {
+      "block_type": "*",
+      "layer_index": 14,
+      "ms": 0.7606669678352773
+    },
+    {
+      "block_type": "E",
+      "layer_index": 15,
+      "ms": 1.2433750089257956
+    },
+    {
+      "block_type": "M",
+      "layer_index": 16,
+      "ms": 1.5820420230738819
+    },
+    {
+      "block_type": "E",
+      "layer_index": 17,
+      "ms": 1.214749994687736
+    },
+    {
+      "block_type": "M",
+      "layer_index": 18,
+      "ms": 1.2390830088406801
+    },
+    {
+      "block_type": "E",
+      "layer_index": 19,
+      "ms": 1.2946249917149544
+    },
+    {
+      "block_type": "M",
+      "layer_index": 20,
+      "ms": 1.4195410185493529
+    },
+    {
+      "block_type": "E",
+      "layer_index": 21,
+      "ms": 1.9063340150751173
+    },
+    {
+      "block_type": "M",
+      "layer_index": 22,
+      "ms": 1.2029999634250998
+    },
+    {
+      "block_type": "*",
+      "layer_index": 23,
+      "ms": 0.7316659903153777
+    },
+    {
+      "block_type": "E",
+      "layer_index": 24,
+      "ms": 1.2434999807737768
+    },
+    {
+      "block_type": "M",
+      "layer_index": 25,
+      "ms": 1.2500410084612668
+    },
+    {
+      "block_type": "E",
+      "layer_index": 26,
+      "ms": 1.3260829728096724
+    },
+    {
+      "block_type": "M",
+      "layer_index": 27,
+      "ms": 1.6761249862611294
+    },
+    {
+      "block_type": "E",
+      "layer_index": 28,
+      "ms": 1.4983339933678508
+    },
+    {
+      "block_type": "M",
+      "layer_index": 29,
+      "ms": 1.2289580190554261
+    },
+    {
+      "block_type": "E",
+      "layer_index": 30,
+      "ms": 1.2623330112546682
+    },
+    {
+      "block_type": "M",
+      "layer_index": 31,
+      "ms": 1.2405419838614762
+    },
+    {
+      "block_type": "*",
+      "layer_index": 32,
+      "ms": 0.747166050132364
+    },
+    {
+      "block_type": "E",
+      "layer_index": 33,
+      "ms": 1.6149159637279809
+    },
+    {
+      "block_type": "M",
+      "layer_index": 34,
+      "ms": 1.3186659780330956
+    },
+    {
+      "block_type": "E",
+      "layer_index": 35,
+      "ms": 1.5538340085186064
+    },
+    {
+      "block_type": "M",
+      "layer_index": 36,
+      "ms": 1.18937500519678
+    },
+    {
+      "block_type": "E",
+      "layer_index": 37,
+      "ms": 1.2412500218488276
+    },
+    {
+      "block_type": "M",
+      "layer_index": 38,
+      "ms": 1.2267089914530516
+    },
+    {
+      "block_type": "*",
+      "layer_index": 39,
+      "ms": 0.8229169761762023
+    },
+    {
+      "block_type": "E",
+      "layer_index": 40,
+      "ms": 1.6593330074101686
+    },
+    {
+      "block_type": "M",
+      "layer_index": 41,
+      "ms": 1.1729159741662443
+    },
+    {
+      "block_type": "E",
+      "layer_index": 42,
+      "ms": 1.414833008311689
+    },
+    {
+      "block_type": "M",
+      "layer_index": 43,
+      "ms": 1.2181249912828207
+    },
+    {
+      "block_type": "E",
+      "layer_index": 44,
+      "ms": 1.2294999905861914
+    },
+    {
+      "block_type": "M",
+      "layer_index": 45,
+      "ms": 1.203541993163526
+    },
+    {
+      "block_type": "E",
+      "layer_index": 46,
+      "ms": 1.7556250095367432
+    },
+    {
+      "block_type": "M",
+      "layer_index": 47,
+      "ms": 1.6459169564768672
+    },
+    {
+      "block_type": "*",
+      "layer_index": 48,
+      "ms": 0.7007919484749436
+    },
+    {
+      "block_type": "E",
+      "layer_index": 49,
+      "ms": 1.246624975465238
+    },
+    {
+      "block_type": "M",
+      "layer_index": 50,
+      "ms": 1.1827920097857714
+    },
+    {
+      "block_type": "E",
+      "layer_index": 51,
+      "ms": 1.2590839760378003
+    },
+    {
+      "block_type": "M",
+      "layer_index": 52,
+      "ms": 1.4318330213427544
+    },
+    {
+      "block_type": "E",
+      "layer_index": 53,
+      "ms": 1.918666996061802
+    },
+    {
+      "block_type": "M",
+      "layer_index": 54,
+      "ms": 1.2644589878618717
+    },
+    {
+      "block_type": "E",
+      "layer_index": 55,
+      "ms": 1.211458002217114
+    },
+    {
+      "block_type": "M",
+      "layer_index": 56,
+      "ms": 1.1936249793507159
+    },
+    {
+      "block_type": "*",
+      "layer_index": 57,
+      "ms": 0.7315000402741134
+    },
+    {
+      "block_type": "E",
+      "layer_index": 58,
+      "ms": 1.282416982576251
+    },
+    {
+      "block_type": "M",
+      "layer_index": 59,
+      "ms": 1.3285410241223872
+    },
+    {
+      "block_type": "E",
+      "layer_index": 60,
+      "ms": 1.6003749915398657
+    },
+    {
+      "block_type": "M",
+      "layer_index": 61,
+      "ms": 1.1562500149011612
+    },
+    {
+      "block_type": "E",
+      "layer_index": 62,
+      "ms": 1.204166968818754
+    },
+    {
+      "block_type": "M",
+      "layer_index": 63,
+      "ms": 1.1637500138022006
+    },
+    {
+      "block_type": "*",
+      "layer_index": 64,
+      "ms": 0.7105830009095371
+    },
+    {
+      "block_type": "E",
+      "layer_index": 65,
+      "ms": 1.2412910000421107
+    },
+    {
+      "block_type": "M",
+      "layer_index": 66,
+      "ms": 1.405125018209219
+    },
+    {
+      "block_type": "E",
+      "layer_index": 67,
+      "ms": 1.211749971844256
+    },
+    {
+      "block_type": "M",
+      "layer_index": 68,
+      "ms": 1.464041997678578
+    },
+    {
+      "block_type": "E",
+      "layer_index": 69,
+      "ms": 1.2498750002123415
+    },
+    {
+      "block_type": "M",
+      "layer_index": 70,
+      "ms": 1.211166032589972
+    },
+    {
+      "block_type": "E",
+      "layer_index": 71,
+      "ms": 1.2119170278310776
+    },
+    {
+      "block_type": "M",
+      "layer_index": 72,
+      "ms": 1.2503750040195882
+    },
+    {
+      "block_type": "*",
+      "layer_index": 73,
+      "ms": 0.7360000163316727
+    },
+    {
+      "block_type": "E",
+      "layer_index": 74,
+      "ms": 1.5262499800883234
+    },
+    {
+      "block_type": "M",
+      "layer_index": 75,
+      "ms": 1.180750026833266
+    },
+    {
+      "block_type": "E",
+      "layer_index": 76,
+      "ms": 1.216916018165648
+    },
+    {
+      "block_type": "M",
+      "layer_index": 77,
+      "ms": 1.453207980375737
+    },
+    {
+      "block_type": "E",
+      "layer_index": 78,
+      "ms": 1.2529169907793403
+    },
+    {
+      "block_type": "M",
+      "layer_index": 79,
+      "ms": 1.2624579831026495
+    },
+    {
+      "block_type": "E",
+      "layer_index": 80,
+      "ms": 1.2347499723546207
+    },
+    {
+      "block_type": "M",
+      "layer_index": 81,
+      "ms": 1.6800000448711216
+    },
+    {
+      "block_type": "*",
+      "layer_index": 82,
+      "ms": 0.8049160242080688
+    },
+    {
+      "block_type": "E",
+      "layer_index": 83,
+      "ms": 1.2729999725706875
+    },
+    {
+      "block_type": "M",
+      "layer_index": 84,
+      "ms": 1.251333043910563
+    },
+    {
+      "block_type": "E",
+      "layer_index": 85,
+      "ms": 1.266542007215321
+    },
+    {
+      "block_type": "M",
+      "layer_index": 86,
+      "ms": 2.320999978110194
+    },
+    {
+      "block_type": "E",
+      "layer_index": 87,
+      "ms": 1.2492079986259341
+    },
+    {
+      "block_type": "M",
+      "layer_index": 88,
+      "ms": 1.1765829985961318
+    },
+    {
+      "block_type": "*",
+      "layer_index": 89,
+      "ms": 0.724957964848727
+    },
+    {
+      "block_type": "E",
+      "layer_index": 90,
+      "ms": 1.2349169701337814
+    },
+    {
+      "block_type": "M",
+      "layer_index": 91,
+      "ms": 1.1505419970490038
+    },
+    {
+      "block_type": "E",
+      "layer_index": 92,
+      "ms": 1.5522079775109887
+    },
+    {
+      "block_type": "M",
+      "layer_index": 93,
+      "ms": 1.2193339643999934
+    },
+    {
+      "block_type": "E",
+      "layer_index": 94,
+      "ms": 1.4306249795481563
+    },
+    {
+      "block_type": "M",
+      "layer_index": 95,
+      "ms": 1.1776250321418047
+    },
+    {
+      "block_type": "E",
+      "layer_index": 96,
+      "ms": 1.3144590193405747
+    },
+    {
+      "block_type": "M",
+      "layer_index": 97,
+      "ms": 1.2391249765641987
+    },
+    {
+      "block_type": "*",
+      "layer_index": 98,
+      "ms": 0.7498749764636159
+    },
+    {
+      "block_type": "E",
+      "layer_index": 99,
+      "ms": 1.7424580291844904
+    },
+    {
+      "block_type": "M",
+      "layer_index": 100,
+      "ms": 1.5599160105921328
+    },
+    {
+      "block_type": "E",
+      "layer_index": 101,
+      "ms": 1.2157079763710499
+    },
+    {
+      "block_type": "M",
+      "layer_index": 102,
+      "ms": 1.1789589771069586
+    },
+    {
+      "block_type": "E",
+      "layer_index": 103,
+      "ms": 1.2688330025412142
+    },
+    {
+      "block_type": "M",
+      "layer_index": 104,
+      "ms": 1.1993750231340528
+    },
+    {
+      "block_type": "E",
+      "layer_index": 105,
+      "ms": 1.4273750130087137
+    },
+    {
+      "block_type": "M",
+      "layer_index": 106,
+      "ms": 1.3832499971613288
+    },
+    {
+      "block_type": "E",
+      "layer_index": 107,
+      "ms": 1.2676249607466161
+    }
+  ],
+  "manual_decode_total_ms": 143.23724881978706,
+  "norm_lm_head_ms": 4.3167500407435,
+  "prefill_s": 33.16227066598367,
+  "prompt_tokens": 26,
+  "summary_by_block_type": {
+    "*": {
+      "count": 12,
+      "max_ms": 0.8229169761762023,
+      "median_ms": 0.747166050132364,
+      "min_ms": 0.7007919484749436,
+      "total_ms": 8.990247966721654
+    },
+    "E": {
+      "count": 48,
+      "max_ms": 1.918666996061802,
+      "median_ms": 1.2688330025412142,
+      "min_ms": 1.201292034238577,
+      "total_ms": 65.77346072299406
+    },
+    "M": {
+      "count": 48,
+      "max_ms": 2.320999978110194,
+      "median_ms": 1.2405419838614762,
+      "min_ms": 1.1505419970490038,
+      "total_ms": 64.15679008932784
+    }
+  }
+}

@@ -1,0 +1,257 @@
+{
+  "acceptance_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/runtime_speed_fix_acceptance.py --log-dir docs/runtime/logs --strict",
+  "candidate_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+  "current_speed": {
+    "best_live_tps": 8.335,
+    "mamba_ms": 64.15679008932784,
+    "manual_decode_total_ms": 143.23724881978706,
+    "moe_ms": 65.77346072299406
+  },
+  "failures": [],
+  "invariants": {
+    "drops_mtp": true,
+    "hidden_shape": [
+      1,
+      1,
+      8192
+    ],
+    "indices_shape": [
+      1,
+      1,
+      22
+    ],
+    "keeps_latent_moe_bf16": true,
+    "keeps_router_gates_source_precision": true,
+    "latent_shape": [
+      1,
+      1,
+      2048
+    ],
+    "routed_expert_bits": {
+      "down_proj": 1,
+      "up_proj": 1
+    },
+    "routed_shape": [
+      1,
+      1,
+      22,
+      2048
+    ],
+    "scores_shape": [
+      1,
+      1,
+      22
+    ],
+    "shared_expert_bits": 8
+  },
+  "lane_id": "moe-routed-shared-scheduling",
+  "log_dir": "docs/runtime/logs",
+  "post_candidate_refresh": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/refresh_runtime_proof_bundle.py --log-dir docs/runtime/logs --summary-out docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-proof-refresh.md",
+  "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+  "source_files": [
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-surface-map.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-component-budget-matrix.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-candidate-contract.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-execution-ticket.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-fix-acceptance.json"
+  ],
+  "speed_acceptance_status": "PARTIAL",
+  "status": "READY",
+  "steps": [
+    {
+      "component": {
+        "coverage_pct_of_family_total": 153.78238873832407,
+        "label": "full_moe",
+        "median_ms_per_measured_layer": 2.107249980326742,
+        "projected_total_ms": 101.14799905568361,
+        "role": "inclusive_path",
+        "tps_after_25pct_cut": 8.47815081362277,
+        "tps_after_50pct_cut": 10.791764886739461
+      },
+      "goal": "Attack the inclusive NemotronHMoE path before isolated micro-optimizations.",
+      "id": "moe-01-path-scheduling",
+      "non_goals": [
+        "do not lower top-k",
+        "do not bypass weighted expert scores",
+        "do not count a short live row as acceptance without experiment_result_check"
+      ],
+      "surfaces": [
+        {
+          "anchors": {
+            "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH": 1616,
+            "Nemotron-H MoE weighted SwitchMLP decode": 1656,
+            "_switchmlp_weighted_decode": 1463
+          },
+          "file": "jang-tools/jang_tools/load_jangtq.py",
+          "id": "nemotron-weighted-moe-patch"
+        },
+        {
+          "anchors": {
+            "JANGTQ_DISABLE_NEMOTRON_SWITCHMLP_FASTPATH": 1583,
+            "JANGTQ_ENABLE_NEMOTRON_SWITCHMLP_FASTPATH": 1582
+          },
+          "file": "jang-tools/jang_tools/load_jangtq.py",
+          "id": "switchmlp-fastpath-toggle"
+        },
+        {
+          "anchors": {
+            "full_moe": 98,
+            "moe.switch_mlp": 62,
+            "shared_experts": 69,
+            "weighted_decode": 64
+          },
+          "file": "jang-tools/examples/nemotron_ultra/moe_component_probe.py",
+          "id": "moe-component-proof"
+        },
+        {
+          "anchors": {
+            "ACCEPTED": 171,
+            "MoE lane did not improve moe_ms": 145,
+            "moe-routed-shared-scheduling": 144
+          },
+          "file": "jang-tools/examples/nemotron_ultra/experiment_result_check.py",
+          "id": "candidate-verdict-proof"
+        }
+      ],
+      "title": "Reduce full MoE path scheduling overhead first",
+      "validation": [
+        "rerun moe_component_probe.py and require full_moe plus switch_mlp timing to move",
+        "rerun layer_decode_probe.py and require E bucket improvement",
+        "rerun long_decode_coherence_probe.py and reject marker/repeat/EOS regression"
+      ]
+    },
+    {
+      "component": {
+        "coverage_pct_of_family_total": 82.50136010659187,
+        "label": "switch_mlp",
+        "median_ms_per_measured_layer": 1.1304999934509397,
+        "projected_total_ms": 54.2639996856451,
+        "role": "substep",
+        "tps_after_25pct_cut": 7.711809738053088,
+        "tps_after_50pct_cut": 8.612875032018595
+      },
+      "goal": "Reduce routed 1-bit expert dispatch around fused gate/up and gather down kernels.",
+      "id": "moe-02-switchmlp-routed-kernels",
+      "non_goals": [
+        "do not expand routed experts to BF16",
+        "do not make grouped NAX the default without candidate proof",
+        "do not edit vMLX or MLX Studio for this JANG lane"
+      ],
+      "surfaces": [
+        {
+          "anchors": {
+            "JANGTQ_MPP_NAX": 18,
+            "def fused_gate_up_swiglu_matmul": 399,
+            "make_fused_gate_up_swiglu_decode": 271
+          },
+          "file": "jang-tools/jang_tools/turboquant/fused_gate_up_kernel.py",
+          "id": "fused-gate-up-kernel"
+        },
+        {
+          "anchors": {
+            "JANGTQ_GATHER_OPT": 39,
+            "def gather_tq_matmul": 695,
+            "make_gather_tq_decode_broadcast": 658,
+            "make_gather_tq_decode_per_row": 593
+          },
+          "file": "jang-tools/jang_tools/turboquant/gather_tq_kernel.py",
+          "id": "routed-gather-kernel"
+        },
+        {
+          "anchors": {
+            "build_sorted_group_tiles": 590,
+            "fused_gate_up_swiglu_mpp_nax_grouped_from_rot": 835,
+            "gather_tq_matmul_mpp_nax_grouped_from_rot": 641
+          },
+          "file": "jang-tools/jang_tools/turboquant/mpp_nax_kernel.py",
+          "id": "grouped-nax-proof-surface"
+        },
+        {
+          "anchors": {
+            "full_moe": 98,
+            "moe.switch_mlp": 62,
+            "shared_experts": 69,
+            "weighted_decode": 64
+          },
+          "file": "jang-tools/examples/nemotron_ultra/moe_component_probe.py",
+          "id": "moe-component-proof"
+        },
+        {
+          "anchors": {
+            "ACCEPTED": 171,
+            "MoE lane did not improve moe_ms": 145,
+            "moe-routed-shared-scheduling": 144
+          },
+          "file": "jang-tools/examples/nemotron_ultra/experiment_result_check.py",
+          "id": "candidate-verdict-proof"
+        }
+      ],
+      "title": "Optimize SwitchMLP routed gate/up/down execution",
+      "validation": [
+        "compare fused_gate_up and gather path timings through moe_component_probe.py",
+        "run candidate suite with default env, then compare against weighted-MoE and activation-BF16 negative controls",
+        "preserve routed_expert_bits up/down=1 and indices shape [1,1,22]"
+      ]
+    },
+    {
+      "component": {
+        "coverage_pct_of_family_total": 42.14465595622588,
+        "label": "shared_experts",
+        "median_ms_per_measured_layer": 0.5774999735876918,
+        "projected_total_ms": 27.719998732209206,
+        "role": "substep",
+        "tps_after_25pct_cut": 7.336366967518093,
+        "tps_after_50pct_cut": 7.729334208469193
+      },
+      "goal": "Treat shared experts as secondary unless routed scheduling leaves them dominant.",
+      "id": "moe-03-shared-experts-overlap",
+      "non_goals": [
+        "do not dequantize shared experts by default",
+        "do not optimize shared path before routed path evidence"
+      ],
+      "surfaces": [
+        {
+          "anchors": {
+            "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH": 1616,
+            "Nemotron-H MoE weighted SwitchMLP decode": 1656,
+            "_switchmlp_weighted_decode": 1463
+          },
+          "file": "jang-tools/jang_tools/load_jangtq.py",
+          "id": "nemotron-weighted-moe-patch"
+        },
+        {
+          "anchors": {
+            "full_moe": 98,
+            "moe.switch_mlp": 62,
+            "shared_experts": 69,
+            "weighted_decode": 64
+          },
+          "file": "jang-tools/examples/nemotron_ultra/moe_component_probe.py",
+          "id": "moe-component-proof"
+        },
+        {
+          "anchors": {
+            "ACCEPTED": 171,
+            "MoE lane did not improve moe_ms": 145,
+            "moe-routed-shared-scheduling": 144
+          },
+          "file": "jang-tools/examples/nemotron_ultra/experiment_result_check.py",
+          "id": "candidate-verdict-proof"
+        }
+      ],
+      "title": "Measure shared expert overlap only after routed path moves",
+      "validation": [
+        "require shared_experts timing to improve without increasing switch_mlp",
+        "preserve shared_expert_bits=8",
+        "keep speed acceptance PARTIAL unless token/s target, bucket ceilings, and candidate acceptance all pass"
+      ]
+    }
+  ],
+  "target": {
+    "moe_cut_ms_proportional": 21.887616388322158,
+    "moe_cut_pct_of_current_moe": 33.27727649986701,
+    "moe_per_layer_cut_ms": 0.455992008090045,
+    "required_total_cut_ms": 43.237248819787055,
+    "target_tps": 10.0
+  }
+}

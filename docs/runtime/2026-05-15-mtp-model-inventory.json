@@ -1,0 +1,2099 @@
+{
+  "family_counts": {
+    "bailing_hybrid": {
+      "config_claims_mtp_but_no_tensors": 3
+    },
+    "deepseek_v4": {
+      "absent_by_config": 3,
+      "present_in_weights": 1
+    },
+    "gemma4": {
+      "unknown_no_mtp_evidence": 1
+    },
+    "hy_v3": {
+      "config_claims_mtp_but_no_tensors": 1
+    },
+    "kimi_k25": {
+      "unknown_no_mtp_evidence": 2
+    },
+    "laguna": {
+      "unknown_no_mtp_evidence": 1
+    },
+    "minimax_m2": {
+      "absent_by_config": 5,
+      "config_claims_mtp_but_no_tensors": 1
+    },
+    "nemotron_h": {
+      "unknown_no_mtp_evidence": 3
+    },
+    "qwen3_5": {
+      "unknown_no_mtp_evidence": 2
+    },
+    "qwen3_5_moe": {
+      "unknown_no_mtp_evidence": 2
+    },
+    "unknown": {
+      "unknown_no_mtp_evidence": 1
+    },
+    "zaya": {
+      "unknown_no_mtp_evidence": 2
+    },
+    "zaya1_vl": {
+      "unknown_no_mtp_evidence": 3
+    }
+  },
+  "generated_at": "2026-05-15 13:04:16 PDT",
+  "model_count": 31,
+  "models": [
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "MiniMaxM2ForCausalLM",
+      "common": {
+        "architectures": [
+          "MiniMaxM2ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "kv",
+          "family": "minimax_m2",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "minimax"
+        },
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "bits_default": 4,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "minimax_m2",
+        "mtp_transformer_layers": 0,
+        "num_hidden_layers": 62,
+        "num_mtp_modules": 0,
+        "use_mtp": false
+      },
+      "config_mtp_evidence": [
+        "num_mtp_modules=0",
+        "mtp_transformer_layers=0",
+        "use_mtp=False"
+      ],
+      "display_path": "~/models/dealign.ai/MiniMax-M2.7-JANGTQ_K-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1681,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        61,
+        62
+      ],
+      "model_type": "minimax_m2",
+      "mtime": 1778292657.0,
+      "mtp_fields": [
+        {
+          "path": "mtp_transformer_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_mtp_modules",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "use_mtp",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/MiniMax-M2.7-JANGTQ_K-CRACK",
+      "safetensors_file_count": 67,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "DeepseekV4ForCausalLM",
+      "common": {
+        "architectures": [
+          "DeepseekV4ForCausalLM"
+        ],
+        "jang_config.drop_mtp": true,
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "critical_control_tensors": "source-f32",
+          "method": "affine+mxtq",
+          "non_routed": {
+            "bits": 8,
+            "codec": "affine",
+            "group_size": 32
+          },
+          "routed_experts": {
+            "bit_plan": {
+              "codec": "mxtq",
+              "default_bits": 2,
+              "hash_layer_bits_source": "DSV4_V3_PLAN_PATH",
+              "hash_layer_default_bits": 4,
+              "hash_layer_indices": [
+                0,
+                1,
+                2
+              ],
+              "plan_bit_counts": {
+                "2": 3,
+                "4": 5
+              },
+              "plan_file": "routed_only_worst5_23_25_28_34_36.json",
+              "plan_sha256": "3db0b31fe6f1b19d3e00cfdd15572ebf3af950ef25e1e8622e1f2791b1977619",
+              "plan_source": "DSV4_V3_PLAN_PATH",
+              "routed_layer_bits": {
+                "0": 2,
+                "1": 2,
+                "2": 2,
+                "23": 4,
+                "25": 4,
+                "28": 4,
+                "34": 4,
+                "36": 4
+              },
+              "smooth_layer_bits": 2
+            },
+            "bits": 2,
+            "codec": "mxtq"
+          }
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "num_nextn_predict_layers": 0
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=0"
+      ],
+      "display_path": "~/models/JANGQ/_dsv4_jangtq_k_upload_prep/stage_jangq",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 2610,
+      "jang_mtp_evidence": [
+        "drop_mtp=True"
+      ],
+      "layer_index_range": [
+        0,
+        42,
+        43
+      ],
+      "model_type": "deepseek_v4",
+      "mtime": 1778565486.0385802,
+      "mtp_fields": [
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "drop_mtp",
+          "source": "jang_config",
+          "value": true
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/_dsv4_jangtq_k_upload_prep/stage_jangq",
+      "safetensors_file_count": 81,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "DeepseekV4ForCausalLM",
+      "common": {
+        "architectures": [
+          "DeepseekV4ForCausalLM"
+        ],
+        "jang_config.drop_mtp": true,
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "critical_control_tensors": "source-f32",
+          "method": "affine+mxtq",
+          "non_routed": {
+            "bits": 8,
+            "codec": "affine",
+            "group_size": 32
+          },
+          "routed_experts": {
+            "bit_plan": {
+              "codec": "mxtq",
+              "default_bits": 2,
+              "hash_layer_bits_source": "DSV4_V3_PLAN_PATH",
+              "hash_layer_default_bits": 4,
+              "hash_layer_indices": [
+                0,
+                1,
+                2
+              ],
+              "plan_bit_counts": {
+                "2": 3,
+                "4": 5
+              },
+              "plan_file": "routed_only_worst5_23_25_28_34_36.json",
+              "plan_sha256": "3db0b31fe6f1b19d3e00cfdd15572ebf3af950ef25e1e8622e1f2791b1977619",
+              "plan_source": "DSV4_V3_PLAN_PATH",
+              "routed_layer_bits": {
+                "0": 2,
+                "1": 2,
+                "2": 2,
+                "23": 4,
+                "25": 4,
+                "28": 4,
+                "34": 4,
+                "36": 4
+              },
+              "smooth_layer_bits": 2
+            },
+            "bits": 2,
+            "codec": "mxtq"
+          }
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "num_nextn_predict_layers": 0
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=0"
+      ],
+      "display_path": "~/models/JANGQ/_dsv4_jangtq_k_upload_prep/stage_osaurus",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 2610,
+      "jang_mtp_evidence": [
+        "drop_mtp=True"
+      ],
+      "layer_index_range": [
+        0,
+        42,
+        43
+      ],
+      "model_type": "deepseek_v4",
+      "mtime": 1778565033.5491946,
+      "mtp_fields": [
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "drop_mtp",
+          "source": "jang_config",
+          "value": true
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/_dsv4_jangtq_k_upload_prep/stage_osaurus",
+      "safetensors_file_count": 81,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "DeepseekV4ForCausalLM",
+      "common": {
+        "architectures": [
+          "DeepseekV4ForCausalLM"
+        ],
+        "jang_config.drop_mtp": true,
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "critical_control_tensors": "source-f32",
+          "method": "affine+mxtq",
+          "non_routed": {
+            "bits": 8,
+            "codec": "affine",
+            "group_size": 32
+          },
+          "routed_experts": {
+            "bit_plan": {
+              "codec": "mxtq",
+              "default_bits": 2,
+              "hash_layer_bits_source": "DSV4_V3_PLAN_PATH",
+              "hash_layer_default_bits": 4,
+              "hash_layer_indices": [
+                0,
+                1,
+                2
+              ],
+              "plan_bit_counts": {
+                "2": 3,
+                "4": 5
+              },
+              "plan_file": "routed_only_worst5_23_25_28_34_36.json",
+              "plan_sha256": "3db0b31fe6f1b19d3e00cfdd15572ebf3af950ef25e1e8622e1f2791b1977619",
+              "plan_source": "DSV4_V3_PLAN_PATH",
+              "routed_layer_bits": {
+                "0": 2,
+                "1": 2,
+                "2": 2,
+                "23": 4,
+                "25": 4,
+                "28": 4,
+                "34": 4,
+                "36": 4
+              },
+              "smooth_layer_bits": 2
+            },
+            "bits": 2,
+            "codec": "mxtq"
+          }
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "num_nextn_predict_layers": 0
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=0"
+      ],
+      "display_path": "~/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 2610,
+      "jang_mtp_evidence": [
+        "drop_mtp=True"
+      ],
+      "layer_index_range": [
+        0,
+        42,
+        43
+      ],
+      "model_type": "deepseek_v4",
+      "mtime": 1778565486.036898,
+      "mtp_fields": [
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "drop_mtp",
+          "source": "jang_config",
+          "value": true
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K",
+      "safetensors_file_count": 81,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "MiniMaxM2ForCausalLM",
+      "common": {
+        "architectures": [
+          "MiniMaxM2ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "kv",
+          "family": "minimax_m2",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "minimax"
+        },
+        "jang_config.format": "jang",
+        "jang_config.quantization": {
+          "awq": {
+            "alpha": 0.5,
+            "enabled": true,
+            "fold_target": "post_attention_layernorm.weight",
+            "scale_floor": 1.0,
+            "scope": "routed_experts.gate_proj+up_proj (joint per-layer)"
+          },
+          "bit_widths_used": [
+            2,
+            4,
+            6,
+            8
+          ],
+          "block_size": 128,
+          "method": "jang-affine-mixed",
+          "mode": "affine",
+          "profile": "JANG_K",
+          "routed_avg_bits": 2.667
+        },
+        "model_type": "minimax_m2",
+        "mtp_transformer_layers": 0,
+        "num_hidden_layers": 62,
+        "num_mtp_modules": 0,
+        "use_mtp": false
+      },
+      "config_mtp_evidence": [
+        "num_mtp_modules=0",
+        "mtp_transformer_layers=0",
+        "use_mtp=False"
+      ],
+      "display_path": "~/models/JANGQ/MiniMax-M2.7-JANG_K",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1681,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        61,
+        62
+      ],
+      "model_type": "minimax_m2",
+      "mtime": 1778841278.9702535,
+      "mtp_fields": [
+        {
+          "path": "mtp_transformer_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_mtp_modules",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "use_mtp",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/MiniMax-M2.7-JANG_K",
+      "safetensors_file_count": 18,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "MiniMaxM2ForCausalLM",
+      "common": {
+        "architectures": [
+          "MiniMaxM2ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "kv",
+          "family": "minimax_m2",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "minimax"
+        },
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "minimax_m2",
+        "mtp_transformer_layers": 0,
+        "num_hidden_layers": 62,
+        "num_mtp_modules": 0,
+        "use_mtp": false
+      },
+      "config_mtp_evidence": [
+        "num_mtp_modules=0",
+        "mtp_transformer_layers=0",
+        "use_mtp=False"
+      ],
+      "display_path": "~/models/JANGQ/MiniMax-M2.7-JANGTQ",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1681,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        61,
+        62
+      ],
+      "model_type": "minimax_m2",
+      "mtime": 1777961415.0989876,
+      "mtp_fields": [
+        {
+          "path": "mtp_transformer_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_mtp_modules",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "use_mtp",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/MiniMax-M2.7-JANGTQ",
+      "safetensors_file_count": 52,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "MiniMaxM2ForCausalLM",
+      "common": {
+        "architectures": [
+          "MiniMaxM2ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "kv",
+          "family": "minimax_m2",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "minimax"
+        },
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "bits_default": 4,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "minimax_m2",
+        "mtp_transformer_layers": 0,
+        "num_hidden_layers": 62,
+        "num_mtp_modules": 0,
+        "use_mtp": false
+      },
+      "config_mtp_evidence": [
+        "num_mtp_modules=0",
+        "mtp_transformer_layers=0",
+        "use_mtp=False"
+      ],
+      "display_path": "~/models/JANGQ/MiniMax-M2.7-JANGTQ_K",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1681,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        61,
+        62
+      ],
+      "model_type": "minimax_m2",
+      "mtime": 1778003239.467625,
+      "mtp_fields": [
+        {
+          "path": "mtp_transformer_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_mtp_modules",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "use_mtp",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/MiniMax-M2.7-JANGTQ_K",
+      "safetensors_file_count": 68,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "No MTP activation path for this artifact; leave disabled and use as negative-space regression row.",
+      "architectures": "MiniMaxM2ForCausalLM",
+      "common": {
+        "architectures": [
+          "MiniMaxM2ForCausalLM"
+        ],
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.weight_format": "mxtq",
+        "model_type": "minimax_m2",
+        "mtp_transformer_layers": 0,
+        "num_hidden_layers": 62,
+        "num_mtp_modules": 0,
+        "use_mtp": false
+      },
+      "config_mtp_evidence": [
+        "num_mtp_modules=0",
+        "mtp_transformer_layers=0",
+        "use_mtp=False"
+      ],
+      "display_path": "~/models/JANGQ/MiniMax-M2.7-Small-JANGTQ",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 90403,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        61,
+        62
+      ],
+      "model_type": "minimax_m2",
+      "mtime": 1777936790.8567262,
+      "mtp_fields": [
+        {
+          "path": "mtp_transformer_layers",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_mtp_modules",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "use_mtp",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/MiniMax-M2.7-Small-JANGTQ",
+      "safetensors_file_count": 40,
+      "status": "absent_by_config",
+      "target_priority": "none"
+    },
+    {
+      "activation_notes": "Need reconversion/preservation first; runtime toggle alone cannot activate missing MTP weights.",
+      "architectures": "BailingMoeV2_5ForCausalLM",
+      "common": {
+        "architectures": [
+          "BailingMoeV2_5ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "bailing_hybrid",
+          "modality": "text",
+          "reasoning_parser": "deepseek_r1",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "deepseek"
+        },
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "bailing_hybrid",
+        "num_hidden_layers": 32,
+        "num_nextn_predict_layers": 1
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=1"
+      ],
+      "display_path": "~/models/dealign.ai/Ling-2.6-flash-JANGTQ2-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1149,
+      "jang_mtp_evidence": [
+        "mxtq_bits.mtp_eh_proj=8"
+      ],
+      "layer_index_range": [
+        0,
+        32,
+        33
+      ],
+      "model_type": "bailing_hybrid",
+      "mtime": 1778382886.9072967,
+      "mtp_fields": [
+        {
+          "path": "mtp_loss_scaling_factor",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "quantization.mxtq_bits.mtp_eh_proj",
+          "source": "config",
+          "value": 8
+        },
+        {
+          "path": "mxtq_bits.mtp_eh_proj",
+          "source": "config",
+          "value": 8
+        },
+        {
+          "path": "mxtq_bits.mtp_eh_proj",
+          "source": "jang_config",
+          "value": 8
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Ling-2.6-flash-JANGTQ2-CRACK",
+      "safetensors_file_count": 30,
+      "status": "config_claims_mtp_but_no_tensors",
+      "target_priority": "preserve-first"
+    },
+    {
+      "activation_notes": "Need reconversion/preservation first; runtime toggle alone cannot activate missing MTP weights.",
+      "architectures": "BailingMoeV2_5ForCausalLM",
+      "common": {
+        "architectures": [
+          "BailingMoeV2_5ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "bailing_hybrid",
+          "modality": "text",
+          "reasoning_parser": "deepseek_r1",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "deepseek"
+        },
+        "jang_config.profile": "MXFP4",
+        "jang_config.quantization": {
+          "bits": 4,
+          "group_size": 32,
+          "method": "affine"
+        },
+        "jang_config.weight_format": "mxfp4",
+        "model_type": "bailing_hybrid",
+        "num_hidden_layers": 32,
+        "num_nextn_predict_layers": 1
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=1"
+      ],
+      "display_path": "~/models/dealign.ai/Ling-2.6-flash-MXFP4-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1149,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        32,
+        33
+      ],
+      "model_type": "bailing_hybrid",
+      "mtime": 1778382887.023574,
+      "mtp_fields": [
+        {
+          "path": "mtp_loss_scaling_factor",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 1
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Ling-2.6-flash-MXFP4-CRACK",
+      "safetensors_file_count": 51,
+      "status": "config_claims_mtp_but_no_tensors",
+      "target_priority": "preserve-first"
+    },
+    {
+      "activation_notes": "Need reconversion/preservation first; runtime toggle alone cannot activate missing MTP weights.",
+      "architectures": "MiniMaxM2ForCausalLM",
+      "common": {
+        "architectures": [
+          "MiniMaxM2ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "kv",
+          "family": "minimax_m2",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "minimax"
+        },
+        "jang_config.profile": "JANGTQ",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "minimax_m2",
+        "mtp_transformer_layers": 1,
+        "num_hidden_layers": 62,
+        "num_mtp_modules": 3,
+        "use_mtp": true
+      },
+      "config_mtp_evidence": [
+        "num_mtp_modules=3",
+        "mtp_transformer_layers=1",
+        "use_mtp=True"
+      ],
+      "display_path": "~/models/dealign.ai/MiniMax-M2.7-JANGTQ-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 143971,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        61,
+        62
+      ],
+      "model_type": "minimax_m2",
+      "mtime": 1778238012.7417288,
+      "mtp_fields": [
+        {
+          "path": "mtp_transformer_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "num_mtp_modules",
+          "source": "config",
+          "value": 3
+        },
+        {
+          "path": "use_mtp",
+          "source": "config",
+          "value": true
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/MiniMax-M2.7-JANGTQ-CRACK",
+      "safetensors_file_count": 62,
+      "status": "config_claims_mtp_but_no_tensors",
+      "target_priority": "preserve-first"
+    },
+    {
+      "activation_notes": "Need reconversion/preservation first; runtime toggle alone cannot activate missing MTP weights.",
+      "architectures": "HYV3ForCausalLM",
+      "common": {
+        "architectures": [
+          "HYV3ForCausalLM"
+        ],
+        "jang_config.bundle_has_mtp": true,
+        "jang_config.capabilities": {
+          "cache_type": "kv",
+          "family": "hy_v3",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "hunyuan"
+        },
+        "jang_config.mtp_layers": 1,
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.runtime": {
+          "bundle_has_mtp": true,
+          "mtp_layers": 1,
+          "mtp_mode": "preserved_disabled",
+          "mtp_status": "MTP tensors are preserved in the bundle, but the first JANG runtime path must use normal autoregressive decode until an accept/reject speculative loop is implemented and tested."
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "hy_v3",
+        "num_hidden_layers": 80,
+        "num_nextn_predict_layers": 1
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=1"
+      ],
+      "display_path": "~/models/JANGQ/Hy3-preview-JANGTQ2",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 140438,
+      "jang_mtp_evidence": [
+        "mxtq_bits.mtp=8",
+        "runtime.bundle_has_mtp=True",
+        "runtime.mtp_layers=1",
+        "runtime.mtp_mode='preserved_disabled'",
+        "runtime.mtp_status='MTP tensors are preserved in the bundle, but the first JANG runtime path must use normal autoregressive decode until an accept/reject speculative loop is implemented and tested.'",
+        "bundle_has_mtp=True",
+        "mtp_layers=1"
+      ],
+      "layer_index_range": [
+        0,
+        80,
+        81
+      ],
+      "model_type": "hy_v3",
+      "mtime": 1778404391.9609268,
+      "mtp_fields": [
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "mxtq_bits.mtp",
+          "source": "config",
+          "value": 8
+        },
+        {
+          "path": "quantization.mxtq_bits.mtp",
+          "source": "config",
+          "value": 8
+        },
+        {
+          "path": "runtime.bundle_has_mtp",
+          "source": "config",
+          "value": true
+        },
+        {
+          "path": "runtime.mtp_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "runtime.mtp_mode",
+          "source": "config",
+          "value": "preserved_disabled"
+        },
+        {
+          "path": "runtime.mtp_status",
+          "source": "config",
+          "value": "MTP tensors are preserved in the bundle, but the first JANG runtime path must use normal autoregressive decode until an accept/reject speculative loop is implemented and tested."
+        },
+        {
+          "path": "mxtq_bits.mtp",
+          "source": "jang_config",
+          "value": 8
+        },
+        {
+          "path": "runtime.bundle_has_mtp",
+          "source": "jang_config",
+          "value": true
+        },
+        {
+          "path": "runtime.mtp_layers",
+          "source": "jang_config",
+          "value": 1
+        },
+        {
+          "path": "runtime.mtp_mode",
+          "source": "jang_config",
+          "value": "preserved_disabled"
+        },
+        {
+          "path": "runtime.mtp_status",
+          "source": "jang_config",
+          "value": "MTP tensors are preserved in the bundle, but the first JANG runtime path must use normal autoregressive decode until an accept/reject speculative loop is implemented and tested."
+        },
+        {
+          "path": "bundle_has_mtp",
+          "source": "jang_config",
+          "value": true
+        },
+        {
+          "path": "mtp_layers",
+          "source": "jang_config",
+          "value": 1
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/Hy3-preview-JANGTQ2",
+      "safetensors_file_count": 86,
+      "status": "config_claims_mtp_but_no_tensors",
+      "target_priority": "preserve-first"
+    },
+    {
+      "activation_notes": "Need reconversion/preservation first; runtime toggle alone cannot activate missing MTP weights.",
+      "architectures": "BailingMoeV2_5ForCausalLM",
+      "common": {
+        "architectures": [
+          "BailingMoeV2_5ForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "bailing_hybrid",
+          "modality": "text",
+          "reasoning_parser": "deepseek_r1",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "deepseek"
+        },
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "bailing_hybrid",
+        "num_hidden_layers": 32,
+        "num_nextn_predict_layers": 1
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=1"
+      ],
+      "display_path": "~/models/JANGQ/Ling-2.6-flash-JANGTQ",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1149,
+      "jang_mtp_evidence": [
+        "mxtq_bits.mtp_eh_proj=8"
+      ],
+      "layer_index_range": [
+        0,
+        32,
+        33
+      ],
+      "model_type": "bailing_hybrid",
+      "mtime": 1778382886.7940266,
+      "mtp_fields": [
+        {
+          "path": "mtp_loss_scaling_factor",
+          "source": "config",
+          "value": 0
+        },
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "quantization.mxtq_bits.mtp_eh_proj",
+          "source": "config",
+          "value": 8
+        },
+        {
+          "path": "mxtq_bits.mtp_eh_proj",
+          "source": "config",
+          "value": 8
+        },
+        {
+          "path": "mxtq_bits.mtp_eh_proj",
+          "source": "jang_config",
+          "value": 8
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/Ling-2.6-flash-JANGTQ",
+      "safetensors_file_count": 30,
+      "status": "config_claims_mtp_but_no_tensors",
+      "target_priority": "preserve-first"
+    },
+    {
+      "activation_notes": "Use DSV4-specific MTP/compressor/indexer path; requires MTP-preserved artifact and DSV4 composite-cache verifier branch.",
+      "architectures": "DeepseekV4ForCausalLM",
+      "common": {
+        "architectures": [
+          "DeepseekV4ForCausalLM"
+        ],
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "num_nextn_predict_layers": 1
+      },
+      "config_mtp_evidence": [
+        "num_nextn_predict_layers=1"
+      ],
+      "display_path": "~/models/Sources/DeepSeek-V4-Flash",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 69187,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        42,
+        43
+      ],
+      "model_type": "deepseek_v4",
+      "mtime": 1778027709.3798304,
+      "mtp_fields": [
+        {
+          "path": "num_nextn_predict_layers",
+          "source": "config",
+          "value": 1
+        }
+      ],
+      "mtp_files": [
+        "model-00046-of-00046.safetensors"
+      ],
+      "mtp_tensor_key_count": 1575,
+      "mtp_tensor_key_samples": [
+        "mtp.0.hc_head_base",
+        "mtp.0.hc_head_fn",
+        "mtp.0.hc_head_scale",
+        "mtp.0.hc_attn_base",
+        "mtp.0.hc_ffn_base",
+        "mtp.0.hc_attn_fn",
+        "mtp.0.hc_attn_scale",
+        "mtp.0.hc_ffn_fn",
+        "mtp.0.hc_ffn_scale",
+        "mtp.0.attn.attn_sink",
+        "mtp.0.attn.wq_a.weight",
+        "mtp.0.attn.wq_a.scale",
+        "mtp.0.attn.wq_b.weight",
+        "mtp.0.attn.wq_b.scale",
+        "mtp.0.attn.q_norm.weight",
+        "mtp.0.attn.wo_a.weight",
+        "mtp.0.attn.wo_a.scale",
+        "mtp.0.attn.wkv.weight",
+        "mtp.0.attn.wkv.scale",
+        "mtp.0.attn.kv_norm.weight",
+        "mtp.0.attn.wo_b.weight",
+        "mtp.0.attn.wo_b.scale",
+        "mtp.0.attn_norm.weight",
+        "mtp.0.ffn_norm.weight",
+        "mtp.0.ffn.shared_experts.w1.weight",
+        "mtp.0.ffn.shared_experts.w1.scale",
+        "mtp.0.ffn.shared_experts.w3.weight",
+        "mtp.0.ffn.shared_experts.w3.scale",
+        "mtp.0.ffn.shared_experts.w2.weight",
+        "mtp.0.ffn.shared_experts.w2.scale",
+        "mtp.0.ffn.experts.0.w1.weight",
+        "mtp.0.ffn.experts.0.w1.scale",
+        "mtp.0.ffn.experts.0.w3.weight",
+        "mtp.0.ffn.experts.0.w3.scale",
+        "mtp.0.ffn.experts.1.w1.weight",
+        "mtp.0.ffn.experts.1.w1.scale",
+        "mtp.0.ffn.experts.1.w3.weight",
+        "mtp.0.ffn.experts.1.w3.scale",
+        "mtp.0.ffn.experts.2.w1.weight",
+        "mtp.0.ffn.experts.2.w1.scale",
+        "mtp.0.ffn.experts.2.w3.weight",
+        "mtp.0.ffn.experts.2.w3.scale",
+        "mtp.0.ffn.experts.3.w1.weight",
+        "mtp.0.ffn.experts.3.w1.scale",
+        "mtp.0.ffn.experts.3.w3.weight",
+        "mtp.0.ffn.experts.3.w3.scale",
+        "mtp.0.ffn.experts.4.w1.weight",
+        "mtp.0.ffn.experts.4.w1.scale",
+        "mtp.0.ffn.experts.4.w3.weight",
+        "mtp.0.ffn.experts.4.w3.scale",
+        "mtp.0.ffn.experts.5.w1.weight",
+        "mtp.0.ffn.experts.5.w1.scale",
+        "mtp.0.ffn.experts.5.w3.weight",
+        "mtp.0.ffn.experts.5.w3.scale",
+        "mtp.0.ffn.experts.6.w1.weight",
+        "mtp.0.ffn.experts.6.w1.scale",
+        "mtp.0.ffn.experts.6.w3.weight",
+        "mtp.0.ffn.experts.6.w3.scale",
+        "mtp.0.ffn.experts.7.w1.weight",
+        "mtp.0.ffn.experts.7.w1.scale",
+        "mtp.0.ffn.experts.7.w3.weight",
+        "mtp.0.ffn.experts.7.w3.scale",
+        "mtp.0.ffn.experts.8.w1.weight",
+        "mtp.0.ffn.experts.8.w1.scale",
+        "mtp.0.ffn.experts.8.w3.weight",
+        "mtp.0.ffn.experts.8.w3.scale",
+        "mtp.0.ffn.experts.9.w1.weight",
+        "mtp.0.ffn.experts.9.w1.scale",
+        "mtp.0.ffn.experts.9.w3.weight",
+        "mtp.0.ffn.experts.9.w3.scale",
+        "mtp.0.ffn.experts.10.w1.weight",
+        "mtp.0.ffn.experts.10.w1.scale",
+        "mtp.0.ffn.experts.10.w3.weight",
+        "mtp.0.ffn.experts.10.w3.scale",
+        "mtp.0.ffn.experts.11.w1.weight",
+        "mtp.0.ffn.experts.11.w1.scale",
+        "mtp.0.ffn.experts.11.w3.weight",
+        "mtp.0.ffn.experts.11.w3.scale",
+        "mtp.0.ffn.experts.12.w1.weight",
+        "mtp.0.ffn.experts.12.w1.scale",
+        "mtp.0.ffn.experts.12.w3.weight",
+        "mtp.0.ffn.experts.12.w3.scale",
+        "mtp.0.ffn.experts.13.w1.weight",
+        "mtp.0.ffn.experts.13.w1.scale",
+        "mtp.0.ffn.experts.13.w3.weight",
+        "mtp.0.ffn.experts.13.w3.scale",
+        "mtp.0.ffn.experts.14.w1.weight",
+        "mtp.0.ffn.experts.14.w1.scale",
+        "mtp.0.ffn.experts.14.w3.weight",
+        "mtp.0.ffn.experts.14.w3.scale",
+        "mtp.0.ffn.experts.15.w1.weight",
+        "mtp.0.ffn.experts.15.w1.scale",
+        "mtp.0.ffn.experts.15.w3.weight",
+        "mtp.0.ffn.experts.15.w3.scale",
+        "mtp.0.ffn.experts.16.w1.weight",
+        "mtp.0.ffn.experts.16.w1.scale",
+        "mtp.0.ffn.experts.16.w3.weight",
+        "mtp.0.ffn.experts.16.w3.scale",
+        "mtp.0.ffn.experts.17.w1.weight",
+        "mtp.0.ffn.experts.17.w1.scale",
+        "mtp.0.ffn.experts.17.w3.weight",
+        "mtp.0.ffn.experts.17.w3.scale",
+        "mtp.0.ffn.experts.18.w1.weight",
+        "mtp.0.ffn.experts.18.w1.scale",
+        "mtp.0.ffn.experts.18.w3.weight",
+        "mtp.0.ffn.experts.18.w3.scale",
+        "mtp.0.ffn.experts.19.w1.weight",
+        "mtp.0.ffn.experts.19.w1.scale",
+        "mtp.0.ffn.experts.19.w3.weight",
+        "mtp.0.ffn.experts.19.w3.scale",
+        "mtp.0.ffn.experts.20.w1.weight",
+        "mtp.0.ffn.experts.20.w1.scale",
+        "mtp.0.ffn.experts.20.w3.weight",
+        "mtp.0.ffn.experts.20.w3.scale",
+        "mtp.0.ffn.experts.21.w1.weight",
+        "mtp.0.ffn.experts.21.w1.scale",
+        "mtp.0.ffn.experts.21.w3.weight",
+        "mtp.0.ffn.experts.21.w3.scale",
+        "mtp.0.ffn.experts.22.w1.weight",
+        "mtp.0.ffn.experts.22.w1.scale"
+      ],
+      "path": "/Users/eric/models/Sources/DeepSeek-V4-Flash",
+      "safetensors_file_count": 46,
+      "status": "present_in_weights",
+      "target_priority": "medium"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Gemma4ForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Gemma4ForConditionalGeneration"
+        ],
+        "jang_config.format": "jang",
+        "jang_config.quantization": {
+          "actual_bits": 4.26,
+          "bit_widths_used": [
+            4,
+            8
+          ],
+          "block_size": 64,
+          "calibration_method": "weights",
+          "method": "jang-importance",
+          "profile": "JANG_4M",
+          "quantization_backend": "mx.quantize",
+          "quantization_method": "mse",
+          "quantization_scheme": "asymmetric",
+          "scoring_method": "weight-magnitude",
+          "target_bits": 4.0
+        },
+        "jang_config.runtime": {
+          "total_weight_bytes": 13444349952,
+          "total_weight_gb": 12.52
+        },
+        "model_type": "gemma4"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Gemma-4-26B-A4B-it-JANG_4M-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1695,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        29,
+        30
+      ],
+      "model_type": "gemma4",
+      "mtime": 1778380534.1170654,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Gemma-4-26B-A4B-it-JANG_4M-CRACK",
+      "safetensors_file_count": 4,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "NemotronHForCausalLM",
+      "common": {
+        "architectures": [
+          "NemotronHForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "nemotron_h",
+          "modality": "omni",
+          "reasoning_parser": "deepseek_r1",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "nemotron"
+        },
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "nemotron_h",
+        "num_hidden_layers": 52
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Nemotron-Omni-Nano-JANGTQ-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 19361,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        51,
+        52
+      ],
+      "model_type": "nemotron_h",
+      "mtime": 1777549874.4381268,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Nemotron-Omni-Nano-JANGTQ-CRACK",
+      "safetensors_file_count": 14,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "NemotronHForCausalLM",
+      "common": {
+        "architectures": [
+          "NemotronHForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "nemotron_h",
+          "modality": "omni",
+          "reasoning_parser": "deepseek_r1",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "nemotron"
+        },
+        "jang_config.profile": "JANGTQ4",
+        "jang_config.quantization": {
+          "bits_default": 4,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "nemotron_h",
+        "num_hidden_layers": 52
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Nemotron-Omni-Nano-JANGTQ4-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 19361,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        51,
+        52
+      ],
+      "model_type": "nemotron_h",
+      "mtime": 1777549476.6809835,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Nemotron-Omni-Nano-JANGTQ4-CRACK",
+      "safetensors_file_count": 22,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "NemotronHForCausalLM",
+      "common": {
+        "architectures": [
+          "NemotronHForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "nemotron_h",
+          "modality": "omni",
+          "reasoning_parser": "deepseek_r1",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "nemotron"
+        },
+        "jang_config.profile": "MXFP4",
+        "jang_config.quantization": {
+          "bits": 4,
+          "group_size": 32,
+          "method": "affine"
+        },
+        "jang_config.weight_format": "mlx",
+        "model_type": "nemotron_h",
+        "num_hidden_layers": 52
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Nemotron-Omni-Nano-MXFP4-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1835,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        51,
+        52
+      ],
+      "model_type": "nemotron_h",
+      "mtime": 1777572260.1091287,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Nemotron-Omni-Nano-MXFP4-CRACK",
+      "safetensors_file_count": 20,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Qwen3_5ForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Qwen3_5ForConditionalGeneration"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "qwen3_5",
+          "modalities": [
+            "text",
+            "image",
+            "video"
+          ],
+          "modality": "vision",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "qwen"
+        },
+        "jang_config.format": "jang",
+        "jang_config.quantization": {
+          "actual_bits": 4.45,
+          "bit_widths_used": [
+            4,
+            8
+          ],
+          "block_size": 64,
+          "calibration_method": "weights",
+          "hadamard_rotation": false,
+          "method": "jang-importance",
+          "profile": "JANG_4M",
+          "quantization_backend": "mx.quantize",
+          "quantization_method": "mse",
+          "quantization_scheme": "asymmetric",
+          "scoring_method": "weight-magnitude",
+          "target_bits": 4.0
+        },
+        "jang_config.runtime": {
+          "format": "mlx-native (post-sanitize)",
+          "sanitized_for": "mlx_vlm >= 0.4.4 (qwen3_5 VL)",
+          "total_weight_bytes": 17529097938,
+          "total_weight_gb": 17.53
+        },
+        "model_type": "qwen3_5"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Qwen3.6-27B-JANG_4M-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 2180,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        63,
+        64
+      ],
+      "model_type": "qwen3_5",
+      "mtime": 1776929119.5723922,
+      "mtp_fields": [
+        {
+          "path": "text_config.mtp_num_hidden_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "text_config.mtp_use_dedicated_embeddings",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Qwen3.6-27B-JANG_4M-CRACK",
+      "safetensors_file_count": 11,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Qwen3_5ForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Qwen3_5ForConditionalGeneration"
+        ],
+        "model_type": "qwen3_5"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Qwen3.6-27B-MXFP4-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1682,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        63,
+        64
+      ],
+      "model_type": "qwen3_5",
+      "mtime": 1777332976.815258,
+      "mtp_fields": [
+        {
+          "path": "text_config.mtp_num_hidden_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "text_config.mtp_use_dedicated_embeddings",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Qwen3.6-27B-MXFP4-CRACK",
+      "safetensors_file_count": 3,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Qwen3_5MoeForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Qwen3_5MoeForConditionalGeneration"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "qwen3_5_moe",
+          "modality": "vision",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": true,
+          "tool_parser": "qwen"
+        },
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.quantization": {
+          "bits_default": 2,
+          "group_size": 64,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "qwen3_5_moe"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/dealign.ai/Qwen3.6-35B-A3B-JANGTQ-CRACK",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1930,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        39,
+        40
+      ],
+      "model_type": "qwen3_5_moe",
+      "mtime": 1777079426.2560353,
+      "mtp_fields": [
+        {
+          "path": "text_config.mtp_num_hidden_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "text_config.mtp_use_dedicated_embeddings",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/dealign.ai/Qwen3.6-35B-A3B-JANGTQ-CRACK",
+      "safetensors_file_count": 13,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "KimiK25ForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "KimiK25ForConditionalGeneration"
+        ],
+        "jang_config.profile": "JANGTQ_1L",
+        "jang_config.weight_format": "mxtq",
+        "model_type": "kimi_k25"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/Kimi-K2.6-Small-JANGTQ",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 116110,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        60,
+        61
+      ],
+      "model_type": "kimi_k25",
+      "mtime": 1778125112.5873008,
+      "mtp_fields": [
+        {
+          "path": "text_config.num_nextn_predict_layers",
+          "source": "config",
+          "value": 0
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/Kimi-K2.6-Small-JANGTQ",
+      "safetensors_file_count": 154,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "LagunaForCausalLM",
+      "common": {
+        "architectures": [
+          "LagunaForCausalLM"
+        ],
+        "jang_config.profile": "JANGTQ2",
+        "jang_config.weight_format": "mxtq",
+        "model_type": "laguna",
+        "num_hidden_layers": 40
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/Laguna-XS.2-JANGTQ",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1439,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        39,
+        40
+      ],
+      "model_type": "laguna",
+      "mtime": 1777618481.0,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/Laguna-XS.2-JANGTQ",
+      "safetensors_file_count": 11,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "ZayaForCausalLM",
+      "common": {
+        "architectures": [
+          "ZayaForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "zaya",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "zaya_xml"
+        },
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "bits_default": "mixed",
+          "group_size": 32,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "zaya",
+        "num_hidden_layers": 80
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/ZAYA1-8B-JANGTQ_K",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1965,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        79,
+        80
+      ],
+      "model_type": "zaya",
+      "mtime": 1778478545.0,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/ZAYA1-8B-JANGTQ_K",
+      "safetensors_file_count": 5,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "ZayaForCausalLM",
+      "common": {
+        "architectures": [
+          "ZayaForCausalLM"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "zaya",
+          "modality": "text",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "zaya_xml"
+        },
+        "jang_config.profile": "MXFP4",
+        "jang_config.quantization": {
+          "bits": 4,
+          "embed_bits": 8,
+          "group_size": 32,
+          "method": "affine"
+        },
+        "jang_config.weight_format": "mxfp4",
+        "model_type": "zaya",
+        "num_hidden_layers": 80
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/ZAYA1-8B-MXFP4",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 1965,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        79,
+        80
+      ],
+      "model_type": "zaya",
+      "mtime": 1778402108.4298165,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/ZAYA1-8B-MXFP4",
+      "safetensors_file_count": 6,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Zaya1VLForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Zaya1VLForConditionalGeneration"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "zaya1_vl",
+          "modality": "vision",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "zaya_xml"
+        },
+        "jang_config.profile": "JANGTQ4",
+        "jang_config.quantization": {
+          "bits_default": 4,
+          "group_size": 32,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "zaya1_vl",
+        "num_hidden_layers": 40
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/ZAYA1-VL-8B-JANGTQ4",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 5315,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        39,
+        40
+      ],
+      "model_type": "zaya1_vl",
+      "mtime": 1778477011.1137526,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/ZAYA1-VL-8B-JANGTQ4",
+      "safetensors_file_count": 8,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Zaya1VLForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Zaya1VLForConditionalGeneration"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "zaya1_vl",
+          "modality": "vision",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "zaya_xml"
+        },
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.quantization": {
+          "bits_default": "mixed",
+          "group_size": 32,
+          "method": "affine+mxtq"
+        },
+        "jang_config.weight_format": "mxtq",
+        "model_type": "zaya1_vl",
+        "num_hidden_layers": 40
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/ZAYA1-VL-8B-JANGTQ_K",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 5315,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        39,
+        40
+      ],
+      "model_type": "zaya1_vl",
+      "mtime": 1778480523.0,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/ZAYA1-VL-8B-JANGTQ_K",
+      "safetensors_file_count": 7,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Zaya1VLForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Zaya1VLForConditionalGeneration"
+        ],
+        "jang_config.capabilities": {
+          "cache_type": "hybrid",
+          "family": "zaya1_vl",
+          "modality": "vision",
+          "reasoning_parser": "qwen3",
+          "supports_thinking": true,
+          "supports_tools": true,
+          "think_in_template": false,
+          "tool_parser": "zaya_xml"
+        },
+        "jang_config.profile": "MXFP4",
+        "jang_config.quantization": {
+          "bits": 4,
+          "embed_bits": 8,
+          "group_size": 32,
+          "method": "affine",
+          "router_bits": 16
+        },
+        "jang_config.weight_format": "mxfp4",
+        "model_type": "zaya1_vl",
+        "num_hidden_layers": 40
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/JANGQ/ZAYA1-VL-8B-MXFP4",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 5315,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        39,
+        40
+      ],
+      "model_type": "zaya1_vl",
+      "mtime": 1778402178.2924032,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/JANGQ/ZAYA1-VL-8B-MXFP4",
+      "safetensors_file_count": 8,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "KimiK25ForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "KimiK25ForConditionalGeneration"
+        ],
+        "jang_config.profile": "JANGTQ_K",
+        "jang_config.weight_format": "mxtq",
+        "model_type": "kimi_k25"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/Kimi-K2.6-JANGTQ_K",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 2710,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        60,
+        61
+      ],
+      "model_type": "kimi_k25",
+      "mtime": 1778647737.0,
+      "mtp_fields": [
+        {
+          "path": "text_config.num_nextn_predict_layers",
+          "source": "config",
+          "value": 0
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/Kimi-K2.6-JANGTQ_K",
+      "safetensors_file_count": 194,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": "Qwen3_5MoeForConditionalGeneration",
+      "common": {
+        "architectures": [
+          "Qwen3_5MoeForConditionalGeneration"
+        ],
+        "model_type": "qwen3_5_moe"
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/Qwen3.6-35B-A3B-4bit",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": 2090,
+      "jang_mtp_evidence": [],
+      "layer_index_range": [
+        0,
+        39,
+        40
+      ],
+      "model_type": "qwen3_5_moe",
+      "mtime": 1778412275.0736628,
+      "mtp_fields": [
+        {
+          "path": "text_config.mtp_num_hidden_layers",
+          "source": "config",
+          "value": 1
+        },
+        {
+          "path": "text_config.mtp_use_dedicated_embeddings",
+          "source": "config",
+          "value": false
+        }
+      ],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/Qwen3.6-35B-A3B-4bit",
+      "safetensors_file_count": 4,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    },
+    {
+      "activation_notes": "Unknown; inspect source/config/index manually before runtime claims.",
+      "architectures": null,
+      "common": {
+        "n_layers": 43
+      },
+      "config_mtp_evidence": [],
+      "display_path": "~/models/Sources/DeepSeek-V4-Flash/inference",
+      "header_errors": [],
+      "index_error": null,
+      "index_total_keys": null,
+      "jang_mtp_evidence": [],
+      "layer_index_range": null,
+      "model_type": null,
+      "mtime": 1777882393.4432917,
+      "mtp_fields": [],
+      "mtp_files": [],
+      "mtp_tensor_key_count": 0,
+      "mtp_tensor_key_samples": [],
+      "path": "/Users/eric/models/Sources/DeepSeek-V4-Flash/inference",
+      "safetensors_file_count": 0,
+      "status": "unknown_no_mtp_evidence",
+      "target_priority": "unknown"
+    }
+  ],
+  "root": "/Users/eric/models",
+  "status_counts": {
+    "absent_by_config": 8,
+    "config_claims_mtp_but_no_tensors": 5,
+    "present_in_weights": 1,
+    "unknown_no_mtp_evidence": 17
+  }
+}

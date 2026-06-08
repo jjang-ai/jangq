@@ -58,3 +58,49 @@ def dequant_fp8_e4m3_scale_inv(
     )
     out = weight.float() * scale_full[:rows, :cols]
     return out if out_dtype is None else out.to(out_dtype)
+
+
+def dequant_fp8_e4m3_scale_inv_segments(
+    weight: Any,
+    scale_inv: Any,
+    *,
+    row_segments: list[tuple[int, int]],
+    block_size: tuple[int, int] = (128, 128),
+    out_dtype: Any | None = None,
+):
+    """Dequant a fused 2-D weight whose scale rows include segment padding.
+
+    ``row_segments`` is a list of ``(weight_rows, scale_rows)`` pairs. This is
+    needed for MiMo full-attention fused ``qkv_proj`` tensors: Q/K/V are stored
+    as one matrix, but the FP8 scale rows are padded at the projection segment
+    boundary, not just at the end of the fused matrix.
+    """
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("torch is required to decode MiMo FP8 tensors") from exc
+
+    outs = []
+    w_pos = 0
+    s_pos = 0
+    for w_rows, s_rows in row_segments:
+        w_part = weight[w_pos : w_pos + w_rows]
+        s_part = scale_inv[s_pos : s_pos + s_rows]
+        outs.append(
+            dequant_fp8_e4m3_scale_inv(
+                w_part,
+                s_part,
+                block_size=block_size,
+                out_dtype=None,
+            )
+        )
+        w_pos += w_rows
+        s_pos += s_rows
+
+    if w_pos != weight.shape[0]:
+        raise ValueError(f"row segments consumed {w_pos} weight rows, expected {weight.shape[0]}")
+    if s_pos != scale_inv.shape[0]:
+        raise ValueError(f"row segments consumed {s_pos} scale rows, expected {scale_inv.shape[0]}")
+
+    out = torch.cat(outs, dim=0)
+    return out if out_dtype is None else out.to(out_dtype)

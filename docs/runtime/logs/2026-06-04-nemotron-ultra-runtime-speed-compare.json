@@ -1,0 +1,141 @@
+{
+  "baseline_log_dir": "docs/runtime/logs",
+  "candidate_log_dir": "docs/runtime/logs",
+  "coherence_counts": {
+    "leaks": {
+      "baseline": 3,
+      "candidate": 3,
+      "delta": 0
+    },
+    "no_eos": {
+      "baseline": 1,
+      "candidate": 1,
+      "delta": 0
+    },
+    "repeats": {
+      "baseline": 2,
+      "candidate": 2,
+      "delta": 0
+    }
+  },
+  "failures": [],
+  "metrics": {
+    "baseline": {
+      "attention_ms": 8.990247966721654,
+      "best_file": "2026-06-04-nemotron-ultra-jangtq1l-bf16-activation-live-probe.json",
+      "best_row": "think_math_default",
+      "best_tps": 8.335,
+      "coherence": {
+        "leaks": [
+          "factual_japan",
+          "arithmetic_brief",
+          "reasoning_apples"
+        ],
+        "missing": false,
+        "no_eos": [
+          "reasoning_apples"
+        ],
+        "repeats": [
+          "factual_japan",
+          "arithmetic_brief"
+        ]
+      },
+      "file": "2026-06-04-nemotron-ultra-layer-decode-weighted-moe-probe.json",
+      "mamba_ms": 64.15679008932784,
+      "manual_decode_total_ms": 143.23724881978706,
+      "moe_ms": 65.77346072299406,
+      "norm_lm_head_ms": 4.3167500407435
+    },
+    "candidate": {
+      "attention_ms": 8.990247966721654,
+      "best_file": "2026-06-04-nemotron-ultra-jangtq1l-bf16-activation-live-probe.json",
+      "best_row": "think_math_default",
+      "best_tps": 8.335,
+      "coherence": {
+        "leaks": [
+          "factual_japan",
+          "arithmetic_brief",
+          "reasoning_apples"
+        ],
+        "missing": false,
+        "no_eos": [
+          "reasoning_apples"
+        ],
+        "repeats": [
+          "factual_japan",
+          "arithmetic_brief"
+        ]
+      },
+      "file": "2026-06-04-nemotron-ultra-layer-decode-weighted-moe-probe.json",
+      "mamba_ms": 64.15679008932784,
+      "manual_decode_total_ms": 143.23724881978706,
+      "moe_ms": 65.77346072299406,
+      "norm_lm_head_ms": 4.3167500407435
+    },
+    "deltas": {
+      "attention_ms": {
+        "baseline": 8.990247966721654,
+        "candidate": 8.990247966721654,
+        "delta": 0.0,
+        "direction": "same",
+        "lower_is_better": true,
+        "pct": 0.0,
+        "unit": "ms"
+      },
+      "best_tps": {
+        "baseline": 8.335,
+        "candidate": 8.335,
+        "delta": 0.0,
+        "direction": "same",
+        "lower_is_better": false,
+        "pct": 0.0,
+        "unit": "tok/s"
+      },
+      "mamba_ms": {
+        "baseline": 64.15679008932784,
+        "candidate": 64.15679008932784,
+        "delta": 0.0,
+        "direction": "same",
+        "lower_is_better": true,
+        "pct": 0.0,
+        "unit": "ms"
+      },
+      "manual_decode_total_ms": {
+        "baseline": 143.23724881978706,
+        "candidate": 143.23724881978706,
+        "delta": 0.0,
+        "direction": "same",
+        "lower_is_better": true,
+        "pct": 0.0,
+        "unit": "ms"
+      },
+      "moe_ms": {
+        "baseline": 65.77346072299406,
+        "candidate": 65.77346072299406,
+        "delta": 0.0,
+        "direction": "same",
+        "lower_is_better": true,
+        "pct": 0.0,
+        "unit": "ms"
+      },
+      "norm_lm_head_ms": {
+        "baseline": 4.3167500407435,
+        "candidate": 4.3167500407435,
+        "delta": 0.0,
+        "direction": "same",
+        "lower_is_better": true,
+        "pct": 0.0,
+        "unit": "ms"
+      }
+    }
+  },
+  "status": "UNCHANGED",
+  "thresholds": {
+    "max_ms_regression_pct": 5.0,
+    "max_repeat_fraction": 0.25,
+    "max_tps_regression_pct": 2.0,
+    "min_ms_improvement_pct": 5.0,
+    "min_tps_improvement_pct": 2.0
+  },
+  "wins": []
+}

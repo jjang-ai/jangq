@@ -1,0 +1,48 @@
+{
+  "bundle": "/Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L",
+  "parser": "deepseek_r1 compatible <think> parser + Ultra XML function calls",
+  "rows": [
+    {
+      "content": "4<|im_end|>",
+      "decode_tps_excluding_first": 3.114,
+      "enable_thinking": false,
+      "generated_tokens": 2,
+      "id": "nt_math_default",
+      "raw_text": "4<|im_end|>",
+      "reasoning_content": null,
+      "tool_calls": [],
+      "truncated_reasoning": false,
+      "ttft_s": 34.593,
+      "visible_think_marker_leaks": []
+    },
+    {
+      "content": "Tokyo is the capital of Japan. P.S. The most concise answer.Tokyo is the capital of Japan. P",
+      "decode_tps_excluding_first": 3.303,
+      "enable_thinking": false,
+      "generated_tokens": 24,
+      "id": "nt_capital_default",
+      "raw_text": "Tokyo is the capital of Japan. P.S. The most concise answer.</think>Tokyo is the capital of Japan. P",
+      "reasoning_content": null,
+      "tool_calls": [],
+      "truncated_reasoning": false,
+      "ttft_s": 1.342,
+      "visible_think_marker_leaks": [
+        "</think>"
+      ]
+    },
+    {
+      "content": null,
+      "decode_tps_excluding_first": 3.256,
+      "enable_thinking": true,
+      "generated_tokens": 32,
+      "id": "think_math_default",
+      "raw_text": "The user is asking a simple arithmetic question: \"if I have 3 apples and buy 4 more, how many apples do I have?\" This is a",
+      "reasoning_content": "The user is asking a simple arithmetic question: \"if I have 3 apples and buy 4 more, how many apples do I have?\" This is a",
+      "tool_calls": [],
+      "truncated_reasoning": true,
+      "ttft_s": 1.503,
+      "visible_think_marker_leaks": []
+    }
+  ],
+  "source_log": "docs/runtime/logs/2026-06-04-nemotron-ultra-jangtq1l-coherence-speed-probe.json"
+}

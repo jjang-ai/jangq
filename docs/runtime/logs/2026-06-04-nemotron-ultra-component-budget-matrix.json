@@ -1,0 +1,557 @@
+{
+  "component_rows": [
+    {
+      "coverage_pct_of_family_total": 153.78238873832407,
+      "family": "MoE",
+      "label": "full_moe",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 2.107249980326742,
+      "projected_total_ms": 101.14799905568361,
+      "role": "inclusive_path",
+      "scenarios": [
+        {
+          "cut_ms": 25.286999763920903,
+          "cut_pct": 25.0,
+          "new_manual_ms": 117.95024905586615,
+          "new_manual_tps": 8.47815081362277,
+          "tps_gain": 1.4967265804741494
+        },
+        {
+          "cut_ms": 50.573999527841806,
+          "cut_pct": 50.0,
+          "new_manual_ms": 92.66324929194525,
+          "new_manual_tps": 10.791764886739461,
+          "tps_gain": 3.81034065359084
+        },
+        {
+          "cut_ms": 101.14799905568361,
+          "cut_pct": 100.0,
+          "new_manual_ms": 42.08924976410344,
+          "new_manual_tps": 23.759035991486538,
+          "tps_gain": 16.77761175833792
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 82.50136010659187,
+      "family": "MoE",
+      "label": "switch_mlp",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 1.1304999934509397,
+      "projected_total_ms": 54.2639996856451,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 13.565999921411276,
+          "cut_pct": 25.0,
+          "new_manual_ms": 129.67124889837578,
+          "new_manual_tps": 7.711809738053088,
+          "tps_gain": 0.7303855049044667
+        },
+        {
+          "cut_ms": 27.13199984282255,
+          "cut_pct": 50.0,
+          "new_manual_ms": 116.1052489769645,
+          "new_manual_tps": 8.612875032018595,
+          "tps_gain": 1.6314507988699738
+        },
+        {
+          "cut_ms": 54.2639996856451,
+          "cut_pct": 100.0,
+          "new_manual_ms": 88.97324913414195,
+          "new_manual_tps": 11.239333279740451,
+          "tps_gain": 4.257909046591831
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 42.14465595622588,
+      "family": "MoE",
+      "label": "shared_experts",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.5774999735876918,
+      "projected_total_ms": 27.719998732209206,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 6.929999683052301,
+          "cut_pct": 25.0,
+          "new_manual_ms": 136.30724913673475,
+          "new_manual_tps": 7.336366967518093,
+          "tps_gain": 0.3549427343694722
+        },
+        {
+          "cut_ms": 13.859999366104603,
+          "cut_pct": 50.0,
+          "new_manual_ms": 129.37724945368245,
+          "new_manual_tps": 7.729334208469193,
+          "tps_gain": 0.7479099753205718
+        },
+        {
+          "cut_ms": 27.719998732209206,
+          "cut_pct": 100.0,
+          "new_manual_ms": 115.51725008757785,
+          "new_manual_tps": 8.65671576532391,
+          "tps_gain": 1.6752915321752884
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 16.82743237779463,
+      "family": "MoE",
+      "label": "fc1_latent_proj",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.230583013035357,
+      "projected_total_ms": 11.067984625697136,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.766996156424284,
+          "cut_pct": 25.0,
+          "new_manual_ms": 140.47025266336277,
+          "new_manual_tps": 7.118944979735332,
+          "tps_gain": 0.13752074658671098
+        },
+        {
+          "cut_ms": 5.533992312848568,
+          "cut_pct": 50.0,
+          "new_manual_ms": 137.7032565069385,
+          "new_manual_tps": 7.261992383960889,
+          "tps_gain": 0.28056815081226816
+        },
+        {
+          "cut_ms": 11.067984625697136,
+          "cut_pct": 100.0,
+          "new_manual_ms": 132.16926419408992,
+          "new_manual_tps": 7.566055588623879,
+          "tps_gain": 0.584631355475258
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 16.118960733207174,
+      "family": "MoE",
+      "label": "gate",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.22087496472522616,
+      "projected_total_ms": 10.601998306810856,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.650499576702714,
+          "cut_pct": 25.0,
+          "new_manual_ms": 140.58674924308434,
+          "new_manual_tps": 7.113045897881385,
+          "tps_gain": 0.13162166473276393
+        },
+        {
+          "cut_ms": 5.300999153405428,
+          "cut_pct": 50.0,
+          "new_manual_ms": 137.93624966638163,
+          "new_manual_tps": 7.24972588727504,
+          "tps_gain": 0.26830165412641893
+        },
+        {
+          "cut_ms": 10.601998306810856,
+          "cut_pct": 100.0,
+          "new_manual_ms": 132.6352505129762,
+          "new_manual_tps": 7.539473828657385,
+          "tps_gain": 0.5580495955087637
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 15.465227075178026,
+      "family": "MoE",
+      "label": "fc2_latent_proj",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.21191698033362627,
+      "projected_total_ms": 10.172015056014061,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.5430037640035152,
+          "cut_pct": 25.0,
+          "new_manual_ms": 140.69424505578354,
+          "new_manual_tps": 7.107611257329767,
+          "tps_gain": 0.1261870241811458
+        },
+        {
+          "cut_ms": 5.0860075280070305,
+          "cut_pct": 50.0,
+          "new_manual_ms": 138.15124129178002,
+          "new_manual_tps": 7.238443829020448,
+          "tps_gain": 0.2570195958718271
+        },
+        {
+          "cut_ms": 10.172015056014061,
+          "cut_pct": 100.0,
+          "new_manual_ms": 133.065233763773,
+          "new_manual_tps": 7.515110985152382,
+          "tps_gain": 0.5336867520037609
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 14.79624358230918,
+      "family": "MoE",
+      "label": "norm",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.20275003043934703,
+      "projected_total_ms": 9.732001461088657,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.4330003652721643,
+          "cut_pct": 25.0,
+          "new_manual_ms": 140.8042484545149,
+          "new_manual_tps": 7.10205843201555,
+          "tps_gain": 0.12063419886692905
+        },
+        {
+          "cut_ms": 4.866000730544329,
+          "cut_pct": 50.0,
+          "new_manual_ms": 138.37124808924273,
+          "new_manual_tps": 7.226934885743378,
+          "tps_gain": 0.24551065259475724
+        },
+        {
+          "cut_ms": 9.732001461088657,
+          "cut_pct": 100.0,
+          "new_manual_ms": 133.5052473586984,
+          "new_manual_tps": 7.490342288293929,
+          "tps_gain": 0.5089180551453083
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 12.874518016345768,
+      "family": "MoE",
+      "label": "score_weighted_sum",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.1764170010574162,
+      "projected_total_ms": 8.468016050755978,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.1170040126889944,
+          "cut_pct": 25.0,
+          "new_manual_ms": 141.12024480709806,
+          "new_manual_tps": 7.08615550778652,
+          "tps_gain": 0.10473127463789922
+        },
+        {
+          "cut_ms": 4.234008025377989,
+          "cut_pct": 50.0,
+          "new_manual_ms": 139.00324079440907,
+          "new_manual_tps": 7.194076873927256,
+          "tps_gain": 0.21265264077863488
+        },
+        {
+          "cut_ms": 8.468016050755978,
+          "cut_pct": 100.0,
+          "new_manual_ms": 134.76923276903108,
+          "new_manual_tps": 7.420091214096399,
+          "tps_gain": 0.4386669809477777
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 89.59300948210588,
+      "family": "Mamba",
+      "label": "full_mamba_mixer",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 1.1974999797530472,
+      "projected_total_ms": 57.47999902814627,
+      "role": "inclusive_path",
+      "scenarios": [
+        {
+          "cut_ms": 14.369999757036567,
+          "cut_pct": 25.0,
+          "new_manual_ms": 128.8672490627505,
+          "new_manual_tps": 7.759923543592221,
+          "tps_gain": 0.7784993104435998
+        },
+        {
+          "cut_ms": 28.739999514073133,
+          "cut_pct": 50.0,
+          "new_manual_ms": 114.49724930571392,
+          "new_manual_tps": 8.733834271685822,
+          "tps_gain": 1.7524100385372012
+        },
+        {
+          "cut_ms": 57.47999902814627,
+          "cut_pct": 100.0,
+          "new_manual_ms": 85.75724979164079,
+          "new_manual_tps": 11.66082170813126,
+          "tps_gain": 4.67939747498264
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 62.44389573821858,
+      "family": "Mamba",
+      "label": "in_proj",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.834624981507659,
+      "projected_total_ms": 40.06199911236763,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 10.015499778091908,
+          "cut_pct": 25.0,
+          "new_manual_ms": 133.22174904169515,
+          "new_manual_tps": 7.50628187359276,
+          "tps_gain": 0.5248576404441394
+        },
+        {
+          "cut_ms": 20.030999556183815,
+          "cut_pct": 50.0,
+          "new_manual_ms": 123.20624926360324,
+          "new_manual_tps": 8.116471412586158,
+          "tps_gain": 1.135047179437537
+        },
+        {
+          "cut_ms": 40.06199911236763,
+          "cut_pct": 100.0,
+          "new_manual_ms": 103.17524970741943,
+          "new_manual_tps": 9.692246956859936,
+          "tps_gain": 2.710822723711315
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 35.1700662042113,
+      "family": "Mamba",
+      "label": "out_proj",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.4700830322690308,
+      "projected_total_ms": 22.56398554891348,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 5.64099638722837,
+          "cut_pct": 25.0,
+          "new_manual_ms": 137.59625243255869,
+          "new_manual_tps": 7.267639796295609,
+          "tps_gain": 0.28621556314698804
+        },
+        {
+          "cut_ms": 11.28199277445674,
+          "cut_pct": 50.0,
+          "new_manual_ms": 131.95525604533032,
+          "new_manual_tps": 7.578326396157134,
+          "tps_gain": 0.5969021630085134
+        },
+        {
+          "cut_ms": 22.56398554891348,
+          "cut_pct": 100.0,
+          "new_manual_ms": 120.67326327087358,
+          "new_manual_tps": 8.286839792799123,
+          "tps_gain": 1.305415559650502
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 16.147990424081275,
+      "family": "Mamba",
+      "label": "conv",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.21583400666713715,
+      "projected_total_ms": 10.360032320022583,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.5900080800056458,
+          "cut_pct": 25.0,
+          "new_manual_ms": 140.6472407397814,
+          "new_manual_tps": 7.10998662142367,
+          "tps_gain": 0.12856238827504907
+        },
+        {
+          "cut_ms": 5.1800161600112915,
+          "cut_pct": 50.0,
+          "new_manual_ms": 138.05723265977576,
+          "new_manual_tps": 7.243372771815374,
+          "tps_gain": 0.2619485386667533
+        },
+        {
+          "cut_ms": 10.360032320022583,
+          "cut_pct": 100.0,
+          "new_manual_ms": 132.87721649976447,
+          "new_manual_tps": 7.525744641119665,
+          "tps_gain": 0.5443204079710444
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 14.221458520147637,
+      "family": "Mamba",
+      "label": "ssm_update",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.1900839852169156,
+      "projected_total_ms": 9.12403129041195,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.2810078226029873,
+          "cut_pct": 25.0,
+          "new_manual_ms": 140.95624099718407,
+          "new_manual_tps": 7.094400311228343,
+          "tps_gain": 0.11297607807972199
+        },
+        {
+          "cut_ms": 4.562015645205975,
+          "cut_pct": 50.0,
+          "new_manual_ms": 138.67523317458108,
+          "new_manual_tps": 7.211092976790453,
+          "tps_gain": 0.22966874364183187
+        },
+        {
+          "cut_ms": 9.12403129041195,
+          "cut_pct": 100.0,
+          "new_manual_ms": 134.1132175293751,
+          "new_manual_tps": 7.456386614398896,
+          "tps_gain": 0.47496238125027546
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 13.317375736968106,
+      "family": "Mamba",
+      "label": "mamba_norm_gated",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.17800001660361886,
+      "projected_total_ms": 8.544000796973705,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.1360001992434263,
+          "cut_pct": 25.0,
+          "new_manual_ms": 141.10124862054363,
+          "new_manual_tps": 7.087109503114666,
+          "tps_gain": 0.10568526996604533
+        },
+        {
+          "cut_ms": 4.272000398486853,
+          "cut_pct": 50.0,
+          "new_manual_ms": 138.9652484213002,
+          "new_manual_tps": 7.196043696970233,
+          "tps_gain": 0.21461946382161212
+        },
+        {
+          "cut_ms": 8.544000796973705,
+          "cut_pct": 100.0,
+          "new_manual_ms": 134.69324802281335,
+          "new_manual_tps": 7.42427712360628,
+          "tps_gain": 0.44285289045765897
+        }
+      ]
+    },
+    {
+      "coverage_pct_of_family_total": 12.806153354043918,
+      "family": "Mamba",
+      "label": "outer_norm",
+      "layer_count": 48,
+      "median_ms_per_measured_layer": 0.17116701928898692,
+      "projected_total_ms": 8.216016925871372,
+      "role": "substep",
+      "scenarios": [
+        {
+          "cut_ms": 2.054004231467843,
+          "cut_pct": 25.0,
+          "new_manual_ms": 141.1832445883192,
+          "new_manual_tps": 7.082993473594776,
+          "tps_gain": 0.101569240446155
+        },
+        {
+          "cut_ms": 4.108008462935686,
+          "cut_pct": 50.0,
+          "new_manual_ms": 139.12924035685137,
+          "new_manual_tps": 7.187561704750983,
+          "tps_gain": 0.2061374716023625
+        },
+        {
+          "cut_ms": 8.216016925871372,
+          "cut_pct": 100.0,
+          "new_manual_ms": 135.02123189391568,
+          "new_manual_tps": 7.406242603279506,
+          "tps_gain": 0.4248183701308852
+        }
+      ]
+    }
+  ],
+  "current": {
+    "attention_ms": 8.990247966721654,
+    "mamba_ms": 64.15679008932784,
+    "manual_decode_total_ms": 143.23724881978706,
+    "manual_implied_tps": 6.981424233148621,
+    "moe_mamba_pct": 90.70982016402223,
+    "moe_ms": 65.77346072299406,
+    "norm_lm_head_ms": 4.3167500407435
+  },
+  "interpretation": [
+    "Component/path totals are projected from first measured layer medians; use them for ranking, not final proof.",
+    "`full_*` rows are inclusive path measurements, not additive leaf substeps.",
+    "Rows with large projected totals are plausible speed targets; small rows cannot move token/s enough alone.",
+    "The current projection tradeoff says quantized 8-bit affine projections are faster than temporary BF16 copies."
+  ],
+  "log_dir": "docs/runtime/logs",
+  "projection_tradeoff": {
+    "mamba_in_proj": {
+      "bf16_ms": 1.3651250046677887,
+      "quantized_ms": 0.9513340191915631,
+      "quantized_speedup_vs_bf16": 1.4349586760577133
+    },
+    "mamba_out_proj": {
+      "bf16_ms": 0.6716250209137797,
+      "quantized_ms": 0.5117499968037009,
+      "quantized_speedup_vs_bf16": 1.3124084516045524
+    },
+    "shared_down": {
+      "bf16_ms": 0.5448750453069806,
+      "quantized_ms": 0.3558750031515956,
+      "quantized_speedup_vs_bf16": 1.5310854667555136
+    },
+    "shared_up": {
+      "bf16_ms": 0.46633300371468067,
+      "quantized_ms": 0.3505829954519868,
+      "quantized_speedup_vs_bf16": 1.3301643541309354
+    }
+  },
+  "sources": {
+    "layer": "2026-06-04-nemotron-ultra-layer-decode-weighted-moe-probe.json",
+    "mamba": "2026-06-04-nemotron-ultra-mamba-component-probe.json",
+    "moe": "2026-06-04-nemotron-ultra-moe-weighted-decode-component-probe.json",
+    "projection": "2026-06-04-nemotron-ultra-projection-tradeoff-probe.json",
+    "token_budget": "2026-06-04-nemotron-ultra-token-speed-budget.json"
+  },
+  "target_hits": [
+    {
+      "required_total_cut_ms": 43.237248819787055,
+      "single_component_can_cover": [
+        "MoE:full_moe",
+        "MoE:switch_mlp",
+        "Mamba:full_mamba_mixer"
+      ],
+      "target_ms_per_token": 100.0,
+      "target_tps": 10.0
+    },
+    {
+      "required_total_cut_ms": 59.90391548645373,
+      "single_component_can_cover": [
+        "MoE:full_moe"
+      ],
+      "target_ms_per_token": 83.33333333333333,
+      "target_tps": 12.0
+    },
+    {
+      "required_total_cut_ms": 76.57058215312038,
+      "single_component_can_cover": [
+        "MoE:full_moe"
+      ],
+      "target_ms_per_token": 66.66666666666667,
+      "target_tps": 15.0
+    }
+  ]
+}

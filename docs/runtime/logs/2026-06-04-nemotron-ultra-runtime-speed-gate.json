@@ -1,0 +1,32 @@
+{
+  "failures": [],
+  "fixed": [
+    "best live speed 8.335 tok/s clears floor 8.000",
+    "attention bucket 8.990 ms is below ceiling 10.000",
+    "norm/lm_head 4.317 ms is below ceiling 5.000",
+    "Mamba component evidence points to projection/dispatch before conv rewrite"
+  ],
+  "log_dir": "docs/runtime/logs",
+  "metrics": {
+    "attention_ms": 8.990247966721654,
+    "best_live_source": "2026-06-04-nemotron-ultra-jangtq1l-bf16-activation-live-probe.json::think_math_default",
+    "best_live_tps": 8.335,
+    "mamba_ms": 64.15679008932784,
+    "manual_decode_total_ms": 143.23724881978706,
+    "moe_ms": 65.77346072299406,
+    "norm_lm_head_ms": 4.3167500407435
+  },
+  "partial": [
+    "MoE remains a bottleneck at 65.773 ms",
+    "Mamba remains a bottleneck at 64.157 ms",
+    "coherence gate remains partial (leaks=['factual_japan', 'arithmetic_brief', 'reasoning_apples'], repeats=['factual_japan', 'arithmetic_brief'], no_eos=['reasoning_apples'])"
+  ],
+  "status": "PARTIAL",
+  "thresholds": {
+    "max_attention_ms": 10.0,
+    "max_norm_lm_ms": 5.0,
+    "max_repeat_fraction": 0.25,
+    "min_bottleneck_ms": 40.0,
+    "min_live_tps": 8.0
+  }
+}

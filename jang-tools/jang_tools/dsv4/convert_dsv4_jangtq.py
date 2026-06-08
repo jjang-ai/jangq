@@ -607,14 +607,12 @@ def convert(
         # config metadata honest so validators do not expect missing weights.
         src_cfg["num_nextn_predict_layers"] = 0
 
-    # transformers 4.45+ renamed `rope_scaling` → `rope_parameters` and
-    # `type` → `rope_type` inside the dict. Older DeepSeek source configs
-    # ship the legacy key, but transformers 4.57+ then fails to set
-    # `max_position_embeddings` on PreTrainedConfig and the bundle won't
-    # load via `AutoTokenizer.from_pretrained`. Migrate so every emitted
-    # bundle is forward-compatible.
+    # transformers 4.45+ renamed `rope_scaling` -> `rope_parameters` and
+    # `type` -> `rope_type` inside the dict. Add the newer spelling for
+    # compatibility, but never remove rope_scaling: jang_tools.dsv4.mlx_model
+    # consumes it directly for DSV4 Flash compressed-context YaRN.
     if "rope_scaling" in src_cfg and "rope_parameters" not in src_cfg:
-        rs = src_cfg.pop("rope_scaling")
+        rs = dict(src_cfg["rope_scaling"])
         rp = dict(rs)
         if "type" in rp:
             rp["rope_type"] = rp.pop("type")

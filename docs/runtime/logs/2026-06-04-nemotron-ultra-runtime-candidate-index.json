@@ -1,0 +1,97 @@
+{
+  "failures": [],
+  "interpretation": [
+    "MISSING means the lane has not produced enough no-load proof to accept or reject.",
+    "ACCEPTED speed_candidate lanes are the only lanes that should be promoted.",
+    "Negative-control lanes should not be treated as speed wins even if their compare status is unusual."
+  ],
+  "lanes": [
+    {
+      "best_tps_delta": null,
+      "candidate_log_dir": "docs/runtime/logs/candidate-moe-scheduling",
+      "coherence_counts": null,
+      "compare_status": null,
+      "expected_compare_statuses": [
+        "IMPROVED"
+      ],
+      "failures": [],
+      "gate_status": null,
+      "id": "moe-routed-shared-scheduling",
+      "kind": "speed_candidate",
+      "mamba_ms_delta": null,
+      "missing_outputs": [],
+      "moe_ms_delta": null,
+      "reason": "docs/runtime/logs/candidate-moe-scheduling: missing speed compare JSON, speed gate JSON, experiment result check JSON",
+      "result_json": null,
+      "status": "MISSING",
+      "title": "MoE routed/shared scheduling"
+    },
+    {
+      "best_tps_delta": null,
+      "candidate_log_dir": "docs/runtime/logs/candidate-mamba-dispatch",
+      "coherence_counts": null,
+      "compare_status": null,
+      "expected_compare_statuses": [
+        "IMPROVED"
+      ],
+      "failures": [],
+      "gate_status": null,
+      "id": "mamba-projection-dispatch",
+      "kind": "speed_candidate",
+      "mamba_ms_delta": null,
+      "missing_outputs": [],
+      "moe_ms_delta": null,
+      "reason": "docs/runtime/logs/candidate-mamba-dispatch: missing candidate directory, speed compare JSON, speed gate JSON, experiment result check JSON",
+      "result_json": null,
+      "status": "MISSING",
+      "title": "Mamba projection/dispatch fusion"
+    },
+    {
+      "best_tps_delta": null,
+      "candidate_log_dir": "docs/runtime/logs/candidate-disable-weighted-moe",
+      "coherence_counts": null,
+      "compare_status": null,
+      "expected_compare_statuses": [
+        "FAIL",
+        "UNCHANGED"
+      ],
+      "failures": [],
+      "gate_status": null,
+      "id": "weighted-moe-ablation",
+      "kind": "negative_control",
+      "mamba_ms_delta": null,
+      "missing_outputs": [],
+      "moe_ms_delta": null,
+      "reason": "docs/runtime/logs/candidate-disable-weighted-moe: missing candidate directory, speed compare JSON, speed gate JSON, experiment result check JSON",
+      "result_json": null,
+      "status": "MISSING",
+      "title": "Weighted MoE fast-path A/B"
+    },
+    {
+      "best_tps_delta": null,
+      "candidate_log_dir": "docs/runtime/logs/candidate-disable-activation-bf16",
+      "coherence_counts": null,
+      "compare_status": null,
+      "expected_compare_statuses": [
+        "FAIL"
+      ],
+      "failures": [],
+      "gate_status": null,
+      "id": "activation-bf16-ablation",
+      "kind": "negative_control",
+      "mamba_ms_delta": null,
+      "missing_outputs": [],
+      "moe_ms_delta": null,
+      "reason": "docs/runtime/logs/candidate-disable-activation-bf16: missing candidate directory, speed compare JSON, speed gate JSON, experiment result check JSON",
+      "result_json": null,
+      "status": "MISSING",
+      "title": "BF16 activation retention guard"
+    }
+  ],
+  "log_dir": "docs/runtime/logs",
+  "queue_json": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json",
+  "status": "OPEN",
+  "status_counts": {
+    "MISSING": 4
+  }
+}

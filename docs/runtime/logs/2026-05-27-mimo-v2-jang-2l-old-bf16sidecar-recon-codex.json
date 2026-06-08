@@ -1,0 +1,79 @@
+{
+  "bundle": "/Users/eric/.mlxstudio/models/JANGQ-AI/MiMo-V2.5-JANG_2L",
+  "source": "/Volumes/EricsLLMDrive/jangq-ai/sources/MiMo-V2.5",
+  "created_at": "2026-05-27T18:09:24-0700",
+  "tensors": [
+    {
+      "name": "model.layers.1.mlp.experts.0.gate_proj.weight",
+      "bits": 2,
+      "shape": [
+        2048,
+        4096
+      ],
+      "bundle_weight_dtype": "torch.uint32",
+      "bundle_scales_dtype": "torch.bfloat16",
+      "bundle_biases_dtype": "torch.bfloat16",
+      "source_abs_mean": 0.011717635206878185,
+      "recon_abs_mean": 0.009209898300468922,
+      "mae": 0.0059225959703326225,
+      "rmse": 0.008129367604851723,
+      "max_abs": 0.07428848743438721,
+      "rel_l2": 0.4480535686016083,
+      "cosine": 0.9013083021668711
+    },
+    {
+      "name": "model.layers.1.mlp.experts.0.up_proj.weight",
+      "bits": 2,
+      "shape": [
+        2048,
+        4096
+      ],
+      "bundle_weight_dtype": "torch.uint32",
+      "bundle_scales_dtype": "torch.bfloat16",
+      "bundle_biases_dtype": "torch.bfloat16",
+      "source_abs_mean": 0.008247114717960358,
+      "recon_abs_mean": 0.007074855268001556,
+      "mae": 0.00361707154661417,
+      "rmse": 0.004501629155129194,
+      "max_abs": 0.0374581441283226,
+      "rel_l2": 0.40632203221321106,
+      "cosine": 0.9192522350751822
+    },
+    {
+      "name": "model.layers.1.mlp.experts.0.down_proj.weight",
+      "bits": 2,
+      "shape": [
+        4096,
+        2048
+      ],
+      "bundle_weight_dtype": "torch.uint32",
+      "bundle_scales_dtype": "torch.bfloat16",
+      "bundle_biases_dtype": "torch.bfloat16",
+      "source_abs_mean": 0.009494628757238388,
+      "recon_abs_mean": 0.008427463471889496,
+      "mae": 0.003951105289161205,
+      "rmse": 0.004781012423336506,
+      "max_abs": 0.053466796875,
+      "rel_l2": 0.39657434821128845,
+      "cosine": 0.9232354152148153
+    },
+    {
+      "name": "model.layers.1.self_attn.qkv_proj.weight",
+      "bits": 8,
+      "shape": [
+        14848,
+        4096
+      ],
+      "bundle_weight_dtype": "torch.uint32",
+      "bundle_scales_dtype": "torch.bfloat16",
+      "bundle_biases_dtype": "torch.bfloat16",
+      "source_abs_mean": 0.005449315533041954,
+      "recon_abs_mean": 0.005449223797768354,
+      "mae": 4.887095929007046e-05,
+      "rmse": 6.494565604953095e-05,
+      "max_abs": 0.0010539479553699493,
+      "rel_l2": 0.008602767251431942,
+      "cosine": 0.9999630063469923
+    }
+  ]
+}

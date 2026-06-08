@@ -1,0 +1,636 @@
+{
+  "artifact_capabilities": {
+    "cache_type": "hybrid",
+    "family": "nemotron_h",
+    "modality": "text",
+    "reasoning_parser": "deepseek_r1",
+    "supports_thinking": true,
+    "supports_tools": true,
+    "think_in_template": true,
+    "tool_parser": "nemotron"
+  },
+  "artifacts": [
+    {
+      "bytes": 118373,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780704081.2301977,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-proof-refresh.md",
+      "required": false,
+      "role": "combined no-load refresh output"
+    },
+    {
+      "bytes": 649,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.8254564,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-log-bundle-validation.md",
+      "required": false,
+      "role": "required log presence validation"
+    },
+    {
+      "bytes": 2027,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.8458025,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-status-report.md",
+      "required": false,
+      "role": "human-readable current status"
+    },
+    {
+      "bytes": 7635,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.9015217,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-host-runtime-readiness.json",
+      "required": false,
+      "role": "host memory/disk readiness snapshot"
+    },
+    {
+      "bytes": 6188,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.9013245,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-host-runtime-readiness.md",
+      "required": false,
+      "role": "human-readable host readiness snapshot"
+    },
+    {
+      "bytes": 1410,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.9423194,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-host-cleanup-runbook.json",
+      "required": false,
+      "role": "host cleanup runbook"
+    },
+    {
+      "bytes": 1281,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.9421735,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-host-cleanup-runbook.md",
+      "required": false,
+      "role": "human-readable host cleanup runbook"
+    },
+    {
+      "bytes": 3099,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.962361,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-speed-experiment-plan.md",
+      "required": false,
+      "role": "ranked speed experiment plan"
+    },
+    {
+      "bytes": 6341,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2719543,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-issue-ledger.json",
+      "required": false,
+      "role": "runtime issue ledger"
+    },
+    {
+      "bytes": 5405,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2718298,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-issue-ledger.md",
+      "required": false,
+      "role": "human-readable runtime issue ledger"
+    },
+    {
+      "bytes": 3403,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.290794,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-index.json",
+      "required": false,
+      "role": "runtime candidate index"
+    },
+    {
+      "bytes": 2028,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2906702,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-index.md",
+      "required": false,
+      "role": "human-readable runtime candidate index"
+    },
+    {
+      "bytes": 1884,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3290584,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-launch-guard.json",
+      "required": false,
+      "role": "runtime candidate launch guard"
+    },
+    {
+      "bytes": 1851,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3289638,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-launch-guard.md",
+      "required": false,
+      "role": "human-readable runtime candidate launch guard"
+    },
+    {
+      "bytes": 1773,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.348085,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-cleanup-ready-check.json",
+      "required": false,
+      "role": "runtime cleanup ready check"
+    },
+    {
+      "bytes": 1713,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.347967,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-cleanup-ready-check.md",
+      "required": false,
+      "role": "human-readable runtime cleanup ready check"
+    },
+    {
+      "bytes": 4050,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3670144,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-candidate-contract.json",
+      "required": false,
+      "role": "MoE candidate contract"
+    },
+    {
+      "bytes": 3643,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3668928,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-candidate-contract.md",
+      "required": false,
+      "role": "human-readable MoE candidate contract"
+    },
+    {
+      "bytes": 5115,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.38604,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-execution-ticket.json",
+      "required": false,
+      "role": "MoE execution ticket"
+    },
+    {
+      "bytes": 4702,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3859057,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-execution-ticket.md",
+      "required": false,
+      "role": "human-readable MoE execution ticket"
+    },
+    {
+      "bytes": 7172,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.4071412,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-surface-map.json",
+      "required": false,
+      "role": "MoE runtime source surface map"
+    },
+    {
+      "bytes": 5290,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.4069846,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-surface-map.md",
+      "required": false,
+      "role": "human-readable MoE runtime source surface map"
+    },
+    {
+      "bytes": 10120,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.42776,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-patch-plan.json",
+      "required": false,
+      "role": "MoE runtime patch plan"
+    },
+    {
+      "bytes": 6710,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.4275415,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-patch-plan.md",
+      "required": false,
+      "role": "human-readable MoE runtime patch plan"
+    },
+    {
+      "bytes": 5578,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.4481878,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-delta-contract.json",
+      "required": false,
+      "role": "MoE runtime delta acceptance contract"
+    },
+    {
+      "bytes": 4324,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.4480336,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-delta-contract.md",
+      "required": false,
+      "role": "human-readable MoE runtime delta acceptance contract"
+    },
+    {
+      "bytes": 4479,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.467925,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-mamba-candidate-contract.json",
+      "required": false,
+      "role": "Mamba candidate contract"
+    },
+    {
+      "bytes": 4010,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.4678,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-mamba-candidate-contract.md",
+      "required": false,
+      "role": "human-readable Mamba candidate contract"
+    },
+    {
+      "bytes": 2633,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.981524,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-token-speed-budget.json",
+      "required": true,
+      "role": "target token/s millisecond budgets"
+    },
+    {
+      "bytes": 1406,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723653.981402,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-token-speed-budget.md",
+      "required": false,
+      "role": "human-readable target budgets"
+    },
+    {
+      "bytes": 17223,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.000661,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-component-budget-matrix.json",
+      "required": false,
+      "role": "component-level token/s sensitivity matrix"
+    },
+    {
+      "bytes": 3405,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0003128,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-component-budget-matrix.md",
+      "required": false,
+      "role": "human-readable component budget matrix"
+    },
+    {
+      "bytes": 7981,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0776877,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-patch-spec.json",
+      "required": false,
+      "role": "implementation-facing runtime patch spec"
+    },
+    {
+      "bytes": 6781,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0775354,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-patch-spec.md",
+      "required": false,
+      "role": "human-readable runtime patch spec"
+    },
+    {
+      "bytes": 3156,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0568974,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-shape-contract.json",
+      "required": false,
+      "role": "runtime shape and bit contract"
+    },
+    {
+      "bytes": 2127,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0567367,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-shape-contract.md",
+      "required": false,
+      "role": "human-readable runtime shape contract"
+    },
+    {
+      "bytes": 3267,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2136946,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-preflight.json",
+      "required": false,
+      "role": "runtime candidate preflight"
+    },
+    {
+      "bytes": 3108,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2135706,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-candidate-preflight.md",
+      "required": false,
+      "role": "human-readable candidate preflight"
+    },
+    {
+      "bytes": 6227,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.233783,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-lane-readiness-matrix.json",
+      "required": false,
+      "role": "all-lane runtime readiness matrix"
+    },
+    {
+      "bytes": 5776,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2336695,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-lane-readiness-matrix.md",
+      "required": false,
+      "role": "human-readable lane readiness matrix"
+    },
+    {
+      "bytes": 2856,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2529292,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-next-runbook.json",
+      "required": false,
+      "role": "next runtime runbook"
+    },
+    {
+      "bytes": 2646,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.2528112,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-next-runbook.md",
+      "required": false,
+      "role": "human-readable next runtime runbook"
+    },
+    {
+      "bytes": 19267,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0217984,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json",
+      "required": true,
+      "role": "machine-readable experiment queue"
+    },
+    {
+      "bytes": 10615,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.021459,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.md",
+      "required": false,
+      "role": "human-readable experiment queue"
+    },
+    {
+      "bytes": 1157,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.0970263,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-gate.json",
+      "required": true,
+      "role": "machine-readable speed gate"
+    },
+    {
+      "bytes": 887,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.096924,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-gate.md",
+      "required": false,
+      "role": "human-readable speed gate"
+    },
+    {
+      "bytes": 1490,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3101528,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-fix-acceptance.json",
+      "required": false,
+      "role": "runtime speed fix acceptance audit"
+    },
+    {
+      "bytes": 1365,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.3100498,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-fix-acceptance.md",
+      "required": false,
+      "role": "human-readable speed fix acceptance audit"
+    },
+    {
+      "bytes": 3628,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.1170805,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-compare.json",
+      "required": false,
+      "role": "baseline-vs-baseline compare for current logs"
+    },
+    {
+      "bytes": 877,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.1169274,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-speed-compare.md",
+      "required": false,
+      "role": "human-readable compare report"
+    },
+    {
+      "bytes": 3003,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.1742327,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-cache-parser-contract.json",
+      "required": false,
+      "role": "cache/parser/runtime nuance contract"
+    },
+    {
+      "bytes": 2624,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.1741164,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-cache-parser-contract.md",
+      "required": false,
+      "role": "human-readable cache/parser/runtime nuance contract"
+    },
+    {
+      "bytes": 8215,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.1536417,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-agent-handoff.json",
+      "required": true,
+      "role": "machine-readable downstream agent handoff"
+    },
+    {
+      "bytes": 3749,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780723654.1534307,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-agent-handoff.md",
+      "required": false,
+      "role": "human-readable downstream agent handoff"
+    },
+    {
+      "bytes": 2606,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780615403.491009,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-jangtq1l-bf16-activation-live-probe.json",
+      "required": true,
+      "role": "best live decode source"
+    },
+    {
+      "bytes": 11013,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780616315.6746812,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-layer-decode-weighted-moe-probe.json",
+      "required": true,
+      "role": "layer decode bucket source"
+    },
+    {
+      "bytes": 5203,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780617218.9166186,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-long-coherence-greedy-probe.json",
+      "required": true,
+      "role": "long coherence source"
+    },
+    {
+      "bytes": 3648,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780617823.2902284,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-mamba-component-probe.json",
+      "required": true,
+      "role": "Mamba component source"
+    },
+    {
+      "bytes": 4585,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780616270.8919406,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-moe-weighted-decode-component-probe.json",
+      "required": true,
+      "role": "MoE component source"
+    },
+    {
+      "bytes": 5517,
+      "exists": true,
+      "freshness": "current",
+      "mtime": 1780615838.6058547,
+      "path": "docs/runtime/logs/2026-06-04-nemotron-ultra-projection-tradeoff-probe.json",
+      "required": true,
+      "role": "projection tradeoff source"
+    }
+  ],
+  "commands": {
+    "refresh": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/refresh_runtime_proof_bundle.py --log-dir docs/runtime/logs --summary-out docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-proof-refresh.md",
+    "strict_gate": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/runtime_speed_gate.py --log-dir docs/runtime/logs --strict"
+  },
+  "current_metrics": {
+    "attention_ms": 8.990247966721654,
+    "best_live_source": "2026-06-04-nemotron-ultra-jangtq1l-bf16-activation-live-probe.json::think_math_default",
+    "best_live_tps": 8.335,
+    "mamba_ms": 64.15679008932784,
+    "manual_decode_total_ms": 143.23724881978706,
+    "manual_implied_tps": 6.981424233148621,
+    "moe_ms": 65.77346072299406,
+    "moe_plus_mamba_pct_of_total": 90.70982016402223,
+    "norm_lm_head_ms": 4.3167500407435
+  },
+  "fixed": [
+    "best live speed 8.335 tok/s clears floor 8.000",
+    "attention bucket 8.990 ms is below ceiling 10.000",
+    "norm/lm_head 4.317 ms is below ceiling 5.000",
+    "Mamba component evidence points to projection/dispatch before conv rewrite"
+  ],
+  "lanes": [
+    {
+      "command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "IMPROVED"
+      ],
+      "id": "moe-routed-shared-scheduling",
+      "kind": "speed_candidate",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "title": "MoE routed/shared scheduling"
+    },
+    {
+      "command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-mamba-dispatch --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id mamba-projection-dispatch --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "IMPROVED"
+      ],
+      "id": "mamba-projection-dispatch",
+      "kind": "speed_candidate",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id mamba-projection-dispatch --candidate-log-dir docs/runtime/logs/candidate-mamba-dispatch --out docs/runtime/logs/candidate-mamba-dispatch/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-mamba-dispatch/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "title": "Mamba projection/dispatch fusion"
+    },
+    {
+      "command": "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH=1 PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-disable-weighted-moe --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id weighted-moe-ablation --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "FAIL",
+        "UNCHANGED"
+      ],
+      "id": "weighted-moe-ablation",
+      "kind": "negative_control",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id weighted-moe-ablation --candidate-log-dir docs/runtime/logs/candidate-disable-weighted-moe --out docs/runtime/logs/candidate-disable-weighted-moe/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-disable-weighted-moe/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "title": "Weighted MoE fast-path A/B"
+    },
+    {
+      "command": "JANGTQ_DISABLE_NEMOTRON_ACTIVATION_BF16=1 PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-disable-activation-bf16 --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id activation-bf16-ablation --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+      "expected_compare_statuses": [
+        "FAIL"
+      ],
+      "id": "activation-bf16-ablation",
+      "kind": "negative_control",
+      "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id activation-bf16-ablation --candidate-log-dir docs/runtime/logs/candidate-disable-activation-bf16 --out docs/runtime/logs/candidate-disable-activation-bf16/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-disable-activation-bf16/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+      "title": "BF16 activation retention guard"
+    }
+  ],
+  "log_dir": "docs/runtime/logs",
+  "missing_required_artifacts": [],
+  "partial": [
+    "MoE remains a bottleneck at 65.773 ms",
+    "Mamba remains a bottleneck at 64.157 ms",
+    "coherence gate remains partial (leaks=['factual_japan', 'arithmetic_brief', 'reasoning_apples'], repeats=['factual_japan', 'arithmetic_brief'], no_eos=['reasoning_apples'])"
+  ],
+  "stale_required_artifacts": [],
+  "status": "PARTIAL",
+  "topology": {
+    "attention_kv_cache_entries": 12,
+    "attention_layers": 12,
+    "cache_entries": 60,
+    "layers_total": 108,
+    "mamba_companion_state_entries": 48,
+    "mamba_layers": 48,
+    "moe_layers": 48
+  }
+}

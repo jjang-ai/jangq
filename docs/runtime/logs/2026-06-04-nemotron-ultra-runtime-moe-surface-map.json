@@ -1,0 +1,191 @@
+{
+  "candidate_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/run_runtime_candidate_suite.py --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --baseline-log-dir docs/runtime/logs --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --bundle /Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --wired-limit-gb 105 --live-max-tokens 32 --long-max-tokens 96",
+  "component_timings_ms": {
+    "fc1_latent_proj": 0.230583013035357,
+    "fc2_latent_proj": 0.21191698033362627,
+    "full_moe": 2.107249980326742,
+    "gate": 0.22087496472522616,
+    "norm": 0.20275003043934703,
+    "score_weighted_sum": 0.1764170010574162,
+    "shared_experts": 0.5774999735876918,
+    "switch_mlp": 1.1304999934509397
+  },
+  "contract_status": "READY",
+  "current_speed": {
+    "best_live_tps": 8.335,
+    "mamba_ms": 64.15679008932784,
+    "manual_decode_total_ms": 143.23724881978706,
+    "moe_ms": 65.77346072299406
+  },
+  "invariants": {
+    "drops_mtp": true,
+    "hidden_shape": [
+      1,
+      1,
+      8192
+    ],
+    "indices_shape": [
+      1,
+      1,
+      22
+    ],
+    "keeps_latent_moe_bf16": true,
+    "keeps_router_gates_source_precision": true,
+    "latent_shape": [
+      1,
+      1,
+      2048
+    ],
+    "routed_expert_bits": {
+      "down_proj": 1,
+      "up_proj": 1
+    },
+    "routed_shape": [
+      1,
+      1,
+      22,
+      2048
+    ],
+    "scores_shape": [
+      1,
+      1,
+      22
+    ],
+    "shared_expert_bits": 8
+  },
+  "lane_id": "moe-routed-shared-scheduling",
+  "log_dir": "docs/runtime/logs",
+  "missing": [],
+  "non_goals": [
+    "do not edit vMLX or MLX Studio for this JANG handoff",
+    "do not expand routed 1-bit or shared 8-bit tensors to full precision",
+    "do not lower top-k or hide parser/coherence issues to make a speed row look better",
+    "do not run the Mamba lane until the MoE lane has accepted evidence"
+  ],
+  "post_check_command": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/experiment_result_check.py --queue-json docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-experiment-queue.json --lane-id moe-routed-shared-scheduling --candidate-log-dir docs/runtime/logs/candidate-moe-scheduling --out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.md --json-out docs/runtime/logs/candidate-moe-scheduling/2026-06-04-nemotron-ultra-experiment-result-check.json --strict",
+  "runtime_controls": {
+    "disable_activation_bf16": "JANGTQ_DISABLE_NEMOTRON_ACTIVATION_BF16=1",
+    "disable_switchmlp_fastpath": "JANGTQ_DISABLE_NEMOTRON_SWITCHMLP_FASTPATH=1",
+    "disable_weighted_moe_fastpath": "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH=1",
+    "gather_opt": "JANGTQ_GATHER_OPT",
+    "legacy_disable_switchmlp_fastpath": "JANGTQ_ENABLE_NEMOTRON_SWITCHMLP_FASTPATH=0",
+    "mpp_nax": "JANGTQ_MPP_NAX",
+    "mpp_nax_strict": "JANGTQ_MPP_NAX_STRICT=1"
+  },
+  "source_files": [
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-candidate-contract.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-runtime-moe-execution-ticket.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-token-speed-budget.json",
+    "docs/runtime/logs/2026-06-04-nemotron-ultra-moe-weighted-decode-component-probe.json"
+  ],
+  "source_root": "jang-tools",
+  "status": "READY",
+  "surfaces": [
+    {
+      "anchors": {
+        "TurboQuantSwitchLinear": 48,
+        "def _hydrate_jangtq_model": 831,
+        "switch_mlp": 499
+      },
+      "file": "jang-tools/jang_tools/load_jangtq.py",
+      "id": "loader-hydration",
+      "role": "hydrates switch_mlp tensors into TurboQuantSwitchLinear modules",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH": 1616,
+        "Nemotron-H MoE weighted SwitchMLP decode": 1656,
+        "_switchmlp_weighted_decode": 1463
+      },
+      "file": "jang-tools/jang_tools/load_jangtq.py",
+      "id": "nemotron-weighted-moe-patch",
+      "role": "patches NemotronHMoE decode to call weighted SwitchMLP and shared experts",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "JANGTQ_DISABLE_NEMOTRON_SWITCHMLP_FASTPATH": 1583,
+        "JANGTQ_ENABLE_NEMOTRON_SWITCHMLP_FASTPATH": 1582
+      },
+      "file": "jang-tools/jang_tools/load_jangtq.py",
+      "id": "switchmlp-fastpath-toggle",
+      "role": "controls the SwitchMLP fast path and its negative-control env toggle",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "JANGTQ_DISABLE_NEMOTRON_ACTIVATION_BF16": 1676
+      },
+      "file": "jang-tools/jang_tools/load_jangtq.py",
+      "id": "activation-bf16-toggle",
+      "role": "preserves or disables BF16 activation retention for negative-control proof",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "JANGTQ_GATHER_OPT": 39,
+        "def gather_tq_matmul": 695,
+        "make_gather_tq_decode_broadcast": 658,
+        "make_gather_tq_decode_per_row": 593
+      },
+      "file": "jang-tools/jang_tools/turboquant/gather_tq_kernel.py",
+      "id": "routed-gather-kernel",
+      "role": "routed down/fc2 gather matmul kernel for selected experts",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "JANGTQ_MPP_NAX": 18,
+        "def fused_gate_up_swiglu_matmul": 399,
+        "make_fused_gate_up_swiglu_decode": 271
+      },
+      "file": "jang-tools/jang_tools/turboquant/fused_gate_up_kernel.py",
+      "id": "fused-gate-up-kernel",
+      "role": "fused gate/up/SwiGLU routed expert path used by SwitchMLP",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "build_sorted_group_tiles": 590,
+        "fused_gate_up_swiglu_mpp_nax_grouped_from_rot": 835,
+        "gather_tq_matmul_mpp_nax_grouped_from_rot": 641
+      },
+      "file": "jang-tools/jang_tools/turboquant/mpp_nax_kernel.py",
+      "id": "grouped-nax-proof-surface",
+      "role": "same-expert grouped tile helpers for possible routed scheduling work",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "full_moe": 98,
+        "moe.switch_mlp": 62,
+        "shared_experts": 69,
+        "weighted_decode": 64
+      },
+      "file": "jang-tools/examples/nemotron_ultra/moe_component_probe.py",
+      "id": "moe-component-proof",
+      "role": "measures gate, switch_mlp, weighted_decode, shared_experts, weighted sum, and full_moe",
+      "status": "READY"
+    },
+    {
+      "anchors": {
+        "ACCEPTED": 171,
+        "MoE lane did not improve moe_ms": 145,
+        "moe-routed-shared-scheduling": 144
+      },
+      "file": "jang-tools/examples/nemotron_ultra/experiment_result_check.py",
+      "id": "candidate-verdict-proof",
+      "role": "accepts/rejects the MoE candidate using compare, speed gate, and handoff invariants",
+      "status": "READY"
+    }
+  ],
+  "target": {
+    "moe_cut_ms_proportional": 21.887616388322158,
+    "moe_cut_pct_of_current_moe": 33.27727649986701,
+    "moe_per_layer_cut_ms": 0.455992008090045,
+    "required_total_cut_ms": 43.237248819787055,
+    "target_tps": 10.0
+  },
+  "ticket_status": "READY"
+}

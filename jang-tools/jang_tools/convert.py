@@ -112,6 +112,12 @@ def _sanitize_output_tensor_name(tensor_name: str) -> str:
         return tensor_name.replace("model.visual", "vision_tower", 1)
     if tensor_name == "lm_head.weight" or tensor_name.startswith("lm_head."):
         return "language_model." + tensor_name
+    if ".feed_forward.w1.weight" in tensor_name:
+        return tensor_name.replace(".feed_forward.w1.weight", ".feed_forward.gate_proj.weight")
+    if ".feed_forward.w2.weight" in tensor_name:
+        return tensor_name.replace(".feed_forward.w2.weight", ".feed_forward.down_proj.weight")
+    if ".feed_forward.w3.weight" in tensor_name:
+        return tensor_name.replace(".feed_forward.w3.weight", ".feed_forward.up_proj.weight")
     return tensor_name
 
 

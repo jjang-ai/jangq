@@ -177,6 +177,21 @@ MAMBA_LAYER_CONFIGS = {
     ),
 }
 
+LFM_CONV_LAYER_CONFIGS = {
+    "conv.conv": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="LFM LIV depthwise causal conv state — keep full precision"
+    ),
+    "conv.in_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=4, importance_weight=1.3,
+        description="LFM LIV convolution input projection"
+    ),
+    "conv.out_proj": LayerQuantConfig(
+        min_bits=3, preferred_bits=4, importance_weight=1.3,
+        description="LFM LIV convolution output projection"
+    ),
+}
+
 MOE_LAYER_CONFIGS = {
     # Mixture of Experts specific
     "gate": LayerQuantConfig(
@@ -400,6 +415,30 @@ def _classify_architecture(
     if has_deltanet:
         layers = {**TRANSFORMER_LAYER_CONFIGS, **GATED_DELTANET_CONFIGS}
         num_experts = _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0)))
+        if num_experts > 1:
+            layers.update(MOE_LAYER_CONFIGS)
+            return ArchConfig(
+                arch_type=ArchType.HYBRID_MOE_SSM,
+                attention_type=AttentionType.GQA,
+                model_type=model_type,
+                layer_configs=layers,
+                has_ssm_layers=True,
+                has_moe_layers=True,
+                num_experts=num_experts,
+                num_experts_per_tok=_cfg("num_experts_per_tok", 2),
+            )
+        return ArchConfig(
+            arch_type=ArchType.HYBRID_SSM,
+            attention_type=AttentionType.GQA,
+            model_type=model_type,
+            layer_configs=layers,
+            has_ssm_layers=True,
+        )
+
+    # --- Liquid LFM2/LFM2.5 Hybrid (LIV conv + attention + MoE) ---
+    if model_type in ("lfm2", "lfm2_moe") or "Lfm2" in arch_str:
+        layers = {**TRANSFORMER_LAYER_CONFIGS, **LFM_CONV_LAYER_CONFIGS}
+        num_experts = _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0))) or 0
         if num_experts > 1:
             layers.update(MOE_LAYER_CONFIGS)
             return ArchConfig(

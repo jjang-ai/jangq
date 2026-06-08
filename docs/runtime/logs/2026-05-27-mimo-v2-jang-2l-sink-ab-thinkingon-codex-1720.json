@@ -1,0 +1,26 @@
+{
+  "model": "/Users/eric/.mlxstudio/models/JANGQ-AI/MiMo-V2.5-JANG_2L",
+  "max_tokens": 80,
+  "temp": 0.0,
+  "enable_thinking": true,
+  "variants": [
+    {
+      "mode": "normal",
+      "sink_disabled": false,
+      "elapsed_sec": 13.333,
+      "cjk_count": 0,
+      "prompt": "Answer in concise English. Write three bullet points explaining what a prefix cache does for a local language model server.",
+      "output": "- -1 - -1 -000 -0 - - -00 -010 - -.0100 - |\n0.. -reatment1}1 -    -}1011111 -.1110oline. in. in. in in - - -}1} -} each1 - - - - -} than",
+      "stderr": "/Users/eric/jang/jang-tools/.venv/lib/python3.11/site-packages/transformers/modeling_rope_utils.py:1034: FutureWarning: `rope_config_validation` is deprecated and has been removed. Its functionality has been moved to RotaryEmbeddingConfigMixin.validate_rope method. PreTrainedConfig inherits this class, so please call self.validate_rope() instead. Also, make sure to use the new rope_parameters syntax. You can call self.standardize_rope_params() in the meantime.\n  warnings.warn(\n"
+    },
+    {
+      "mode": "sink_disabled",
+      "sink_disabled": true,
+      "elapsed_sec": 13.157,
+      "cjk_count": 0,
+      "prompt": "Answer in concise English. Write three bullet points explaining what a prefix cache does for a local language model server.",
+      "output": "0. -. - -12 - - -0 - - -1 - - - -0 - -0omin2 -}   00} -0 - - - - - - - - -} - - - - - - - - - -.0   . -   0   1 -111                             1 -   1 -   }0    -",
+      "stderr": "/Users/eric/jang/jang-tools/.venv/lib/python3.11/site-packages/transformers/modeling_rope_utils.py:1034: FutureWarning: `rope_config_validation` is deprecated and has been removed. Its functionality has been moved to RotaryEmbeddingConfigMixin.validate_rope method. PreTrainedConfig inherits this class, so please call self.validate_rope() instead. Also, make sure to use the new rope_parameters syntax. You can call self.standardize_rope_params() in the meantime.\n  warnings.warn(\n"
+    }
+  ]
+}

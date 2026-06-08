@@ -100,36 +100,62 @@ class TurboQuantSwitchLinear(nn.Module):
         return mx.stack(results)
 
     def __call__(self, x: mx.array, indices: mx.array, sorted_indices=False) -> mx.array:
-        """x: (B, S, in), indices: (B, S, K) → (B, S, K, out)"""
-        B, S, K = indices.shape[0], indices.shape[1], indices.shape[-1]
+        """Apply selected experts.
 
-        # Dequant all needed experts
-        unique = mx.unique(indices.reshape(-1))
-        mx.eval(unique)
-        expert_list = unique.tolist()
+        Unsorted SwitchGLU calls pass x with two singleton routing axes and
+        indices shaped (..., K), returning (..., K, out).  Sorted prefill calls
+        pass flattened indices shaped (N,), returning (N, out).
+        """
+        x_mat = x
+        while x_mat.ndim > 2 and x_mat.shape[-2] == 1:
+            x_mat = x_mat.squeeze(-2)
+
+        if indices.ndim == 1:
+            prefix = (indices.shape[0],)
+            K = 1
+            idx_rows = indices.reshape(-1, 1)
+            return_flat = True
+        else:
+            prefix = tuple(indices.shape[:-1])
+            K = indices.shape[-1]
+            idx_rows = indices.reshape(-1, K)
+            return_flat = False
+        if x_mat.ndim == len(prefix) + 2 and x_mat.shape[-2] == K:
+            x_rows_by_k = x_mat.reshape(-1, K, self.in_features)
+            x_rows = None
+        else:
+            x_rows_by_k = None
+            x_rows = x_mat.reshape(-1, self.in_features)
+
+        # Dequant all needed experts.  Some deployed MLX builds do not expose
+        # mx.unique, so derive the small active-expert set on the host.
+        mx.eval(indices)
+        expert_list = sorted(set(np.array(indices).reshape(-1).astype(np.int64).tolist()))
         expert_weights = {int(e): self._dequant_experts([int(e)])[0] for e in expert_list}
 
         # Compute output per expert assignment
-        out = mx.zeros((B, S, K, self.out_features), dtype=x.dtype)
+        out = mx.zeros((idx_rows.shape[0], K, self.out_features), dtype=x.dtype)
         for k in range(K):
             for e_idx, w in expert_weights.items():
-                mask = (indices[:, :, k] == e_idx)
+                mask = (idx_rows[:, k] == e_idx)
                 if mx.any(mask):
-                    r = x @ w.T
-                    out_k = out[:, :, k, :]
-                    out = out.at[:, :, k, :].add(
-                        mx.where(mask[:, :, None], r, mx.zeros_like(r))
+                    x_k = x_rows_by_k[:, k, :] if x_rows_by_k is not None else x_rows
+                    r = x_k @ w.T
+                    out = out.at[:, k, :].add(
+                        mx.where(mask[:, None], r, mx.zeros_like(r))
                     )
 
         if "bias" in self:
             for k in range(K):
                 for e_idx in expert_list:
-                    mask = (indices[:, :, k] == int(e_idx))
+                    mask = (idx_rows[:, k] == int(e_idx))
                     if mx.any(mask):
-                        out = out.at[:, :, k, :].add(
-                            mx.where(mask[:, :, None], self.bias[int(e_idx)], mx.zeros_like(self.bias[0]))
+                        out = out.at[:, k, :].add(
+                            mx.where(mask[:, None], self.bias[int(e_idx)], mx.zeros_like(self.bias[0]))
                         )
-        return out
+        if return_flat:
+            return out[:, 0, :][:, None, :]
+        return out.reshape(*prefix, K, 1, self.out_features)
 
 
 # ── Conversion utilities ──────────────────────────────────────────

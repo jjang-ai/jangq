@@ -1,0 +1,63 @@
+{
+  "activation_bf16_disable_env": "",
+  "bundle": "/Volumes/EricsLLMDrive/jangq-ai/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L",
+  "generation_config_sampler": "make_sampler(temp=1.0, top_p=0.95)",
+  "max_tokens": 16,
+  "rows": [
+    {
+      "decode_tps_excluding_first": 8.23,
+      "enable_thinking": false,
+      "generated_tokens": 12,
+      "id": "nt_math_default",
+      "prompt_tokens": 26,
+      "text": "4. P.S. The answer is 4.<|im_end|>",
+      "token_ids": [
+        1052,
+        1046,
+        1390,
+        3051,
+        1046,
+        1531,
+        4832,
+        1395,
+        1032,
+        1052,
+        1046,
+        11
+      ],
+      "ttft_s": 33.938,
+      "wall_s": 35.275
+    },
+    {
+      "decode_tps_excluding_first": 8.261,
+      "enable_thinking": false,
+      "generated_tokens": 16,
+      "id": "nt_capital_default",
+      "prompt_tokens": 29,
+      "text": "The capital of Japan is Tokyo. P.S. Tokyo is the capital city of",
+      "token_ids": [
+        1784,
+        8961,
+        1307,
+        6777,
+        1395,
+        23286,
+        1046,
+        1390,
+        3051,
+        1046,
+        23286,
+        1395,
+        1278,
+        8961,
+        5970,
+        1307
+      ],
+      "ttft_s": 0.961,
+      "wall_s": 2.777
+    }
+  ],
+  "sampler": "default",
+  "switchmlp_fastpath_env": "",
+  "wired_limit_gb": 105
+}

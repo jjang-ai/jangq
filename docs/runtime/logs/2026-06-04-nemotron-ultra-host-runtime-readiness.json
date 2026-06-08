@@ -1,0 +1,100 @@
+{
+  "bundle": "/Users/eric/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L",
+  "commands": {
+    "refresh": "PYTHONPATH=jang-tools jang-tools/.venv/bin/python jang-tools/examples/nemotron_ultra/host_runtime_readiness.py --bundle /Users/eric/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-JANGTQ_1L --log-dir docs/runtime/logs"
+  },
+  "disk": {
+    "bundle": {
+      "available_gib": 1376.0,
+      "capacity": "63%",
+      "filesystem": "/dev/disk3s5",
+      "mount": "/System/Volumes/Data",
+      "size_gib": 3721.0,
+      "used_gib": 2318.0
+    },
+    "log_dir": {
+      "available_gib": 1376.0,
+      "capacity": "63%",
+      "filesystem": "/dev/disk3s5",
+      "mount": "/System/Volumes/Data",
+      "size_gib": 3721.0,
+      "used_gib": 2318.0
+    }
+  },
+  "high_rss_processes": [
+    {
+      "command": "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex --yolo resume",
+      "rss_gib": 0.5308380126953125
+    },
+    {
+      "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd",
+      "rss_gib": 0.50762939453125
+    },
+    {
+      "command": "/Applications/Discord.app/Contents/Frameworks/Discord Helper (Renderer).app/Contents/MacOS/Discord Helper (Renderer) --type=renderer --user-data-dir=/Users/eric/Library/Application Support/discord --standard-schemes=disclip --secure-schemes=disclip,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=disclip,sentry-ipc --streaming-schemes=disclip --app-path=/Applications/Discord.app/Contents/Resources/app.asar --no-sandbox --no-zygote --enable-blink-features=EnumerateDevices,AudioOutputDevices --autoplay-policy=no-user-gesture-required --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=6 --time-ticks-at-unix-epoch=-1780706979544332 --launch-time-ticks=1292027421 --shared-files --field-trial-handle=1718379636,r,12230779718568364321,6918296377303196006,262144 --enable-features=ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=AllowAggressiveThrottlingWithWebSocket,HardwareMediaKeyHandling,IntensiveWakeUpThrottling,MacWebContentsOcclusion,MediaSessionService,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,UseEcoQoSForBackgroundProcess,WinRetrieveSuggestionsOnlyOnDemand --variations-seed-version --enable-node-leakage-in-renderers",
+      "rss_gib": 0.3716278076171875
+    },
+    {
+      "command": "/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd",
+      "rss_gib": 0.36224365234375
+    },
+    {
+      "command": "/Applications/Slack.app/Contents/Frameworks/Slack Helper (Renderer).app/Contents/MacOS/Slack Helper (Renderer) --type=renderer --user-data-dir=/Users/eric/Library/Containers/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack --standard-schemes=app,slack-webapp-dev --enable-sandbox --secure-schemes=app,slack-webapp-dev,sentry-ipc --bypasscsp-schemes=slack-webapp-dev,sentry-ipc --cors-schemes=slack-webapp-dev,sentry-ipc --fetch-schemes=slack-webapp-dev,sentry-ipc --service-worker-schemes=slack-webapp-dev --app-path=/Applications/Slack.app/Contents/Resources/app-arm64.asar --enable-sandbox --enable-blink-features=ExperimentalJSProfiler --disable-blink-features=CustomizableSelect --force-color-profile=display-p3-d65 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780706979542896 --launch-time-ticks=1266432014 --shared-files --field-trial-handle=1718379636,r,3221813994612234732,9347406774625481651,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitMac,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=AllowAggressiveThrottlingWithWebSocket,CalculateNativeWinOcclusion,DropInputEventsWhilePaintHolding,EnableWatermarkView,EnumerateDevicesRelaxedCache,HardwareMediaKeyHandling,IntensiveWakeUpThrottling,LocalNetworkAccessChecks,LogJsConsoleMessages,PostQuantumKyber,RequestInitiatorSiteLockEnfocement,ScreenAIOCREnabled,SkipEmptyDisplayHotplugEvent,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation,WebRtcHideLocalIpsWithMdns,WinRetrieveSuggestionsOnlyOnDemand --variations-seed-version --pseudonymization-salt-handle=1935764596,r,90380828058812681,4875636096419484633,4 --trace-process-track-uuid=3190708990060038890 --window-type=main --seatbelt-client=43",
+      "rss_gib": 0.356201171875
+    },
+    {
+      "command": "/System/Library/PrivateFrameworks/PhotoAnalysis.framework/Versions/A/Support/photoanalysisd",
+      "rss_gib": 0.2978973388671875
+    },
+    {
+      "command": "/Applications/Warp.app/Contents/MacOS/stable",
+      "rss_gib": 0.2230682373046875
+    },
+    {
+      "command": "/Applications/Codex.app/Contents/MacOS/Codex",
+      "rss_gib": 0.205963134765625
+    }
+  ],
+  "interpretation": [
+    "Saved speed logs still point at MoE and Mamba compute/dispatch as the primary bottlenecks.",
+    "Host pressure can add noise or stalls, so rerun expensive probes only when this report is READY or warnings are understood.",
+    "Closing high-RSS apps may help stability, but it is not proven to fix the current 65.773 ms MoE and 64.157 ms Mamba buckets."
+  ],
+  "log_dir": "docs/runtime/logs",
+  "memory": {
+    "memory_pressure": {
+      "pressure": "OK",
+      "swapins": 6311634,
+      "swapouts": 6467217
+    },
+    "total_gib": 128.0,
+    "vm_stat": {
+      "active_gib": 10.438385009765625,
+      "compressed_gib": 0.5077056884765625,
+      "free_like_gib": 111.42680358886719,
+      "page_size": 16384,
+      "pages": {
+        "active": 684090,
+        "copy-on-write": 97961005,
+        "free": 6343352,
+        "inactive": 630281,
+        "occupied_by_compressor": 33273,
+        "purgeable": 27245,
+        "purged": 2542736,
+        "reactivated": 8159679,
+        "speculative": 301589,
+        "stored_in_compressor": 332452,
+        "throttled": 0,
+        "wired_down": 286711,
+        "zero_filled": 2405506721
+      },
+      "wired_gib": 4.3748626708984375
+    }
+  },
+  "status": "READY",
+  "thresholds": {
+    "min_disk_free_gib": 25.0,
+    "target_wired_gib": 105.0
+  },
+  "warnings": []
+}

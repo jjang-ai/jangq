@@ -18,7 +18,12 @@ _STATE_TENSOR_LEAVES = {"A_log", "D", "dt_bias"}
 def forced_passthrough_bits(tensor_name: str) -> int | None:
     """Return the storage bit width for state tensors that must not quantize."""
     leaf = tensor_name.rsplit(".", 1)[-1]
-    if tensor_name.endswith("conv1d.weight") or tensor_name.endswith("conv1d.bias"):
+    if (
+        tensor_name.endswith("conv1d.weight")
+        or tensor_name.endswith("conv1d.bias")
+        or tensor_name.endswith("conv.conv.weight")
+        or tensor_name.endswith("conv.conv.bias")
+    ):
         return 16
     if leaf in _STATE_TENSOR_LEAVES:
         return 16
@@ -34,7 +39,7 @@ def prepare_mlx_passthrough_tensor(tensor_name: str, tensor: np.ndarray) -> np.n
     """
     out = tensor
     if (
-        tensor_name.endswith("conv1d.weight")
+        (tensor_name.endswith("conv1d.weight") or tensor_name.endswith("conv.conv.weight"))
         and getattr(out, "ndim", None) == 3
         and out.shape[-1] != 1
     ):

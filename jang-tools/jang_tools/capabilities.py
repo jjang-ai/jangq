@@ -67,8 +67,14 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "mistral3":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
     "mistral4":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
     # Gemma 4 / 3
+    # gemma4_unified* is the official 2026-06 release naming for the
+    # omni-modal (text+image+audio+video) line; the preview shipped as
+    # plain gemma4*. Same backbone — register both so capability
+    # resolution + verify_directory don't lean on the substring fallback.
     "gemma4":           ("gemma4",      "gemma4",      "gemma4",   False, "kv"),
     "gemma4_text":      ("gemma4",      "gemma4",      "gemma4",   False, "kv"),
+    "gemma4_unified":      ("gemma4",   "gemma4",      "gemma4",   False, "kv"),
+    "gemma4_unified_text": ("gemma4",   "gemma4",      "gemma4",   False, "kv"),
     "gemma3":           ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3_text":      ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
     "gemma3n":          ("gemma4",      "gemma4",      "gemma4",   False, "hybrid"),
@@ -81,6 +87,19 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # `content` null — visible as empty UI bubbles on thinking-off prompts.
     "bailing_hybrid":   ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
     "bailing_moe_v2_5": ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
+    # Liquid LFM2/LFM2.5 hybrid LIV-conv + GQA + MoE. The template does not
+    # pre-open a think block, but model outputs use <think>...</think> and
+    # tool calls use the Liquid Python-call format parsed by vmlx as "lfm2".
+    "lfm2":             ("lfm2",       "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm2_moe":         ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm2_5":           ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm25":            ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    # StepFun Step 3.7 Flash is a Step3p7 VLM wrapper around Step3p5 text
+    # weights. The chat template opens <think> on assistant prefill and the
+    # official serving recipes use the Step3p5 XML tool parser. Attention is
+    # standard KV with a full/sliding-window layer pattern, not MLA or SSM.
+    "step3p5":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
+    "step3p7":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
     # Tencent Hy3-preview (HYV3ForCausalLM) — text-only MoE, 295B/21B active.
     # GQA + qk_norm, sigmoid router with expert_bias (DSV3-style aux-free balancing),
     # 1 shared expert, first_k_dense_replace=1, native MTP layer, 256K context.
@@ -281,6 +300,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
                   "functionary", "glm47", "minimax", "gemma4", "native",
+                  "lfm2",
                   # DSV4 native DSML format + Zaya XML tool format. Both
                   # have dedicated parsers in vmlx_engine.tool_parsers.
                   # Without these, verify_directory rejected legitimate
