@@ -348,12 +348,25 @@ Additional remote sanity checks:
 
 Upload transport note: the default HF/Xet path stalled on the 26B upload at zero completed pre-uploads. Retrying with `HF_HUB_DISABLE_XET=1` and one worker completed successfully; the same non-Xet path was used for 31B and 12B.
 
-OsaurusAI status:
+Uploaded and remote-verified OsaurusAI repos:
 
-- Local stage folders for all five OsaurusAI repos remain ready under `/Volumes/EricsLLMDrive/hf-stage/gemma4-qat-jang4m/OsaurusAI`.
-- Each OsaurusAI staged folder preserves `osaurus-x-banner.png` and an Osaurus-branded README.
-- Upload is not complete: the currently installed HF CLI token authenticates as `dealignai` with `JANGQ-AI` org access and returned `403 Forbidden` when creating `OsaurusAI/gemma-4-E2B-it-qat-JANG_4M`.
-- A separate Osaurus-capable HF token must be installed through `hf auth login` / keychain before the Osaurus upload lane can proceed.
+| Repo | Files | Safetensors shards | Remote bytes | Verification |
+| --- | ---: | ---: | ---: | --- |
+| `OsaurusAI/gemma-4-E2B-it-qat-JANG_4M` | 15 | 4 | 7,837,801,248 | PASS |
+| `OsaurusAI/gemma-4-E4B-it-qat-JANG_4M` | 17 | 6 | 10,821,750,514 | PASS |
+| `OsaurusAI/gemma-4-26B-A4B-it-qat-JANG_4M` | 29 | 18 | 18,525,443,853 | PASS |
+| `OsaurusAI/gemma-4-31B-it-qat-JANG_4M` | 36 | 25 | 26,548,519,421 | PASS |
+| `OsaurusAI/gemma-4-12B-it-qat-JANG_4M` | 21 | 10 | 10,167,836,847 | PASS |
+
+Remote checks confirmed each OsaurusAI repo has `README.md`, `config.json`, `jang_config.json`, `model.safetensors.index.json`, tokenizer files, safetensor shards, and `osaurus-x-banner.png`.
+
+Additional remote sanity checks:
+
+- All five uploaded OsaurusAI repos declare `weight_format: jang_affine` in both `config.json` and `jang_config.json`.
+- `OsaurusAI/gemma-4-26B-A4B-it-qat-JANG_4M` contains `language_model.model.layers.0.experts.switch_glu.gate_proj.weight`.
+- `OsaurusAI/gemma-4-26B-A4B-it-qat-JANG_4M` does not contain stale `language_model.model.layers.0.experts.gate_up_proj.weight`.
+- `OsaurusAI/gemma-4-12B-it-qat-JANG_4M` README includes the text-only current vMLX runtime caveat for `gemma4_unified`.
+- OsaurusAI uploads used the Keychain token for HF identity `Osaurus-AI`, verified with access to `OsaurusAI`; raw token values were not printed or stored in the repo.
 
 ## Current Classification
 
