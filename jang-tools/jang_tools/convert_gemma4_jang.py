@@ -1,8 +1,9 @@
 """Gemma 4 (gemma4_unified) omni-modal -> JANG (MLX-native affine) conversion.
 
-Produces a JANG_4M dense bundle: **8-bit affine attention (q/k/v/o) + 4-bit
-affine MLP (gate/up/down)**, with the tied token embedding/output projection,
-thin multimodal embedders, norms, and layer_scalar kept fp16.
+Produces a JANG_4M bundle: **8-bit affine attention (q/k/v/o) + 8-bit MoE
+router projections + 4-bit affine MLP/expert bulk weights**, with the tied
+token embedding/output projection, Gemma 4 per-layer embedding/projector
+gates, thin multimodal embedders, norms, and layer_scalar kept fp16.
 
 This reuses the verified gemma4 plumbing from `convert_gemma4_mxfp.py`
 (`sanitize_key`, multimodal passthrough fragments, single-file scan, no-+1 norm
@@ -16,8 +17,8 @@ passthrough, k_eq_v missing-v_proj tolerance) and differs only in:
     garbage (the "config-metadata bit bug",
     research/JANGTQ-CONFIG-METADATA-BUG-2026-04-24.md).
 
-Dense note: the MoE-only allocation rules (MLP gate/down asymmetry, bf16
-activations, expert codebooks) do NOT apply here — gemma4-12B is dense.
+MoE note: Gemma 4 26B-A4B has a router. The router projection stays 8-bit;
+the stacked expert gate/up/down payload remains 4-bit.
 """
 
 from __future__ import annotations
@@ -47,7 +48,8 @@ from jang_tools.convert_gemma4_mxfp import (
 
 # JANG_4M dense tier widths.
 ATTN_BITS = 8       # CRITICAL: self_attn q/k/v/o
-MLP_BITS = 4        # COMPRESS: mlp gate/up/down
+ROUTER_BITS = 8     # CRITICAL: MoE router projection
+MLP_BITS = 4        # COMPRESS: mlp/expert gate/up/down
 DEFAULT_TOP_BITS = 8  # config.json top-level default (matches the 8-bit majority)
 
 
@@ -57,6 +59,12 @@ def jang_bits(tensor_name: str) -> int | None:
     if tensor_name.endswith("_scale_inv"):
         return None
     if any(frag in name for frag in _MULTIMODAL_FRAGMENTS):
+        return None
+    if (
+        tensor_name.endswith("embed_tokens_per_layer.weight")
+        or tensor_name.endswith("per_layer_input_gate.weight")
+        or tensor_name.endswith("per_layer_projection.weight")
+    ):
         return None
     if (
         "norm" in name
@@ -72,6 +80,10 @@ def jang_bits(tensor_name: str) -> int | None:
         name.endswith(f"{p}.weight") for p in ("q_proj", "k_proj", "v_proj", "o_proj")
     ):
         return ATTN_BITS
+    if ".router." in name:
+        if name.endswith(".proj.weight"):
+            return ROUTER_BITS
+        return None
     if tensor_name.endswith("embed_tokens.weight"):
         return None
     # mlp gate/up/down + any other 2D decoder linear
@@ -122,6 +134,9 @@ def main() -> None:
 
     config = json.loads((src / "config.json").read_text(encoding="utf-8"))
     text_cfg = config.get("text_config", config)
+    has_vision = bool(config.get("vision_config"))
+    has_audio = bool(config.get("audio_config"))
+    has_video = bool(config.get("video_config"))
     n_layers = int(text_cfg.get("num_hidden_layers", 0))
     layer_types = text_cfg.get("layer_types") or []
     n_full = sum(1 for t in layer_types if t == "full_attention")
@@ -132,8 +147,8 @@ def main() -> None:
     print(f"  Source:  {src}")
     print(f"  Output:  {out}")
     print(f"  Layers:  {n_layers}  (full-attn {n_full} / sliding {n_layers - n_full})")
-    print(f"  Bits:    attn={ATTN_BITS}  mlp={MLP_BITS}  embed=fp16  (group_size {gs})")
-    print(f"  Norm:    scale_shift=0 (NO +1) ; tied embedding/output fp16 ; multimodal embedders fp16 ; MTP none")
+    print(f"  Bits:    attn={ATTN_BITS}  router={ROUTER_BITS}  mlp={MLP_BITS}  embed=fp16  (group_size {gs})")
+    print("  Norm:    scale_shift=0 (NO +1) ; tied/per-layer embeddings, media gates/projectors fp16 ; MTP none")
 
     progress.phase(1, 3, "scan")
     tensors = _scan_source(src)
@@ -166,7 +181,13 @@ def main() -> None:
             return
         shard_idx += 1
         name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
-        save_file(shard_tensors, str(out / name))
+        mx.save_safetensors(
+            str(out / name),
+            {
+                k: (mx.array(v) if isinstance(v, np.ndarray) else v)
+                for k, v in shard_tensors.items()
+            },
+        )
         for k in shard_tensors:
             shard_map[k] = name
         print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.2f} GB")
@@ -188,20 +209,56 @@ def main() -> None:
         tensor = _load_tensor(sf_path, tensor_name, shape)
         if bits is None or tensor.ndim < 2:
             tensor = _prepare_passthrough(out_name, tensor)
-            add_tensor(out_name, tensor.astype(np.float16))
+            if any(frag in out_name.lower() for frag in _MULTIMODAL_FRAGMENTS):
+                add_tensor(out_name, mx.array(tensor.astype(np.float32), dtype=mx.bfloat16))
+            else:
+                add_tensor(out_name, tensor.astype(np.float16))
             n_pass += 1
         else:
-            qw, qs, qb = _affine_quantize(tensor, bits=bits, group_size=gs)
             base = out_name[: -len(".weight")] if out_name.endswith(".weight") else out_name
-            add_tensor(f"{base}.weight", qw)
-            add_tensor(f"{base}.scales", qs)
-            add_tensor(f"{base}.biases", qb)
-            # Per-module override ONLY when this module differs from the 8-bit
-            # top-level default (i.e. the 4-bit MLP/embed modules).
-            if bits != DEFAULT_TOP_BITS:
-                overrides[base] = {"group_size": gs, "bits": bits, "mode": "affine"}
-            n_affine += 1
-            del qw, qs, qb
+            quant_jobs = [(base, tensor)]
+            if ".experts.gate_up_proj" in base:
+                if tensor.ndim < 3 or tensor.shape[1] % 2 != 0:
+                    raise ValueError(
+                        f"Gemma4 expert gate_up tensor has unexpected shape: "
+                        f"{tensor_name} {tensor.shape}"
+                    )
+                gate, up = np.split(tensor, 2, axis=1)
+                quant_jobs = [
+                    (
+                        base.replace(
+                            ".experts.gate_up_proj", ".experts.switch_glu.gate_proj"
+                        ),
+                        gate,
+                    ),
+                    (
+                        base.replace(
+                            ".experts.gate_up_proj", ".experts.switch_glu.up_proj"
+                        ),
+                        up,
+                    ),
+                ]
+            elif ".experts.down_proj" in base:
+                quant_jobs = [
+                    (
+                        base.replace(
+                            ".experts.down_proj", ".experts.switch_glu.down_proj"
+                        ),
+                        tensor,
+                    )
+                ]
+
+            for job_base, job_tensor in quant_jobs:
+                qw, qs, qb = _affine_quantize(job_tensor, bits=bits, group_size=gs)
+                add_tensor(f"{job_base}.weight", qw)
+                add_tensor(f"{job_base}.scales", qs)
+                add_tensor(f"{job_base}.biases", qb)
+                # Per-module override ONLY when this module differs from the 8-bit
+                # top-level default (i.e. the 4-bit MLP/embed modules).
+                if bits != DEFAULT_TOP_BITS:
+                    overrides[job_base] = {"group_size": gs, "bits": bits, "mode": "affine"}
+                n_affine += 1
+                del qw, qs, qb
         del tensor
         if (n_affine + n_pass) % 200 == 0:
             gc.collect(); mx.clear_cache()
@@ -224,6 +281,15 @@ def main() -> None:
     # config.json: mlx-loadable mixed-bit quantization block.
     config.pop("quantization_config", None)
     config["weight_format"] = "jang_affine"
+    config["has_vision"] = has_vision
+    config["has_audio"] = has_audio
+    config["has_video"] = has_video
+    config["modalities"] = {
+        "text": True,
+        "vision": has_vision,
+        "audio": has_audio,
+        "video": has_video,
+    }
     quant_block: dict = {
         "group_size": gs,
         "bits": DEFAULT_TOP_BITS,
@@ -245,17 +311,38 @@ def main() -> None:
             "name": src.name,
             "architecture": text_cfg.get("model_type", config.get("model_type", "gemma4_unified_text")),
         },
-        "has_vision": True,
-        "has_audio": True,
+        "has_vision": has_vision,
+        "has_audio": has_audio,
+        "has_video": has_video,
+        "modalities": {
+            "text": True,
+            "vision": has_vision,
+            "audio": has_audio,
+            "video": has_video,
+        },
         "quantization": {
             "method": "jang_affine",
             "quantization_backend": "mx.quantize",
             "mode": "affine",
             "group_size": gs,
-            "tier_bits": {"attention": ATTN_BITS, "mlp": MLP_BITS, "embed": 16},
+            "tier_bits": {
+                "attention": ATTN_BITS,
+                "router": ROUTER_BITS,
+                "mlp": MLP_BITS,
+                "embed": 16,
+                "per_layer_media": 16,
+            },
             "tied_embedding": "fp16_passthrough",
             "norm_convention": "gemma4_scale_shift_zero",
             "multimodal": "fp16_passthrough_embedders_early_fusion",
+            "preserved_modal_components": [
+                component
+                for enabled, component in (
+                    (has_vision, "vision_embedder"),
+                    (has_audio, "audio_embedder"),
+                )
+                if enabled
+            ],
             "mtp_policy": "none",
             "per_module_override_count": len(overrides),
             "passthrough_tensor_count": n_pass,
@@ -263,7 +350,7 @@ def main() -> None:
         "runtime": {
             "total_weight_bytes": total_size,
             "total_weight_gb": round(total_size / (1024 ** 3), 2),
-            "attention": "hybrid_swa_full_5to1",
+            "attention": "hybrid_swa_full",
             "sliding_window": text_cfg.get("sliding_window"),
             "attention_k_eq_v_on_full_layers": bool(text_cfg.get("attention_k_eq_v")),
             "full_attention_layers": [i for i, t in enumerate(layer_types) if t == "full_attention"],

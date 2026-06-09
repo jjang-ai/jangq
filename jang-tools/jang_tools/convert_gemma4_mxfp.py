@@ -345,6 +345,12 @@ def _copy_sidecars(src: Path, out: Path) -> None:
         if tok_cfg.exists():
             cfg = json.loads(tok_cfg.read_text(encoding="utf-8"))
             cfg["chat_template"] = patched
+            gen_cfg = out / "generation_config.json"
+            if gen_cfg.exists():
+                gen = json.loads(gen_cfg.read_text(encoding="utf-8"))
+                for key in ("bos_token_id", "eos_token_id", "pad_token_id"):
+                    if gen.get(key) is not None:
+                        cfg[key] = gen[key]
             tok_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
@@ -409,6 +415,9 @@ def main(default_bits: int = 4) -> None:
 
     config = json.loads((src / "config.json").read_text(encoding="utf-8"))
     text_cfg = config.get("text_config", config)
+    has_vision = bool(config.get("vision_config"))
+    has_audio = bool(config.get("audio_config"))
+    has_video = bool(config.get("video_config"))
     n_layers = int(text_cfg.get("num_hidden_layers", 0))
     layer_types = text_cfg.get("layer_types") or []
     n_full = sum(1 for t in layer_types if t == "full_attention")
@@ -420,7 +429,8 @@ def main(default_bits: int = 4) -> None:
     print(f"  Output:  {out}")
     print(f"  Layers:  {n_layers}  (full-attn {n_full} / sliding {n_layers - n_full})")
     print(f"  Norm:    scale_shift=0 (NO +1)")
-    print(f"  Modal:   vision+audio embedders preserved fp16 (early-fusion)")
+    active_modal = [name for name, enabled in (("vision", has_vision), ("audio", has_audio), ("video", has_video)) if enabled]
+    print(f"  Modal:   {','.join(active_modal) if active_modal else 'text'} embedders preserved fp16 where present")
     if profile_suffixes:
         print(f"  Repair:  selective fp16 passthrough profile={profile}")
     print(f"  MTP:     none")
@@ -463,7 +473,13 @@ def main(default_bits: int = 4) -> None:
             return
         shard_idx += 1
         name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
-        save_file(shard_tensors, str(out / name))
+        mx.save_safetensors(
+            str(out / name),
+            {
+                k: (mx.array(v) if isinstance(v, np.ndarray) else v)
+                for k, v in shard_tensors.items()
+            },
+        )
         for key in shard_tensors:
             shard_map[key] = name
         print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.2f} GB")
@@ -494,7 +510,10 @@ def main(default_bits: int = 4) -> None:
         tensor = _load_tensor(sf_path, tensor_name, shape)
         if policy.method == "passthrough" or tensor.ndim < 2:
             tensor = _prepare_passthrough(out_name, tensor)
-            add_tensor(out_name, tensor.astype(np.float16))
+            if any(frag in out_name.lower() for frag in _MULTIMODAL_FRAGMENTS):
+                add_tensor(out_name, mx.array(tensor.astype(np.float32), dtype=mx.bfloat16))
+            else:
+                add_tensor(out_name, tensor.astype(np.float16))
             total_passthrough += 1
         else:
             qw, qs, qb = _affine_quantize(
@@ -534,6 +553,15 @@ def main(default_bits: int = 4) -> None:
 
     config.pop("quantization_config", None)
     config["weight_format"] = weight_format
+    config["has_vision"] = has_vision
+    config["has_audio"] = has_audio
+    config["has_video"] = has_video
+    config["modalities"] = {
+        "text": True,
+        "vision": has_vision,
+        "audio": has_audio,
+        "video": has_video,
+    }
     config["quantization"] = {
         "bits": args.bits,
         "group_size": args.group_size,
@@ -564,8 +592,15 @@ def main(default_bits: int = 4) -> None:
             "name": src.name,
             "architecture": text_cfg.get("model_type", config.get("model_type", "gemma4_unified_text")),
         },
-        "has_vision": True,
-        "has_audio": True,
+        "has_vision": has_vision,
+        "has_audio": has_audio,
+        "has_video": has_video,
+        "modalities": {
+            "text": True,
+            "vision": has_vision,
+            "audio": has_audio,
+            "video": has_video,
+        },
         "quantization": {
             "method": weight_format,
             "quantization_backend": "mx.quantize",
