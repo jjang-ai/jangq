@@ -1528,6 +1528,14 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 continue
 
             def _patched_moe(self, x):
+                # Non-TQ guard: this __call__ is installed on the MoE-block
+                # CLASS, shared with non-TurboQuant models in the same process.
+                # Fall back to the original forward when the experts aren't TQ
+                # (mlx_lm QuantizedSwitchLinear has no .in_features etc.).
+                _sm_g = getattr(self, "switch_mlp", None)
+                _gp_g = getattr(_sm_g, "gate_proj", None) if _sm_g is not None else None
+                if not isinstance(_gp_g, TurboQuantSwitchLinear):
+                    return type(self)._jangtq_orig_moe_call(self, x)
                 k = getattr(self, "num_experts_per_tok",
                             getattr(self, "top_k",
                                     getattr(self, "num_routed_experts", None)))
@@ -1619,6 +1627,8 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                     y = y + sh_out
                 return y
 
+            if "_jangtq_orig_moe_call" not in _cls.__dict__:
+                _cls._jangtq_orig_moe_call = _cls.__call__
             _cls.__call__ = _patched_moe
             _patched_classes.add(_cls)
             _n_patched += 1
