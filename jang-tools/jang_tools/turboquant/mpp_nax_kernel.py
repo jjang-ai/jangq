@@ -65,256 +65,9 @@ def mpp_nax_mode_allows(
 
 _MPP_NAX_HEADER = r"""
 #include <metal_stdlib>
-#include <metal_simdgroup>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp;
-
-struct JangTQFrag16 {
-  template <typename U>
-  using vec8 = typename metal::vec<U, 8>;
-
-  static short2 get_coord() {
-    const ushort lane = __metal_get_thread_index_in_simdgroup(ushort());
-    const short qid = lane >> 2;
-    const short fm = ((qid & 4) | ((lane >> 1) & 3));
-    const short fn = ((qid & 2) | (lane & 1)) * 4;
-    return short2{fn, fm};
-  }
-
-  template <typename T, typename SrcPtr>
-  static void fill_a(
-      thread vec8<T>& dst,
-      SrcPtr x,
-      uint batch_size,
-      uint in_features,
-      uint m0,
-      uint k0) {
-    const short2 sc = get_coord();
-    for (short i = 0; i < 2; i++) {
-      uint row = m0 + static_cast<uint>(i * 8 + sc.y);
-      uint col = k0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint c = col + static_cast<uint>(j);
-        if (row < batch_size && c < in_features) {
-          dst[i * 4 + j] = static_cast<T>(x[row * in_features + c]);
-        } else {
-          dst[i * 4 + j] = T(0);
-        }
-      }
-    }
-  }
-
-  template <typename T, typename SrcPtr>
-  static void fill_a_single_row(
-      thread vec8<T>& dst,
-      SrcPtr x,
-      uint in_features,
-      uint row_idx,
-      uint k0) {
-    const short2 sc = get_coord();
-    for (short i = 0; i < 2; i++) {
-      uint local_row = static_cast<uint>(i * 8 + sc.y);
-      uint col = k0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint c = col + static_cast<uint>(j);
-        if (local_row == 0u && c < in_features) {
-          dst[i * 4 + j] = static_cast<T>(x[row_idx * in_features + c]);
-        } else {
-          dst[i * 4 + j] = T(0);
-        }
-      }
-    }
-  }
-
-  template <typename T, typename SrcPtr>
-  static void fill_a_group(
-      thread vec8<T>& dst,
-      SrcPtr x,
-      uint in_features,
-      uint tile_start,
-      uint tile_count,
-      uint k0) {
-    const short2 sc = get_coord();
-    for (short i = 0; i < 2; i++) {
-      uint local_row = static_cast<uint>(i * 8 + sc.y);
-      uint col = k0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint c = col + static_cast<uint>(j);
-        if (local_row < tile_count && c < in_features) {
-          dst[i * 4 + j] =
-              static_cast<T>(x[(tile_start + local_row) * in_features + c]);
-        } else {
-          dst[i * 4 + j] = T(0);
-        }
-      }
-    }
-  }
-
-  template <typename PackedPtr, typename NormPtr, typename CodebookPtr>
-  static void fill_b(
-      thread vec8<half>& dst,
-      PackedPtr packed,
-      NormPtr norms,
-      CodebookPtr codebook,
-      uint packed_cols,
-      uint out_features,
-      uint in_features,
-      uint bits,
-      uint k0,
-      uint n0) {
-    const short2 sc = get_coord();
-    const uint vals_per_u32 = 32u / bits;
-    const uint mask = (1u << bits) - 1u;
-    for (short i = 0; i < 2; i++) {
-      uint k = k0 + static_cast<uint>(i * 8 + sc.y);
-      uint col = n0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint out_col = col + static_cast<uint>(j);
-        if (k < in_features && out_col < out_features) {
-          uint pack_idx = k / vals_per_u32;
-          uint bit_offset = (k % vals_per_u32) * bits;
-          uint pv = packed[out_col * packed_cols + pack_idx];
-          uint cb_idx = (pv >> bit_offset) & mask;
-          float w = codebook[cb_idx] * static_cast<float>(norms[out_col]);
-          dst[i * 4 + j] = static_cast<half>(w);
-        } else {
-          dst[i * 4 + j] = half(0);
-        }
-      }
-    }
-  }
-
-  template <typename PackedPtr, typename NormPtr, typename CodebookPtr>
-  static void fill_b_expert(
-      thread vec8<half>& dst,
-      PackedPtr packed,
-      NormPtr norms,
-      CodebookPtr codebook,
-      uint expert,
-      uint packed_cols,
-      uint out_features,
-      uint in_features,
-      uint bits,
-      uint k0,
-      uint n0) {
-    const short2 sc = get_coord();
-    const uint vals_per_u32 = 32u / bits;
-    const uint mask = (1u << bits) - 1u;
-    const uint expert_base = expert * out_features * packed_cols;
-    const uint norm_base = expert * out_features;
-    for (short i = 0; i < 2; i++) {
-      uint k = k0 + static_cast<uint>(i * 8 + sc.y);
-      uint col = n0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint out_col = col + static_cast<uint>(j);
-        if (k < in_features && out_col < out_features) {
-          uint pack_idx = k / vals_per_u32;
-          uint bit_offset = (k % vals_per_u32) * bits;
-          uint pv = packed[expert_base + out_col * packed_cols + pack_idx];
-          uint cb_idx = (pv >> bit_offset) & mask;
-          float w = codebook[cb_idx] * static_cast<float>(norms[norm_base + out_col]);
-          dst[i * 4 + j] = static_cast<half>(w);
-        } else {
-          dst[i * 4 + j] = half(0);
-        }
-      }
-    }
-  }
-
-  template <typename T, typename DstPtr>
-  static void store_c(
-      thread vec8<T>& src,
-      DstPtr out,
-      uint batch_size,
-      uint out_features,
-      uint m0,
-      uint n0) {
-    const short2 sc = get_coord();
-    for (short i = 0; i < 2; i++) {
-      uint row = m0 + static_cast<uint>(i * 8 + sc.y);
-      uint col = n0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint out_col = col + static_cast<uint>(j);
-        if (row < batch_size && out_col < out_features) {
-          out[row * out_features + out_col] = src[i * 4 + j];
-        }
-      }
-    }
-  }
-
-  template <typename T, typename DstPtr>
-  static void store_c_single_row(
-      thread vec8<T>& src,
-      DstPtr out,
-      uint out_features,
-      uint row_idx,
-      uint n0) {
-    const short2 sc = get_coord();
-    for (short i = 0; i < 2; i++) {
-      uint local_row = static_cast<uint>(i * 8 + sc.y);
-      uint col = n0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint out_col = col + static_cast<uint>(j);
-        if (local_row == 0u && out_col < out_features) {
-          out[row_idx * out_features + out_col] = src[i * 4 + j];
-        }
-      }
-    }
-  }
-
-  template <typename T, typename DstPtr>
-  static void store_c_group(
-      thread vec8<T>& src,
-      DstPtr out,
-      uint out_features,
-      uint tile_start,
-      uint tile_count,
-      uint n0) {
-    const short2 sc = get_coord();
-    for (short i = 0; i < 2; i++) {
-      uint local_row = static_cast<uint>(i * 8 + sc.y);
-      uint col = n0 + static_cast<uint>(sc.x);
-      for (short j = 0; j < 4; j++) {
-        uint out_col = col + static_cast<uint>(j);
-        if (local_row < tile_count && out_col < out_features) {
-          out[(tile_start + local_row) * out_features + out_col] =
-              src[i * 4 + j];
-        }
-      }
-    }
-  }
-};
-"""
-
-
-_MPP_NAX_SMOKE_SOURCE = r"""
-uint m0 = threadgroup_position_in_grid.y * 16u;
-uint n0 = threadgroup_position_in_grid.x * 32u;
-constexpr auto desc = tensor_ops::matmul2d_descriptor(
-    16, 32, 16, false, false, true,
-    tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
-tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
-
-JangTQFrag16::vec8<half> fa;
-JangTQFrag16::vec8<half> fb;
-JangTQFrag16::fill_a(fa, A, 16u, 16u, m0, 0u);
-for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
-for (short nn = 0; nn < 2; nn++) {
-  JangTQFrag16::fill_a(fb, B, 16u, 32u, 0u, n0 + static_cast<uint>(16 * nn));
-  for (short i = 0; i < 8; i++) ct_b[nn * 8 + i] = fb[i];
-}
-for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
-op.run(ct_a, ct_b, ct_c);
-for (short nn = 0; nn < 2; nn++) {
-  JangTQFrag16::vec8<float> fc;
-  for (short i = 0; i < 8; i++) fc[i] = ct_c[nn * 8 + i];
-  JangTQFrag16::store_c(fc, C, 16u, 32u, m0, n0 + static_cast<uint>(16 * nn));
-}
 """
 
 
@@ -345,54 +98,83 @@ def _make_tq_mpp_nax_kernel(
     out_features: int,
     bits: int,
 ):
+    # Tile accesses stay in-bounds via the bounds-checked fills below (each
+    # lane writes 0 into the threadgroup tile for any (k, m)/(n, k) coordinate
+    # past in_features/batch_size/out_features), so no caller-side padding of
+    # x_rot or out is required.
+    packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
+    # Each SIMD group handles one (tile_m, tile_n) output tile.
+    # Dequantize the 16x32 weight K-strip into threadgroup half memory, then
+    # use tensor() with MPP coordinate order (K,M),(N,K),(N,M).
     source = f"""
 uint tile_n = threadgroup_position_in_grid.x;
 uint tile_m = threadgroup_position_in_grid.y;
 uint n0 = tile_n * 32u;
 uint m0 = tile_m * 16u;
+uint lane = thread_index_in_threadgroup;
 
-constexpr auto desc = tensor_ops::matmul2d_descriptor(
-    16, 32, 16, false, false, true,
-    tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
-tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+threadgroup half tg_a[16 * 16];
+threadgroup half tg_b[16 * 32];
+threadgroup float tg_c[32 * 16];
 
-for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
+// Zero-init C tile in threadgroup
+for (uint i = lane; i < 32u * 16u; i += 32u)
+  tg_c[i] = 0.0f;
+
+const uint vals_per_u32 = 32u / {bits}u;
+const uint mask = (1u << {bits}u) - 1u;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
-  JangTQFrag16::fill_a(
-      fa, x_rot, {batch_size}u, {in_features}u, m0, k0);
-  for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
-
-  for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fb;
-    JangTQFrag16::fill_b(
-        fb,
-        packed,
-        norms,
-        codebook,
-        {((in_features + (32 // bits) - 1) // (32 // bits))}u,
-        {out_features}u,
-        {in_features}u,
-        {bits}u,
-        k0,
-        n0 + static_cast<uint>(16 * nn));
-    for (short i = 0; i < 8; i++) ct_b[nn * 8 + i] = fb[i];
+  // Fill A tile: layout tg_a[k + m*16] matches tensor stride {1, 16} = (K,M)
+  // 32 lanes fill 256 elements: each lane fills 8 (256/32)
+  for (uint idx = lane; idx < 16u * 16u; idx += 32u) {{
+    uint k_local = idx / 16u;
+    uint m_local = idx % 16u;
+    uint k = k0 + k_local;
+    uint m = m0 + m_local;
+    half val = half(0);
+    if (k < {in_features}u && m < {batch_size}u)
+      val = x_rot[m * {in_features}u + k];
+    tg_a[k_local + m_local * 16u] = val;
   }}
 
-  op.run(ct_a, ct_b, ct_c);
+  // Fill B tile: tg_b[k_local * 32 + n_local] = dequant(expert, k0+k_local, n0+n_local)
+  // 32 lanes fill 512 elements: each lane fills 16
+  for (uint k_local = 0u; k_local < 16u; k_local++) {{
+    uint k = k0 + k_local;
+    uint nc = n0 + lane;
+    half val = half(0);
+    if (k < {in_features}u && nc < {out_features}u) {{
+      uint pack_idx = k / vals_per_u32;
+      uint bit_offset = (k % vals_per_u32) * {bits}u;
+      uint pv = packed[nc * {packed_cols}u + pack_idx];
+      uint cb_idx = (pv >> bit_offset) & mask;
+      val = static_cast<half>(codebook[cb_idx] * static_cast<float>(norms[nc]));
+    }}
+    tg_b[k_local * 32u + lane] = val;
+  }}
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  // tensor() coordinate order: (K,M), (N,K), (N,M) — same as mpp_dense_kernel
+  constexpr auto desc = tensor_ops::matmul2d_descriptor(
+      16, 32, 16, false, false, false,
+      tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+  tensor_ops::matmul2d<desc, execution_simdgroup> op;
+  auto X = tensor(tg_a, extents<int, 16, 16>(), array<int, 2>{{1, 16}});
+  auto W = tensor(tg_b, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  auto O = tensor(tg_c, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  op.run(X, W, O);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 }}
 
-for (short nn = 0; nn < 2; nn++) {{
-  JangTQFrag16::vec8<float> fc;
-  for (short i = 0; i < 8; i++) fc[i] = ct_c[nn * 8 + i];
-  JangTQFrag16::store_c(
-      fc, out, {batch_size}u, {out_features}u, m0,
-      n0 + static_cast<uint>(16 * nn));
+// Scatter C tile from threadgroup to device output
+for (uint idx = lane; idx < 32u * 16u; idx += 32u) {{
+  uint n_local = idx / 16u;
+  uint m_local = idx % 16u;
+  uint m = m0 + m_local;
+  uint nc = n0 + n_local;
+  if (m < {batch_size}u && nc < {out_features}u)
+    out[m * {out_features}u + nc] = tg_c[n_local + m_local * 32u];
 }}
 """
     return mx.fast.metal_kernel(
@@ -461,56 +243,73 @@ def _make_gather_tq_mpp_nax_kernel(
     out_features: int,
     bits: int,
 ):
+    # Single-row dispatch: M=1 live row per tile, padded to M=16 with zeros.
     packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
     source = f"""
 uint tile_n = threadgroup_position_in_grid.x;
 uint dispatch_idx = threadgroup_position_in_grid.y;
 uint n0 = tile_n * 32u;
+uint lane = thread_index_in_threadgroup;
 uint expert = rhs_indices[dispatch_idx];
+uint expert_base = expert * {out_features}u * {packed_cols}u;
+uint norm_base = expert * {out_features}u;
+
+threadgroup half tg_a[16 * 16];
+threadgroup half tg_b[16 * 32];
+threadgroup float tg_c[32 * 16];
+
+// Zero-init C tile
+for (uint i = lane; i < 32u * 16u; i += 32u)
+  tg_c[i] = 0.0f;
 
 constexpr auto desc = tensor_ops::matmul2d_descriptor(
-    16, 32, 16, false, false, true,
+    16, 32, 16, false, false, false,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
-tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+tensor_ops::matmul2d<desc, execution_simdgroup> op;
 
-for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
+const uint vals_per_u32 = 32u / {bits}u;
+const uint mask = (1u << {bits}u) - 1u;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
-  JangTQFrag16::fill_a_single_row(
-      fa, x_rot, {in_features}u, dispatch_idx, k0);
-  for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
-
-  for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fb;
-    JangTQFrag16::fill_b_expert(
-        fb,
-        packed,
-        norms,
-        codebook,
-        expert,
-        {packed_cols}u,
-        {out_features}u,
-        {in_features}u,
-        {bits}u,
-        k0,
-        n0 + static_cast<uint>(16 * nn));
-    for (short i = 0; i < 8; i++) ct_b[nn * 8 + i] = fb[i];
+  // Fill A tile: only row 0 (m_local=0) has real data; rest are zero
+  for (uint idx = lane; idx < 16u * 16u; idx += 32u) {{
+    uint k_local = idx / 16u;
+    uint m_local = idx % 16u;
+    uint k = k0 + k_local;
+    half val = half(0);
+    if (m_local == 0u && k < {in_features}u)
+      val = x_rot[dispatch_idx * {in_features}u + k];
+    tg_a[k_local + m_local * 16u] = val;
   }}
 
-  op.run(ct_a, ct_b, ct_c);
+  // Fill B tile: dequantize expert weights for this K-strip x N-strip
+  for (uint k_local = 0u; k_local < 16u; k_local++) {{
+    uint k = k0 + k_local;
+    uint nc = n0 + lane;
+    half val = half(0);
+    if (k < {in_features}u && nc < {out_features}u) {{
+      uint pack_idx = k / vals_per_u32;
+      uint bit_offset = (k % vals_per_u32) * {bits}u;
+      uint pv = packed[expert_base + nc * {packed_cols}u + pack_idx];
+      uint cb_idx = (pv >> bit_offset) & mask;
+      val = static_cast<half>(codebook[cb_idx] * static_cast<float>(norms[norm_base + nc]));
+    }}
+    tg_b[k_local * 32u + lane] = val;
+  }}
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  auto X = tensor(tg_a, extents<int, 16, 16>(), array<int, 2>{{1, 16}});
+  auto W = tensor(tg_b, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  auto O = tensor(tg_c, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  op.run(X, W, O);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 }}
 
-for (short nn = 0; nn < 2; nn++) {{
-  JangTQFrag16::vec8<float> fc;
-  for (short i = 0; i < 8; i++) fc[i] = ct_c[nn * 8 + i];
-  JangTQFrag16::store_c_single_row(
-      fc, out, {out_features}u, dispatch_idx,
-      n0 + static_cast<uint>(16 * nn));
+// Scatter row 0 of C tile to device output (only m_local=0 row is valid)
+for (uint n_local = lane; n_local < 32u; n_local += 32u) {{
+  uint nc = n0 + n_local;
+  if (nc < {out_features}u)
+    out[dispatch_idx * {out_features}u + nc] = tg_c[n_local + 0u * 32u];
 }}
 """
     return mx.fast.metal_kernel(
@@ -562,58 +361,74 @@ def _make_grouped_gather_tq_mpp_nax_kernel(
     out_features: int,
     bits: int,
 ):
+    # Grouped sorted dispatch: up to M=16 rows per tile, same expert.
     packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
     source = f"""
 uint tile_n = threadgroup_position_in_grid.x;
 uint tile_id = threadgroup_position_in_grid.y;
 uint n0 = tile_n * 32u;
+uint lane = thread_index_in_threadgroup;
 uint tile_start = tile_starts[tile_id];
 uint tile_count = tile_counts[tile_id];
 uint expert = tile_experts[tile_id];
+uint expert_base = expert * {out_features}u * {packed_cols}u;
+uint norm_base = expert * {out_features}u;
+
+threadgroup half tg_a[16 * 16];
+threadgroup half tg_b[16 * 32];
+threadgroup float tg_c[32 * 16];
+
+for (uint i = lane; i < 32u * 16u; i += 32u)
+  tg_c[i] = 0.0f;
 
 constexpr auto desc = tensor_ops::matmul2d_descriptor(
-    16, 32, 16, false, false, true,
+    16, 32, 16, false, false, false,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
-tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+tensor_ops::matmul2d<desc, execution_simdgroup> op;
 
-for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
+const uint vals_per_u32 = 32u / {bits}u;
+const uint mask = (1u << {bits}u) - 1u;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
-  JangTQFrag16::fill_a_group(
-      fa, x_rot, {in_features}u, tile_start, tile_count, k0);
-  for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
-
-  for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fb;
-    JangTQFrag16::fill_b_expert(
-        fb,
-        packed,
-        norms,
-        codebook,
-        expert,
-        {packed_cols}u,
-        {out_features}u,
-        {in_features}u,
-        {bits}u,
-        k0,
-        n0 + static_cast<uint>(16 * nn));
-    for (short i = 0; i < 8; i++) ct_b[nn * 8 + i] = fb[i];
+  for (uint idx = lane; idx < 16u * 16u; idx += 32u) {{
+    uint k_local = idx / 16u;
+    uint m_local = idx % 16u;
+    uint k = k0 + k_local;
+    half val = half(0);
+    if (k < {in_features}u && m_local < tile_count)
+      val = x_rot[(tile_start + m_local) * {in_features}u + k];
+    tg_a[k_local + m_local * 16u] = val;
   }}
 
-  op.run(ct_a, ct_b, ct_c);
+  for (uint k_local = 0u; k_local < 16u; k_local++) {{
+    uint k = k0 + k_local;
+    uint nc = n0 + lane;
+    half val = half(0);
+    if (k < {in_features}u && nc < {out_features}u) {{
+      uint pack_idx = k / vals_per_u32;
+      uint bit_offset = (k % vals_per_u32) * {bits}u;
+      uint pv = packed[expert_base + nc * {packed_cols}u + pack_idx];
+      uint cb_idx = (pv >> bit_offset) & mask;
+      val = static_cast<half>(codebook[cb_idx] * static_cast<float>(norms[norm_base + nc]));
+    }}
+    tg_b[k_local * 32u + lane] = val;
+  }}
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  auto X = tensor(tg_a, extents<int, 16, 16>(), array<int, 2>{{1, 16}});
+  auto W = tensor(tg_b, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  auto O = tensor(tg_c, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  op.run(X, W, O);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 }}
 
-for (short nn = 0; nn < 2; nn++) {{
-  JangTQFrag16::vec8<float> fc;
-  for (short i = 0; i < 8; i++) fc[i] = ct_c[nn * 8 + i];
-  JangTQFrag16::store_c_group(
-      fc, out, {out_features}u, tile_start, tile_count,
-      n0 + static_cast<uint>(16 * nn));
+// Scatter valid rows from C tile to device output
+for (uint idx = lane; idx < 32u * 16u; idx += 32u) {{
+  uint n_local = idx / 16u;
+  uint m_local = idx % 16u;
+  uint nc = n0 + n_local;
+  if (m_local < tile_count && nc < {out_features}u)
+    out[(tile_start + m_local) * {out_features}u + nc] = tg_c[n_local + m_local * 32u];
 }}
 """
     return mx.fast.metal_kernel(
@@ -765,96 +580,98 @@ def _make_grouped_fused_gate_up_swiglu_mpp_nax_kernel(
     out_features: int,
     bits: int,
 ):
+    # Fused gate+up matmuls with SwiGLU activation, grouped sorted tiles.
     packed_cols = (in_features + (32 // bits) - 1) // (32 // bits)
     source = f"""
 uint tile_n = threadgroup_position_in_grid.x;
 uint tile_id = threadgroup_position_in_grid.y;
 uint n0 = tile_n * 32u;
+uint lane = thread_index_in_threadgroup;
 uint tile_start = tile_starts[tile_id];
 uint tile_count = tile_counts[tile_id];
 uint expert = tile_experts[tile_id];
 float swiglu_limit = static_cast<float>(meta[0]) * 0.001f;
+uint expert_base = expert * {out_features}u * {packed_cols}u;
+uint norm_base = expert * {out_features}u;
+
+threadgroup half tg_a[16 * 16];
+threadgroup half tg_bg[16 * 32];
+threadgroup half tg_bu[16 * 32];
+threadgroup float tg_cg[32 * 16];
+threadgroup float tg_cu[32 * 16];
+
+for (uint i = lane; i < 32u * 16u; i += 32u) {{
+  tg_cg[i] = 0.0f;
+  tg_cu[i] = 0.0f;
+}}
 
 constexpr auto desc = tensor_ops::matmul2d_descriptor(
-    16, 32, 16, false, false, true,
+    16, 32, 16, false, false, false,
     tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
-tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
-auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
-auto ct_bg = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_bu = op.template get_right_input_cooperative_tensor<half, half, float>();
-auto ct_cg = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_bg), float>();
-auto ct_cu = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_bu), float>();
+tensor_ops::matmul2d<desc, execution_simdgroup> op;
 
-for (short i = 0; i < ct_cg.get_capacity(); i++) {{
-  ct_cg[i] = 0.0f;
-  ct_cu[i] = 0.0f;
-}}
+const uint vals_per_u32 = 32u / {bits}u;
+const uint mask = (1u << {bits}u) - 1u;
 
 for (uint k0 = 0u; k0 < {in_features}u; k0 += 16u) {{
-  JangTQFrag16::vec8<half> fa;
-  JangTQFrag16::fill_a_group(
-      fa, x_rot, {in_features}u, tile_start, tile_count, k0);
-  for (short i = 0; i < 8; i++) ct_a[i] = fa[i];
-
-  for (short nn = 0; nn < 2; nn++) {{
-    JangTQFrag16::vec8<half> fbg;
-    JangTQFrag16::vec8<half> fbu;
-    JangTQFrag16::fill_b_expert(
-        fbg,
-        packed_gate,
-        norms_gate,
-        codebook,
-        expert,
-        {packed_cols}u,
-        {out_features}u,
-        {in_features}u,
-        {bits}u,
-        k0,
-        n0 + static_cast<uint>(16 * nn));
-    JangTQFrag16::fill_b_expert(
-        fbu,
-        packed_up,
-        norms_up,
-        codebook,
-        expert,
-        {packed_cols}u,
-        {out_features}u,
-        {in_features}u,
-        {bits}u,
-        k0,
-        n0 + static_cast<uint>(16 * nn));
-    for (short i = 0; i < 8; i++) {{
-      ct_bg[nn * 8 + i] = fbg[i];
-      ct_bu[nn * 8 + i] = fbu[i];
-    }}
+  // Fill A tile
+  for (uint idx = lane; idx < 16u * 16u; idx += 32u) {{
+    uint k_local = idx / 16u;
+    uint m_local = idx % 16u;
+    uint k = k0 + k_local;
+    half val = half(0);
+    if (k < {in_features}u && m_local < tile_count)
+      val = x_rot[(tile_start + m_local) * {in_features}u + k];
+    tg_a[k_local + m_local * 16u] = val;
   }}
 
-  op.run(ct_a, ct_bg, ct_cg);
-  op.run(ct_a, ct_bu, ct_cu);
+  // Fill B_gate and B_up tiles
+  for (uint k_local = 0u; k_local < 16u; k_local++) {{
+    uint k = k0 + k_local;
+    uint nc = n0 + lane;
+    half vg = half(0);
+    half vu = half(0);
+    if (k < {in_features}u && nc < {out_features}u) {{
+      uint pack_idx = k / vals_per_u32;
+      uint bit_offset = (k % vals_per_u32) * {bits}u;
+      uint pvg = packed_gate[expert_base + nc * {packed_cols}u + pack_idx];
+      uint pvu = packed_up[expert_base + nc * {packed_cols}u + pack_idx];
+      uint cbg = (pvg >> bit_offset) & mask;
+      uint cbu = (pvu >> bit_offset) & mask;
+      float ng = static_cast<float>(norms_gate[norm_base + nc]);
+      float nu = static_cast<float>(norms_up[norm_base + nc]);
+      vg = static_cast<half>(codebook[cbg] * ng);
+      vu = static_cast<half>(codebook[cbu] * nu);
+    }}
+    tg_bg[k_local * 32u + lane] = vg;
+    tg_bu[k_local * 32u + lane] = vu;
+  }}
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  auto X  = tensor(tg_a,  extents<int, 16, 16>(), array<int, 2>{{1, 16}});
+  auto Wg = tensor(tg_bg, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  auto Wu = tensor(tg_bu, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  auto Og = tensor(tg_cg, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  auto Ou = tensor(tg_cu, extents<int, 32, 16>(), array<int, 2>{{1, 32}});
+  op.run(X, Wg, Og);
+  op.run(X, Wu, Ou);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 }}
 
-const short2 sc = JangTQFrag16::get_coord();
-for (short nn = 0; nn < 2; nn++) {{
-  for (short i = 0; i < 2; i++) {{
-    uint local_row = static_cast<uint>(i * 8 + sc.y);
-    uint row = tile_start + local_row;
-    uint col = n0 + static_cast<uint>(16 * nn) + static_cast<uint>(sc.x);
-    for (short j = 0; j < 4; j++) {{
-      uint out_col = col + static_cast<uint>(j);
-      if (local_row < tile_count && out_col < {out_features}u) {{
-        uint frag_idx = nn * 8 + i * 4 + j;
-        float gate = ct_cg[frag_idx];
-        float up = ct_cu[frag_idx];
-        if (swiglu_limit > 0.0f) {{
-          gate = metal::min(gate, swiglu_limit);
-          up = metal::min(metal::max(up, -swiglu_limit), swiglu_limit);
-        }}
-        float act = (gate / (1.0f + metal::exp(-gate))) * up;
-        out[row * {out_features}u + out_col] = act;
-      }}
+// Scatter SwiGLU(gate, up) to device output
+for (uint idx = lane; idx < 32u * 16u; idx += 32u) {{
+  uint n_local = idx / 16u;
+  uint m_local = idx % 16u;
+  uint nc = n0 + n_local;
+  if (m_local < tile_count && nc < {out_features}u) {{
+    float gate = tg_cg[n_local + m_local * 32u];
+    float up   = tg_cu[n_local + m_local * 32u];
+    if (swiglu_limit > 0.0f) {{
+      gate = metal::min(gate, swiglu_limit);
+      up   = metal::min(metal::max(up, -swiglu_limit), swiglu_limit);
     }}
+    float act = (gate / (1.0f + metal::exp(-gate))) * up;
+    out[(tile_start + m_local) * {out_features}u + nc] = act;
   }}
 }}
 """
