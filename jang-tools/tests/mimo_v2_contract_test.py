@@ -735,6 +735,11 @@ def test_mimo_v2_shared_capability_resolver_preserves_parser_and_cache_policy():
         "supports_thinking": True,
         "family": "mimo_v2",
         "modality": "text",
+        # additive multimodal tri-state (audio/video support)
+        "modalities": {"text": True, "vision": False, "audio": False, "video": False},
+        "has_vision": False,
+        "has_audio": False,
+        "has_video": False,
         "cache_type": "kv",
     }
 

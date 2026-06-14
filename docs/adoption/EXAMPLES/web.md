@@ -31,18 +31,18 @@ are interested in driving this.
 
 Until native web inference lands, the practical path is:
 
-1. Serve the JANG model via Osaurus on a Mac (see [server.md](server.md))
+1. Serve the JANG model via `vmlx-engine` on a Mac (see [server.md](server.md))
 2. Call it from your web client via the OpenAI-compatible HTTP API
 
 This gives you browser-delivered inference today without a WebGPU or WASM runtime.
 
 ```javascript
-// Calling a local Osaurus server from a browser or Node client
-const response = await fetch("http://localhost:8080/v1/chat/completions", {
+// Calling a local vmlx-engine server from a browser or Node client
+const response = await fetch("http://127.0.0.1:8000/v1/chat/completions", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
-    model: "jang",
+    model: "default",
     messages: [{ role: "user", content: "Hello" }],
     stream: false,
   }),

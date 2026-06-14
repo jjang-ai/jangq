@@ -89,14 +89,14 @@ pip install 'jang[mlx]'
 python -m jang_tools inference --model /path/to/this-model --prompt "Hello" --max-tokens 200
 ```
 
-### OpenAI-compatible server (Osaurus)
+### OpenAI-compatible server
 
 ```bash
-pip install osaurus
-osaurus serve --model /path/to/this-model --port 8080
-curl http://localhost:8080/v1/chat/completions \
+pip install "jang[mlx]" vmlx-engine openai httpx
+vmlx-engine serve /path/to/this-model --served-model-name default --port 8000
+curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"default","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ### Swift (via JANGKit)

@@ -43,6 +43,18 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax":          ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
+    # MiniMax-M3 (minimax_m3_vl) — GQA + block-sparse MSA selection MoE,
+    # Gemma-style RMSNorm, swigluoai. Dedicated parsers (engine-registered):
+    # reasoning <mm:think>…</mm:think> → "minimax_m3"; tool calls
+    # <tool_call><invoke name="X">…xml…</invoke></tool_call> → "minimax_m3"
+    # (tag-named-param XML). Distinct ids so generic JANG restamping cannot
+    # drift M3 back to qwen3 / minimax_m2 / think_xml. think_in_template=False
+    # (default no-think prompts start in visible content, not an open block).
+    # capabilities.cache_type="kv": the MSA dual cache (keys/values/idx_keys)
+    # is fully positional/sliceable — the dual detail rides in
+    # architecture.cache_type="kv+msa_index_dual", not this coarse hint.
+    "minimax_m3":       ("minimax_m3",  "minimax_m3",  "minimax_m3", False, "kv"),
+    "minimax_m3_vl":    ("minimax_m3",  "minimax_m3",  "minimax_m3", False, "kv"),
     # MiMo V2.5 — hybrid full-attention + SWA KV. Cache topology details
     # live in the MiMo converter/runtime metadata; the shared capability stamp
     # keeps generic JANG restamping on the XML reasoning/tool parser path.
@@ -165,26 +177,60 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     return None, unique
 
 
-def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) -> str:
-    """text | vision. jang.has_vision is authoritative when present.
+def _resolve_modalities(jang: dict, config: dict) -> dict[str, bool]:
+    """Resolve source-backed modal components from JANG and HF config stamps.
 
-    M127 (iter 50): the fallback used to return "vision" if EITHER
-    ``text_config`` OR ``vision_config`` appeared in the HF config. But many
-    text-only MoE families (qwen3_moe, qwen3_5_moe, glm_moe_dsa, mistral4)
-    wrap their text params under ``text_config`` with NO ``vision_config``,
-    so any jang_config missing a ``has_vision`` stamp (legacy v1 files,
-    third-party JANG models, manually-edited configs) got misclassified as
-    vision. vmlx's CapabilityDetector would then route through
-    VLMModelFactory and fail to load. Tightened to require ``vision_config``
-    specifically — text_config alone is NOT a vision signal.
+    Single source of truth for every modality decision. Priority per flag:
+      1. explicit top-level ``jang["has_<x>"]``           (authoritative — incl. False)
+      2. explicit ``jang["architecture"]["has_<x>"]``      (convert.py / M3 shape)
+      3. explicit ``config["has_<x>"]``
+      4. presence of ``config["<x>_config"]``              (HF heuristic, last resort)
+
+    Crucially an explicit ``False`` at a higher tier wins over a lower-tier
+    ``*_config`` presence — a bundle that *carries* vision weights but stamps
+    ``has_vision=False`` (vision preserved but runtime-unwired, e.g. MiniMax-M3
+    until its VL tower is validated) resolves to text, not vision. (M127 kept:
+    ``text_config`` alone is never a vision signal — only ``vision_config`` is.)
     """
-    if "has_vision" in jang:
-        return "vision" if jang["has_vision"] else "text"
-    arch_dict = jang.get("architecture")
-    if isinstance(arch_dict, dict) and "has_vision" in arch_dict:
-        return "vision" if arch_dict["has_vision"] else "text"
-    if "vision_config" in config:
-        return "vision"
+    arch = jang.get("architecture")
+    arch = arch if isinstance(arch, dict) else {}
+
+    def resolve(flag: str, cfg_section: str) -> bool:
+        if flag in jang:
+            return bool(jang[flag])
+        if flag in arch:
+            return bool(arch[flag])
+        if flag in config:
+            return bool(config[flag])
+        # last-resort heuristic: KEY PRESENCE of the HF sub-config (not its
+        # truthiness) — an empty ``vision_config: {}`` still signals vision.
+        # Any explicit ``has_<x>`` above (incl. False) overrides this.
+        return cfg_section in config
+
+    return {
+        "text": True,
+        "vision": resolve("has_vision", "vision_config"),
+        "audio": resolve("has_audio", "audio_config"),
+        "video": resolve("has_video", "video_config"),
+    }
+
+
+def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) -> str:
+    """text | vision | audio | multimodal, derived solely from _resolve_modalities.
+
+    _resolve_modalities already folds in every explicit stamp (top-level,
+    architecture, config) and the ``*_config`` heuristic with the correct
+    precedence, so there is no separate fallback here — an earlier such
+    fallback re-read ``config["vision_config"]`` and wrongly overrode an
+    explicit ``has_vision=False`` (the M3 vision-preserved-but-text-runtime
+    case), which is exactly the regression this consolidation removes.
+    """
+    modalities = _resolve_modalities(jang, config)
+    active_modal = [k for k in ("vision", "audio", "video") if modalities.get(k)]
+    if len(active_modal) > 1:
+        return "multimodal"
+    if active_modal:
+        return active_modal[0]
     return "text"
 
 
@@ -209,6 +255,7 @@ def build_capabilities(
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
     modality = _resolve_modality(jang, config, model_path)
+    modalities = _resolve_modalities(jang, config)
     # supports_thinking advertises whether the model architecturally produces
     # chain-of-thought reasoning. ZAYA / ZAYA1-VL DO reason — measured live:
     # `enable_thinking=False` (default template) still produces chain-of-thought
@@ -226,6 +273,10 @@ def build_capabilities(
         "supports_thinking": supports_thinking,
         "family": family,
         "modality": modality,
+        "modalities": modalities,
+        "has_vision": modalities["vision"],
+        "has_audio": modalities["audio"],
+        "has_video": modalities["video"],
         "cache_type": cache_type,
     }
 
@@ -296,7 +347,11 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
         return False, f"capabilities missing keys: {sorted(missing)}"
 
     valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4",
-                       "openai_gptoss", None}
+                       "openai_gptoss",
+                       # MiniMax-M3 <mm:think>…</mm:think> — dedicated engine
+                       # parser (vmlx_engine.reasoning.minimax_m3_parser,
+                       # registered id "minimax_m3").
+                       "minimax_m3", None}
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
                   "functionary", "glm47", "minimax", "gemma4", "native",
@@ -309,9 +364,14 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # Tencent Hy3-preview emits its own XML-like tool tags
                   # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
                   # registers this parser as "hy_v3", SGLang as "hunyuan".
-                  "hunyuan"}
+                  "hunyuan",
+                  # MiniMax-M3 tag-named-param XML
+                  # (<tool_call><invoke name="X">…xml…</invoke></tool_call>);
+                  # engine parser vmlx_engine.tool_parsers.minimax_m3_tool_parser,
+                  # registered id "minimax_m3".
+                  "minimax_m3"}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
-    valid_modality = {"text", "vision", "embedding", "rerank", "image"}
+    valid_modality = {"text", "vision", "audio", "multimodal", "embedding", "rerank", "image"}
 
     if caps["reasoning_parser"] not in valid_reasoning:
         return False, f"reasoning_parser={caps['reasoning_parser']!r} not in {sorted(valid_reasoning - {None})}"

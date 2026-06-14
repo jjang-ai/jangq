@@ -220,13 +220,18 @@ response = generate(model, processor, image=image, prompt="Describe.", max_token
 ## Serving a JANG model as an OpenAI-compatible server
 
 ```bash
-pip install osaurus
-osaurus serve --model /path/to/JANG-model --port 8080
+pip install "jang[mlx]" vmlx-engine openai httpx
+export JANG_MODEL=/path/to/JANG-model
+./examples/runtime/serve_vmlx.sh
 
-curl http://localhost:8080/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"default","messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+More clients and server options are in
+[`docs/adoption/RUNTIME_QUICKSTART.md`](docs/adoption/RUNTIME_QUICKSTART.md)
+and [`examples/runtime/`](examples/runtime/).
 
 ## Profile cheat sheet
 
@@ -247,6 +252,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 Want to add JANG support to your own inference runtime? See:
 - [`docs/adoption/README.md`](docs/adoption/README.md) — entry point
+- [`docs/adoption/RUNTIME_QUICKSTART.md`](docs/adoption/RUNTIME_QUICKSTART.md) — public server, Python, Swift, tool, multimodal, and Responses API examples
 - [`docs/adoption/PORTING.md`](docs/adoption/PORTING.md) — on-disk format + dequant math + JANGTQ codebook spec
 - [`docs/adoption/EXAMPLES/`](docs/adoption/EXAMPLES/) — runnable Python + Swift examples
 - [`FORMAT.md`](FORMAT.md) — canonical format specification

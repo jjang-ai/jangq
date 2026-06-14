@@ -1,9 +1,16 @@
-# OpenAI-compatible server via Osaurus
-# pip install osaurus  (if not already)
+# OpenAI-compatible server via vmlx-engine
+# pip install "jang[mlx]" vmlx-engine openai httpx
 
-osaurus serve --model {{ model_path }} --port 8080 &
+vmlx-engine serve {{ model_path }} \
+  --served-model-name {{ model_name }} \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --continuous-batching \
+  --use-paged-cache{% if has_tool_parser %} \
+  --enable-auto-tool-choice \
+  --tool-call-parser {{ tool_parser or "auto" }}{% endif %} &
 
-curl http://localhost:8080/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "{{ model_name }}",

@@ -200,6 +200,20 @@ End-to-end verified: 1M-context pool accumulation, multi-turn `/v1/chat/completi
 with prefix-cache reuse, dual-mode reasoning, 20.5 tok/s decode on
 M3 Ultra @ JANGTQ2 (79.5 GB), 24.5 tok/s on Swift.
 
+## Runtime examples for adopters
+
+Public server and client examples are in [`examples/runtime/`](examples/runtime/):
+
+- `serve_vmlx.sh` starts a JANG/JANGTQ bundle with `vmlx-engine`.
+- `openai_chat.py`, `openai_tools.py`, and `openai_responses.py` cover standard
+  API clients.
+- `openai_multimodal.py` covers image/video requests for bundles with wired
+  multimodal processors.
+- `swift/OpenAIChat.swift` is a small Swift client for local macOS apps.
+
+The integration guide is
+[`docs/adoption/RUNTIME_QUICKSTART.md`](docs/adoption/RUNTIME_QUICKSTART.md).
+
 ## JangPress — fit routed-MoE bundles bigger than RAM
 
 JangPress is the load-time memory policy in

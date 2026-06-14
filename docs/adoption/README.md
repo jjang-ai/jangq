@@ -17,9 +17,23 @@ If you are an end user who just wants to convert a model, open the main
 |---|---|
 | A Python developer | [EXAMPLES/python.py](EXAMPLES/python.py) |
 | A Swift developer | [EXAMPLES/swift.swift](EXAMPLES/swift.swift) |
-| Running an agent / server | [EXAMPLES/server.md](EXAMPLES/server.md) |
+| Running an agent / server | [RUNTIME_QUICKSTART.md](RUNTIME_QUICKSTART.md) and [EXAMPLES/server.md](EXAMPLES/server.md) |
 | Adding JANG support to a new framework | [PORTING.md](PORTING.md) |
 | Publishing a converted model | [MODEL_CARD_TEMPLATE.md](MODEL_CARD_TEMPLATE.md) |
+
+## Runtime examples
+
+The public server/client examples live in [`../../examples/runtime`](../../examples/runtime):
+
+- `serve_vmlx.sh` starts a JANG/JANGTQ bundle through `vmlx-engine`.
+- `openai_chat.py` calls `/v1/chat/completions`.
+- `openai_tools.py` exercises OpenAI-compatible tool calls.
+- `openai_multimodal.py` sends image or video requests to a multimodal bundle.
+- `openai_responses.py` calls the Responses API used by agent clients.
+- `swift/OpenAIChat.swift` is a small Swift URLSession client for macOS apps.
+
+Start with [RUNTIME_QUICKSTART.md](RUNTIME_QUICKSTART.md) if you are integrating
+JANG into an app or serving stack.
 
 ## Format reference
 
@@ -44,7 +58,7 @@ Two families of output:
 - **JANGKit** — Swift high-level facade (`JANGKit.Model.load` + `generate`) built on top of `JANG`
 - **JANGCore** — Swift/Metal on-disk format reader (manifest, expert index, tensor loading) shipped in JANG Studio
 - **[MLX Studio](https://mlx.studio)** — GUI inference with JANG support
-- **Osaurus** — OpenAI-compatible HTTP server (JANG + JANGTQ)
+- **vmlx-engine** — OpenAI-compatible HTTP server (JANG + JANGTQ)
 
 If you are porting to a new framework, read [PORTING.md](PORTING.md) first — it documents the
 on-disk layout, per-tensor dequant math, and JANGTQ codebook structure.

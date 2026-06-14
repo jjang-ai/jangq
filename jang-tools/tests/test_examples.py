@@ -88,9 +88,9 @@ def test_render_swift_includes_path(dense_model_dir):
 
 def test_render_server_has_curl(dense_model_dir):
     snippet = render_snippet(dense_model_dir, "server")
-    assert "osaurus" in snippet.lower()
+    assert "vmlx-engine serve" in snippet
     assert "curl" in snippet
-    assert "localhost:8080" in snippet
+    assert "127.0.0.1:8000" in snippet
 
 
 def test_render_hf(dense_model_dir):

@@ -1,138 +1,138 @@
 # Serving a JANG model as an OpenAI-compatible HTTP server
 
-JANG models can be served via [Osaurus](https://github.com/dinoki-ai/osaurus) — an
-OpenAI-compatible HTTP server with native support for JANG and JANGTQ.
+The recommended public server path is `vmlx-engine`. It exposes standard
+OpenAI-compatible endpoints for chat completions, Responses API, tool calling,
+reasoning parser output, multimodal requests, cache inspection, and model lists.
 
 ## Quick start
 
-```bash
-pip install osaurus
-osaurus serve --model /path/to/your-JANG-model --port 8080
+```sh
+python -m pip install -U "jang[mlx]" vmlx-engine openai httpx
+export JANG_MODEL=/path/to/your-JANG-or-JANGTQ-model
+./examples/runtime/serve_vmlx.sh
 ```
 
-Osaurus auto-detects the JANG format by reading `jang_config.json` and dispatches
-to the correct loader (`load_jang_model` or `load_jangtq_model`).
+The helper script expands to a `vmlx-engine serve` command with these defaults:
+
+```sh
+vmlx-engine serve "$JANG_MODEL" \
+  --served-model-name default \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --continuous-batching \
+  --use-paged-cache \
+  --enable-auto-tool-choice \
+  --tool-call-parser auto
+```
 
 ## Call it like OpenAI
 
-```bash
-curl http://localhost:8080/v1/chat/completions \
+```sh
+curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "jang",
+    "model": "default",
     "messages": [
       {"role": "system", "content": "You are a helpful assistant."},
       {"role": "user", "content": "Hello"}
     ],
+    "max_tokens": 128,
     "stream": true
   }'
 ```
 
+Python client:
+
+```sh
+python examples/runtime/openai_chat.py --prompt "Hello" --stream
+```
+
+Swift client:
+
+```sh
+swift examples/runtime/swift/OpenAIChat.swift --prompt "Hello"
+```
+
 ## Tool calling
 
-If the source model has a `tool_call_parser` set in its `config.json`, JANG preserves
-it through conversion. Osaurus honors it automatically:
+Start the server with the parser that matches the model family:
 
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "jang",
-    "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "parameters": {
-          "type": "object",
-          "properties": {"city": {"type": "string"}},
-          "required": ["city"]
-        }
-      }
-    }]
-  }'
+```sh
+JANG_TOOL_PARSER=qwen ./examples/runtime/serve_vmlx.sh
 ```
+
+Then call with standard OpenAI `tools`:
+
+```sh
+python examples/runtime/openai_tools.py --prompt "What is the weather in Paris?"
+```
+
+The model must have been trained for tool use. If tool calls parse incorrectly,
+check `config.json.tool_call_parser`, tokenizer chat template, and EOS settings.
 
 ## Reasoning / thinking
 
-For models with `reasoning_parser` or `enable_thinking` set in `config.json`, the
-reasoning trace will be returned in the `reasoning` field alongside the final answer:
+For reasoning models, pass the parser that matches the source format:
 
-```json
-{
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "Paris.",
-      "reasoning": "The question asks for the capital of France..."
-    }
-  }]
-}
+```sh
+JANG_REASONING_PARSER=qwen3 ./examples/runtime/serve_vmlx.sh
 ```
 
-## Vision/Language and video
+The API may return reasoning as `reasoning` or `reasoning_content`, depending on
+the client schema and parser. Do not add fake prompt tags to force reasoning;
+fix parser/template metadata instead.
 
-VL models are loaded via `mlx_vlm` automatically when `preprocessor_config.json` is
-present. Pass images as base64 in standard OpenAI format:
+## Vision, audio, and video
 
-```json
-{
-  "model": "jang",
-  "messages": [{
-    "role": "user",
-    "content": [
-      {"type": "text", "text": "Describe this image"},
-      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
-    ]
-  }]
-}
+Multimodal requests require a bundle and runtime loader that expose the modality.
+Check `preprocessor_config.json`, video/audio processor files, and the model
+card before advertising support.
+
+Image request:
+
+```sh
+python examples/runtime/openai_multimodal.py \
+  --image ./photo.jpg \
+  --prompt "Describe this image."
 ```
 
-## Health check and model list
+Video request:
 
-```bash
-curl http://localhost:8080/health
-# {"status": "ok"}
-
-curl http://localhost:8080/v1/models
-# {"data": [{"id": "jang", "object": "model", ...}]}
+```sh
+python examples/runtime/openai_multimodal.py \
+  --video ./clip.mp4 \
+  --prompt "Summarize the action." \
+  --video-fps 2 \
+  --video-max-frames 32
 ```
 
-## Running as a macOS LaunchAgent
+## Responses API
 
-Create `~/Library/LaunchAgents/ai.jangq.osaurus.plist`:
+Agent clients can use `/v1/responses`:
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>       <string>ai.jangq.osaurus</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/osaurus</string>
-        <string>serve</string>
-        <string>--model</string>
-        <string>/path/to/your-JANG-model</string>
-        <string>--port</string>
-        <string>8080</string>
-    </array>
-    <key>RunAtLoad</key>   <true/>
-    <key>KeepAlive</key>   <true/>
-</dict>
-</plist>
+```sh
+python examples/runtime/openai_responses.py --prompt "What is 2 + 2?"
 ```
 
-Then load it:
+Codex-style local configuration:
 
-```bash
-launchctl load ~/Library/LaunchAgents/ai.jangq.osaurus.plist
+```toml
+model_provider = "vmlx"
+model = "default"
+
+[model_providers.vmlx]
+base_url = "http://127.0.0.1:8000/v1"
+wire_api = "responses"
 ```
 
-## Alternative runtimes
+## Health, models, and cache
 
-At time of writing, LM Studio, Ollama, and Inferencer do not yet support JANG.
-If you are integrating JANG into one of those runtimes, see
-[PORTING.md](../PORTING.md) for the format spec and open an issue on their repo
-linking to it.
+```sh
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:8000/v1/cache/stats
+curl http://127.0.0.1:8000/v1/cache/entries
+```
+
+For a deeper integration checklist, see
+[`../RUNTIME_QUICKSTART.md`](../RUNTIME_QUICKSTART.md).

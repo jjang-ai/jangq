@@ -203,6 +203,15 @@ def cmd_convert(args):
 
 
 def main():
+    # Early-intercept the minimax-m3 passthrough subcommand BEFORE the strict
+    # top-level argparse runs. It forwards its own --flags to a vendored tool's
+    # argparse main(); argparse.REMAINDER can't capture a leading --flag (the
+    # parent parser consumes it), so we slice the raw argv here instead. It is
+    # still registered below for `jang --help` discoverability.
+    if len(sys.argv) >= 2 and sys.argv[1] == "minimax-m3":
+        from .minimax_m3.cli import dispatch as _m3_dispatch
+        sys.exit(_m3_dispatch(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         prog="jang",
         description="JANG: Mixed-Precision Importance Quantization for Apple Silicon",
@@ -301,6 +310,9 @@ def main():
 
     from .recommend import register as _register_recommend
     _register_recommend(subparsers)
+
+    from .minimax_m3.cli import register as _register_minimax_m3
+    _register_minimax_m3(subparsers)
 
     args = parser.parse_args()
 

@@ -53,5 +53,10 @@ def test_step37_capabilities_are_vlm_step3p5_runtime_route():
         "supports_thinking": True,
         "family": "step3p7",
         "modality": "vision",
+        # additive multimodal tri-state (audio/video support)
+        "modalities": {"text": True, "vision": True, "audio": False, "video": False},
+        "has_vision": True,
+        "has_audio": False,
+        "has_video": False,
         "cache_type": "kv",
     }
