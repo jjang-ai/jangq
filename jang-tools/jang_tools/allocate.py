@@ -62,7 +62,7 @@ def _prev_bit_width(current: int) -> Optional[int]:
 #               WARNING: 2-bit on 512+ expert models may cause NaN (proven on 397B).
 #
 #               Examples: MLP/FFN layers (dense or expert),
-#               linear attention out_proj, vision FFN, SSM input/output projections.
+#               vision FFN, generic SSM input/output projections.
 #
 # ── Precision Floor Rules (proven empirically) ──────────────
 #
@@ -221,6 +221,7 @@ TIER_RULES = [
     ("in_proj_z", Tier.IMPORTANT),
     ("in_proj_a", Tier.IMPORTANT),
     ("in_proj_b", Tier.IMPORTANT),
+    ("linear_attn.out_proj", Tier.IMPORTANT),
     ("delta_net", Tier.IMPORTANT),
 
     # ── Vision FFN ───────────────────────────────────────────
@@ -228,7 +229,7 @@ TIER_RULES = [
     ("linear_fc2", Tier.COMPRESS),
 
     # ── Generic attention output (must come after specific patterns) ──
-    # Catches: Mamba out_proj, linear attention out_proj, vision proj
+    # Catches: generic out_proj variants and vision proj
     ("out_proj", Tier.COMPRESS),
 
     # ── Vision attention (fused QKV) ─────────────────────────
@@ -694,6 +695,7 @@ def allocate_bits_profile(
     profile: str = "JANG_3M",
     num_experts: int = 0,
     has_shared_mlp: bool = False,
+    apply_mlp_asymmetry: bool = True,
 ) -> np.ndarray:
     """
     Tier-based bit allocation — classifies each tensor into a sensitivity
@@ -745,7 +747,8 @@ def allocate_bits_profile(
                 runs.append((cache[prev_name], run_count))
             if name not in cache:
                 assigned = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
-                assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
+                if apply_mlp_asymmetry:
+                    assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
                 cache[name] = assigned
             prev_name = name
             run_count = 1
@@ -973,6 +976,7 @@ def allocate_bits_profile_compact(
     profile: str = "JANG_3M",
     num_experts: int = 0,
     has_shared_mlp: bool = False,
+    apply_mlp_asymmetry: bool = True,
 ) -> dict[str, int]:
     """Per-tensor profile allocation. Returns tensor_name → bits.
 
@@ -992,7 +996,8 @@ def allocate_bits_profile_compact(
     result = {}
     for name, n_blocks in tensor_info:
         bits = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
-        bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
+        if apply_mlp_asymmetry:
+            bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
         result[name] = bits
     return result
 

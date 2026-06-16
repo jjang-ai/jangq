@@ -477,6 +477,19 @@ try:
             "bits_default": default_expert_bits,
         },
     }
+    from jang_tools.convert import _build_mtp_runtime_metadata
+    _mtp_meta = _build_mtp_runtime_metadata(config, set(shard_map.keys()))
+    if _mtp_meta:
+        jang_config["runtime"] = _mtp_meta["runtime"]
+        jang_config["mtp"] = _mtp_meta["mtp"]
+        jang_config["bundle_has_mtp"] = _mtp_meta["bundle_has_mtp"]
+        jang_config["mtp_layers"] = _mtp_meta["mtp_layers"]
+        print(
+            f"  mtp: mode={_mtp_meta['runtime']['mtp_mode']} "
+            f"layers={_mtp_meta['runtime']['mtp_layers']} "
+            f"tensor_count={_mtp_meta['mtp']['tensor_count']}",
+            flush=True,
+        )
     # Stamp Tier-1 capabilities (reasoning/tool parser, cache type, modality)
     # so vmlx CapabilityDetector picks the right parsers without falling back
     # to silver/bronze. Idempotent — safe to re-run.
@@ -507,7 +520,8 @@ try:
     # Copy tokenizer/template/preprocessor files (always-VL rule: keep VL assets)
     for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
               "generation_config.json", "chat_template.jinja", "merges.txt", "vocab.json",
-              "preprocessor_config.json", "video_preprocessor_config.json",
+              "preprocessor_config.json", "processor_config.json",
+              "video_preprocessor_config.json",
               "configuration.json",
               # If the model ships custom .py files, preserve them
               f"modeling_{src_arch}.py", f"configuration_{src_arch}.py"]:

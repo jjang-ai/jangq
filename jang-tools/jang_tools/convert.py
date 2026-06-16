@@ -254,6 +254,161 @@ _PER_EXPERT_PATTERN = re.compile(
 # MiniMax/Mixtral name mapping: w1→gate_proj, w2→down_proj, w3→up_proj
 _EXPERT_NAME_MAP = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
 
+_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+
+
+def _layer_index(tensor_name: str) -> int | None:
+    match = _LAYER_RE.search(tensor_name)
+    return int(match.group(1)) if match else None
+
+
+def _is_n2_fused_expert_gate_up(tensor_name: str) -> bool:
+    return tensor_name.endswith(".mlp.experts.gate_up_proj")
+
+
+def _is_n2_expert_down(tensor_name: str) -> bool:
+    return tensor_name.endswith(".mlp.experts.down_proj")
+
+
+def _is_moe_router_gate(tensor_name: str) -> bool:
+    name_lower = tensor_name.lower()
+    if "shared_expert_gate.weight" in name_lower:
+        return True
+    is_gate = ".gate.weight" in name_lower or name_lower.endswith(".gate.weight")
+    return is_gate and "gate_proj" not in name_lower and "gate_up" not in name_lower
+
+
+def _is_routed_moe_router_gate(tensor_name: str) -> bool:
+    name_lower = tensor_name.lower()
+    return _is_moe_router_gate(tensor_name) and "shared_expert_gate.weight" not in name_lower
+
+
+def _compute_router_l2_keep_indices(
+    all_tensors_info: list[tuple[str, list[int], int, Path]],
+    keep_experts: int,
+    force_dtype: Optional[str] = None,
+) -> dict[int, np.ndarray]:
+    """Compute per-layer expert keep rows from router-gate row L2 scores."""
+    keep_by_layer: dict[int, np.ndarray] = {}
+    for tensor_name, shape, _n_blocks, sf_path in all_tensors_info:
+        if not _is_routed_moe_router_gate(tensor_name):
+            continue
+        layer = _layer_index(tensor_name)
+        if layer is None:
+            continue
+        with safe_open(str(sf_path), framework="numpy") as f:
+            if force_dtype == "bf16":
+                try:
+                    router = f.get_tensor(tensor_name).astype(np.float32)
+                except (TypeError, AttributeError):
+                    router = _load_bf16_tensor(sf_path, tensor_name, shape)
+            else:
+                try:
+                    router = f.get_tensor(tensor_name).astype(np.float32)
+                except (TypeError, AttributeError):
+                    router = _load_bf16_tensor(sf_path, tensor_name, shape)
+        if router.ndim != 2:
+            raise RuntimeError(f"Router tensor {tensor_name} has unexpected shape {router.shape}")
+        if keep_experts > router.shape[0]:
+            raise RuntimeError(
+                f"expert_prune_keep={keep_experts} exceeds router experts={router.shape[0]}"
+            )
+        scores = np.sum(router * router, axis=1)
+        ranked = np.argsort(scores, kind="stable")
+        keep_by_layer[layer] = np.sort(ranked[-keep_experts:]).astype(np.int64)
+    if not keep_by_layer:
+        raise RuntimeError("--expert-prune-keep requested but no router gate tensors were found")
+    return keep_by_layer
+
+
+def _load_expert_prune_map(
+    prune_map_path: str | Path,
+    keep_experts: Optional[int] = None,
+) -> dict[int, np.ndarray]:
+    """Load activation-guided per-layer expert keep indices.
+
+    Supported input is the router profile JSON written by
+    ``profile_n2_jangtq2_router.py``. The selected expert order is preserved;
+    router rows and routed expert rows must be sliced with the same order so
+    compact runtime expert IDs stay aligned.
+    """
+    path = Path(prune_map_path)
+    data = json.loads(path.read_text())
+    layers = data.get("layers")
+    if not isinstance(layers, dict) or not layers:
+        raise RuntimeError(f"{path}: missing non-empty layers map")
+
+    keep_by_layer: dict[int, np.ndarray] = {}
+    inferred_keep: int | None = None
+    global_max_expert_id = -1
+    for layer_data in layers.values():
+        if not isinstance(layer_data, dict):
+            continue
+        for coverage_key in ("keep_by_probability_coverage", "keep_by_hit_coverage"):
+            coverage = layer_data.get(coverage_key)
+            if not isinstance(coverage, dict):
+                continue
+            for entry in coverage.values():
+                if isinstance(entry, dict) and isinstance(entry.get("experts"), list):
+                    for expert in entry["experts"]:
+                        global_max_expert_id = max(global_max_expert_id, int(expert))
+        if isinstance(layer_data.get("experts"), list):
+            for expert in layer_data["experts"]:
+                global_max_expert_id = max(global_max_expert_id, int(expert))
+    candidate_expert_count = max(global_max_expert_id + 1, keep_experts or 0)
+
+    for layer_key, layer_data in layers.items():
+        try:
+            layer = int(layer_key)
+        except ValueError as exc:
+            raise RuntimeError(f"{path}: invalid layer key {layer_key!r}") from exc
+        if not isinstance(layer_data, dict):
+            raise RuntimeError(f"{path}: layer {layer} entry is not an object")
+
+        selected: list[int] | None = None
+        if keep_experts is not None:
+            prob_cov = layer_data.get("keep_by_probability_coverage")
+            if isinstance(prob_cov, dict):
+                entry = prob_cov.get(str(keep_experts))
+                if isinstance(entry, dict) and isinstance(entry.get("experts"), list):
+                    selected = [int(x) for x in entry["experts"]]
+            if selected is None:
+                hit_cov = layer_data.get("keep_by_hit_coverage")
+                if isinstance(hit_cov, dict):
+                    entry = hit_cov.get(str(keep_experts))
+                    if isinstance(entry, dict) and isinstance(entry.get("experts"), list):
+                        selected = [int(x) for x in entry["experts"]]
+        if selected is None and isinstance(layer_data.get("experts"), list):
+            selected = [int(x) for x in layer_data["experts"]]
+        if not selected:
+            raise RuntimeError(
+                f"{path}: layer {layer} has no expert list for keep={keep_experts}"
+            )
+        if len(set(selected)) != len(selected):
+            raise RuntimeError(f"{path}: layer {layer} expert list contains duplicates")
+        if keep_experts is not None and len(selected) < keep_experts:
+            selected_set = set(selected)
+            for expert_id in range(candidate_expert_count):
+                if expert_id not in selected_set:
+                    selected.append(expert_id)
+                    selected_set.add(expert_id)
+                    if len(selected) == keep_experts:
+                        break
+        if keep_experts is not None and len(selected) != keep_experts:
+            raise RuntimeError(
+                f"{path}: layer {layer} has {len(selected)} experts, expected {keep_experts}"
+            )
+        if inferred_keep is None:
+            inferred_keep = len(selected)
+        elif inferred_keep != len(selected):
+            raise RuntimeError(
+                f"{path}: non-uniform keep count: layer {layer} has {len(selected)}, "
+                f"expected {inferred_keep}"
+            )
+        keep_by_layer[layer] = np.array(selected, dtype=np.int64)
+
+    return keep_by_layer
+
 
 def _load_bf16_from_header(sf_path: str, key: str):
     """Load a bfloat16 tensor from safetensors by reading raw bytes.
@@ -327,6 +482,52 @@ def _get_mlx_compatible_group_size(in_dim: int, requested_gs: int) -> int | None
     return None
 
 
+def _quantize_mlx_native(
+    weights: np.ndarray,
+    *,
+    bits: int,
+    group_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    import mlx.core as mx
+
+    is_3d = weights.ndim >= 3
+    w_shape = weights.shape
+    if is_3d:
+        weights = weights.reshape(-1, weights.shape[-1])
+
+    n_elements = weights.shape[0] * weights.shape[1]
+    if n_elements > 100_000_000:
+        chunk_rows = max(1, 100_000_000 // weights.shape[1])
+        all_qw, all_s, all_b = [], [], []
+        for start in range(0, weights.shape[0], chunk_rows):
+            end = min(start + chunk_rows, weights.shape[0])
+            chunk = mx.array(weights[start:end].astype(np.float16))
+            cqw, cs, cb = mx.quantize(chunk, group_size=group_size, bits=bits)
+            all_qw.append(np.array(cqw))
+            all_s.append(np.array(cs))
+            all_b.append(np.array(cb))
+            mx.synchronize()
+        mlx_weight = np.concatenate(all_qw, axis=0)
+        mlx_scales = np.concatenate(all_s, axis=0).astype(np.float16)
+        mlx_biases = np.concatenate(all_b, axis=0).astype(np.float16)
+    else:
+        w_mx = mx.array(weights.astype(np.float16))
+        qw, scales, biases = mx.quantize(w_mx, group_size=group_size, bits=bits)
+        mlx_weight = np.array(qw)
+        mlx_scales = np.array(scales).astype(np.float16)
+        mlx_biases = np.array(biases).astype(np.float16)
+
+    if is_3d:
+        n_experts = w_shape[0]
+        expert_out = w_shape[1]
+        mlx_weight = mlx_weight.reshape(n_experts, expert_out, -1)
+        mlx_scales = mlx_scales.reshape(n_experts, expert_out, -1)
+        mlx_biases = mlx_biases.reshape(n_experts, expert_out, -1)
+
+    mx.clear_cache()
+    return mlx_weight, mlx_scales, mlx_biases
+
+
 def convert_model(
     model_path: str | Path,
     output_path: str | Path,
@@ -341,6 +542,13 @@ def convert_model(
     hadamard: bool = False,
     gptq_hessian_dir: Optional[str | Path] = None,
     force_dtype: Optional[str] = None,
+    apply_mlp_asymmetry: bool = True,
+    expert_prune_keep: Optional[int] = None,
+    expert_prune_map: Optional[str | Path] = None,
+    split_gate_up_quant: bool = False,
+    split_gate_bits: int = 4,
+    split_up_bits: int = 2,
+    n2_down_bits: Optional[int] = None,
     *,
     progress_emitter=None,
 ) -> dict:
@@ -382,6 +590,17 @@ def convert_model(
     print(f"  Format: v2 (MLX-native, instant load)")
     print(f"  AWQ scaling: {'yes (alpha=' + str(awq_alpha) + ')' if use_awq else 'no'}")
     print(f"  Hadamard rotation: {'yes' if hadamard else 'no'}")
+    print(f"  MLP asymmetry floor: {'yes' if apply_mlp_asymmetry else 'no'}")
+    if expert_prune_keep:
+        print(f"  Expert prune keep: {expert_prune_keep} routed experts/layer")
+    if expert_prune_map:
+        print(f"  Expert prune map: {expert_prune_map}")
+    print(f"  Split fused gate/up quant: {'yes' if split_gate_up_quant else 'no'}")
+    if split_gate_up_quant:
+        print(f"  Split gate bits: {split_gate_bits}")
+        print(f"  Split up bits: {split_up_bits}")
+    if n2_down_bits is not None:
+        print(f"  N2 down_proj bits: {n2_down_bits}")
     if force_dtype:
         print(f"  Force source dtype: {force_dtype} (per-tensor sniff overridden)")
     print(f"{'='*60}\n")
@@ -562,6 +781,7 @@ def convert_model(
             _tensor_bits = allocate_bits_profile_compact(
                 tensor_info, profile,
                 num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+                apply_mlp_asymmetry=apply_mlp_asymmetry,
             )
         else:
             print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
@@ -602,6 +822,7 @@ def convert_model(
             global_bit_alloc = allocate_bits_profile(
                 all_tensor_names_for_alloc, profile,
                 num_experts=num_experts, has_shared_mlp=has_shared_mlp,
+                apply_mlp_asymmetry=apply_mlp_asymmetry,
             )
         elif target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
             print(f"  Using K-quant allocation (target: {target_bits} avg bits)")
@@ -630,7 +851,44 @@ def convert_model(
         import gc; gc.collect()
         print(f"  Freed allocation arrays ({len(_tensor_bits)} tensor bit assignments retained)")
 
+    expert_keep_by_layer: dict[int, np.ndarray] = {}
+    original_num_experts = num_experts
+    expert_prune_method: str | None = None
+    expert_prune_evidence: str | None = None
+    if expert_prune_map is not None:
+        expert_keep_by_layer = _load_expert_prune_map(
+            expert_prune_map,
+            keep_experts=expert_prune_keep,
+        )
+        if expert_prune_keep is None and expert_keep_by_layer:
+            expert_prune_keep = len(next(iter(expert_keep_by_layer.values())))
+        expert_prune_method = "activation_router_probability_topk_per_layer"
+        expert_prune_evidence = str(expert_prune_map)
+        print(
+            f"  Expert pruning: activation_profile_topk_per_layer "
+            f"{original_num_experts} → {expert_prune_keep} experts "
+            f"across {len(expert_keep_by_layer)} layers"
+        )
+    elif expert_prune_keep is not None:
+        expert_keep_by_layer = _compute_router_l2_keep_indices(
+            all_tensors_info,
+            expert_prune_keep,
+            force_dtype=force_dtype,
+        )
+        expert_prune_method = "router_row_l2_topk_per_layer"
+        expert_prune_evidence = "router_weight_proxy"
+        print(
+            f"  Expert pruning: router_row_l2_topk_per_layer "
+            f"{original_num_experts} → {expert_prune_keep} experts "
+            f"across {len(expert_keep_by_layer)} layers"
+        )
+
     # Print summary (common for both paths)
+    if n2_down_bits is not None:
+        for _name in list(_tensor_bits):
+            if _is_n2_expert_down(_name):
+                _tensor_bits[_name] = int(n2_down_bits)
+
     print(f"  Target bits: {target_bits}")
     print(f"  Actual bits: {actual_bits:.2f}")
     print(f"  Total blocks: {alloc_summary['total_blocks']:,}")
@@ -777,18 +1035,92 @@ def convert_model(
             )
             continue
 
+        if expert_keep_by_layer:
+            layer = _layer_index(tensor_name)
+            if layer in expert_keep_by_layer and (
+                _is_n2_fused_expert_gate_up(tensor_name)
+                or _is_n2_expert_down(tensor_name)
+                or _is_routed_moe_router_gate(tensor_name)
+            ):
+                weights = weights[expert_keep_by_layer[layer], ...]
+                print(f"    Expert-pruned: {tensor_name} → {weights.shape}")
+
         # MoE router/gate: store as float16 passthrough (no quantization).
         # Gate routing is extremely precision-sensitive — even 8-bit quantization
         # with different intermediate dtypes (f32 vs bf16) changes expert selection.
         # Gate is tiny (128 × 4096 = 0.5 MB per layer) so size impact is negligible.
         # This ensures maximum routing precision and avoids bf16/f16 dtype issues.
-        _tn_lower = tensor_name.lower()
-        _is_gate = (".gate.weight" in _tn_lower or _tn_lower.endswith(".gate.weight"))
-        _is_gate = _is_gate and "gate_proj" not in _tn_lower and "gate_up" not in _tn_lower
-        if _is_gate and num_experts > 0:
-            passthrough[tensor_name] = weights.astype(np.float16)
+        if _is_moe_router_gate(tensor_name) and num_experts > 0:
+            passthrough[_sanitize_output_tensor_name(tensor_name)] = weights.astype(np.float16)
             # offset already incremented at line 412 — do NOT increment again
             print(f"    Gate passthrough (f16): {tensor_name} → {weights.shape}")
+            continue
+
+        if split_gate_up_quant and _is_n2_fused_expert_gate_up(tensor_name):
+            if weights.ndim != 3 or weights.shape[1] % 2 != 0:
+                raise RuntimeError(
+                    f"--split-gate-up-quant expected 3D even gate_up tensor, got "
+                    f"{tensor_name} shape={weights.shape}"
+                )
+            tensor_gs = _get_tensor_group_size(tensor_name, block_size, num_experts)
+            compatible_gs = _get_mlx_compatible_group_size(int(weights.shape[-1]), int(tensor_gs))
+            if compatible_gs is None:
+                raise RuntimeError(
+                    f"--split-gate-up-quant cannot quantize {tensor_name}: "
+                    f"in_dim={weights.shape[-1]} group_size={tensor_gs}"
+                )
+            if compatible_gs != tensor_gs:
+                print(
+                    f"    Adjust group_size: {tensor_name} in_dim={weights.shape[-1]} "
+                    f"{tensor_gs}→{compatible_gs}"
+                )
+                tensor_gs = compatible_gs
+
+            mid = weights.shape[1] // 2
+            gate_weights = weights[:, :mid, :]
+            up_weights = weights[:, mid:, :]
+            print(
+                f"    Split fused gate/up quant: {tensor_name} "
+                f"gate={split_gate_bits}-bit up={split_up_bits}-bit keep={weights.shape[0]}"
+            )
+            gate_qw, gate_scales, gate_biases = _quantize_mlx_native(
+                gate_weights,
+                bits=split_gate_bits,
+                group_size=tensor_gs,
+            )
+            up_qw, up_scales, up_biases = _quantize_mlx_native(
+                up_weights,
+                bits=split_up_bits,
+                group_size=tensor_gs,
+            )
+            base_name = _sanitize_output_tensor_name(tensor_name)
+            gate_base = base_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
+            up_base = base_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
+            v2_tensors[f"{gate_base}.weight"] = gate_qw
+            v2_tensors[f"{gate_base}.scales"] = gate_scales
+            v2_tensors[f"{gate_base}.biases"] = gate_biases
+            v2_tensors[f"{up_base}.weight"] = up_qw
+            v2_tensors[f"{up_base}.scales"] = up_scales
+            v2_tensors[f"{up_base}.biases"] = up_biases
+            del weights, gate_weights, up_weights, gate_qw, gate_scales, gate_biases, up_qw, up_scales, up_biases
+
+            _buf_bytes = sum(arr.nbytes for arr in v2_tensors.values())
+            if _buf_bytes > 500 * 1024 ** 2:
+                if not hasattr(convert_model, '_shard_idx'):
+                    convert_model._shard_idx = 0
+                    output_path.mkdir(parents=True, exist_ok=True)
+                convert_model._shard_idx += 1
+                _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
+                _shard_path = output_path / _shard_name
+                from safetensors.numpy import save_file as _save_shard
+                _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+                if not hasattr(convert_model, '_shard_map'):
+                    convert_model._shard_map = {}
+                for _k in v2_tensors:
+                    convert_model._shard_map[_k] = _shard_name
+                print(f"    Flushed shard {convert_model._shard_idx}: {len(v2_tensors)} tensors, {_buf_bytes / 1e9:.1f} GB")
+                v2_tensors.clear()
+                import gc; gc.collect()
             continue
 
         bits = _tensor_bits[tensor_name]
@@ -1155,7 +1487,26 @@ def convert_model(
     # Strip source quantization_config (FP8 metadata) — leaving it causes mlx_lm
     # to misinterpret the model format. JANG uses "quantization" key instead.
     model_config.pop("quantization_config", None)
+    text_config_for_tokens = model_config.get("text_config")
+    if isinstance(text_config_for_tokens, dict):
+        for token_key in ("eos_token_id", "bos_token_id", "pad_token_id"):
+            if model_config.get(token_key) is None and text_config_for_tokens.get(token_key) is not None:
+                model_config[token_key] = text_config_for_tokens[token_key]
+    if expert_prune_keep is not None:
+        text_config = model_config.setdefault("text_config", {})
+        text_config["num_experts"] = expert_prune_keep
+        model_config["jang_expert_pruning"] = {
+            "source_num_experts": original_num_experts,
+            "num_experts": expert_prune_keep,
+            "dropped_experts_per_layer": original_num_experts - expert_prune_keep,
+            "method": expert_prune_method or "unknown",
+            "evidence_level": expert_prune_evidence or "unknown",
+        }
     bit_widths_used = sorted(set(_tensor_bits.values()))
+    if split_gate_up_quant:
+        bit_widths_used = sorted(set(bit_widths_used) | {split_gate_bits, split_up_bits})
+    if n2_down_bits is not None:
+        bit_widths_used = sorted(set(bit_widths_used) | {int(n2_down_bits)})
     passthrough_bit_widths_used = sorted(set(passthrough_bits.values()))
     total_weight_bytes = sum(
         arr.nbytes for name, arr in v2_tensors.items()
@@ -1178,6 +1529,14 @@ def convert_model(
             "quantization_scheme": "asymmetric",
             "quantization_backend": "mx.quantize",
             "hadamard_rotation": hadamard,
+            "mlp_asymmetry_floor": apply_mlp_asymmetry,
+            "split_gate_up_quant": split_gate_up_quant,
+            "split_gate_bits": split_gate_bits if split_gate_up_quant else None,
+            "split_up_bits": split_up_bits if split_gate_up_quant else None,
+            "n2_down_bits": n2_down_bits,
+            "expert_prune_keep": expert_prune_keep,
+            "expert_prune_map": str(expert_prune_map) if expert_prune_map else None,
+            "expert_prune_method": expert_prune_method,
         },
         "source_model": {
             "name": model_path.name,
@@ -1418,7 +1777,8 @@ def convert_model(
         except OSError as _ce:
             print(f"  WARNING: failed to copy {src.name}: {_ce}")
 
-    extra_configs = ["preprocessor_config.json", "video_preprocessor_config.json",
+    extra_configs = ["preprocessor_config.json", "processor_config.json",
+                     "video_preprocessor_config.json",
                      "chat_template.json", "chat_template.jinja",
                      "generation_config.json"]
     extras_copied = []

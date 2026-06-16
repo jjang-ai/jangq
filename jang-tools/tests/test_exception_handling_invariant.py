@@ -69,14 +69,17 @@ def _count_except_exception_sites() -> int:
 
 
 def test_except_exception_site_count_within_threshold():
-    """Coarse count invariant. Today's count is 171; threshold is 179 (8
+    """Coarse count invariant. Today's count is 195; threshold is 205 (10
     headroom for routine additions). Bulk additions trigger review per
     the taxonomy in the module docstring above. ZAYA runtime port +
     Hy3/ZAYA1-VL converters added best-effort-parse and optional-import
-    sites that fit the taxonomy."""
+    sites that fit the taxonomy; the Nex/N2 expert-prune + split-quant
+    convert path, the MiniMax-M3 converter/probe, and the multimodal
+    capability resolver added further tensor-conversion-retry / optional-
+    import / best-effort-parse sites (all audited, none silent)."""
     total = _count_except_exception_sites()
-    assert total <= 179, (
-        f"except Exception site count ({total}) exceeds threshold of 179 — "
+    assert total <= 205, (
+        f"except Exception site count ({total}) exceeds threshold of 205 — "
         f"audit new additions per the 5-category taxonomy in this module's "
         f"docstring (M113 iter 105). If all additions fit one of: optional-"
         f"import / tensor-conversion-retry / best-effort-parse / error-"
@@ -130,6 +133,16 @@ def test_no_bare_except_exception_pass():
         # Last-resort bit-width inference fallback. If the heuristic
         # raises, keep the already-configured bits. No loss of signal.
         ("jang_tools/loader.py", 1568),
+        # MiniMax codec-fallback chain: try FP8 codec, then numpy, then the
+        # final _load_bf16_tensor (which RAISES on real failure). The two
+        # intermediate passes just advance to the next codec — a genuine
+        # failure still propagates from the last attempt, so nothing is
+        # silently swallowed. (tensor-conversion-retry taxonomy.)
+        ("jang_tools/convert_minimax_jang.py", 85),
+        ("jang_tools/convert_minimax_jang.py", 93),
+        # mx.clear_cache() — Metal cache is an optimization; convert succeeds
+        # either way. Same rationale as the convert.py / convert_mxtq entries.
+        ("jang_tools/mimo_v2/convert_jang.py", 756),
     }
     remaining = [o for o in offenders if o not in allowed]
     assert not remaining, (

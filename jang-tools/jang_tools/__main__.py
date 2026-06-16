@@ -193,6 +193,13 @@ def cmd_convert(args):
         hadamard=args.hadamard,
         block_size=block_size,
         force_dtype=args.force_dtype,
+        apply_mlp_asymmetry=not args.no_mlp_asymmetry_floor,
+        expert_prune_keep=args.expert_prune_keep,
+        expert_prune_map=args.expert_prune_map,
+        split_gate_up_quant=args.split_gate_up_quant,
+        split_gate_bits=args.split_gate_bits,
+        split_up_bits=args.split_up_bits,
+        n2_down_bits=args.n2_down_bits,
         progress_emitter=getattr(args, "progress_emitter", None),
     )
 
@@ -203,14 +210,17 @@ def cmd_convert(args):
 
 
 def main():
-    # Early-intercept the minimax-m3 passthrough subcommand BEFORE the strict
-    # top-level argparse runs. It forwards its own --flags to a vendored tool's
+    # Early-intercept passthrough subcommands BEFORE the strict top-level
+    # argparse runs. These forward their own --flags to a vendored tool's
     # argparse main(); argparse.REMAINDER can't capture a leading --flag (the
-    # parent parser consumes it), so we slice the raw argv here instead. It is
-    # still registered below for `jang --help` discoverability.
+    # parent parser consumes it), so we slice the raw argv here instead. They
+    # are still registered below for `jang --help` discoverability.
     if len(sys.argv) >= 2 and sys.argv[1] == "minimax-m3":
         from .minimax_m3.cli import dispatch as _m3_dispatch
         sys.exit(_m3_dispatch(sys.argv[2:]))
+    if len(sys.argv) >= 2 and sys.argv[1] == "prune-n2-experts":
+        from .prune_n2_jang_experts import dispatch as _n2_dispatch
+        sys.exit(_n2_dispatch(sys.argv[2:]))
 
     parser = argparse.ArgumentParser(
         prog="jang",
@@ -260,6 +270,20 @@ def main():
                                "Default: auto-detect per tensor.")
     p_convert.add_argument("--hadamard", action="store_true",
                           help="Apply Hadamard rotation before quantization (QuIP# style, ~0.5-1 bit quality gain)")
+    p_convert.add_argument("--no-mlp-asymmetry-floor", action="store_true",
+                          help="Disable routed-expert gate/down precision floors for legacy compact 2-bit MoE builds")
+    p_convert.add_argument("--expert-prune-keep", type=int, default=None,
+                          help="Keep the top-K routed experts per layer by router row L2 while converting")
+    p_convert.add_argument("--expert-prune-map", type=str, default=None,
+                          help="Activation-guided expert keep map/profile JSON; use with --expert-prune-keep")
+    p_convert.add_argument("--split-gate-up-quant", action="store_true",
+                          help="For fused MoE gate_up_proj tensors, quantize gate and up halves separately")
+    p_convert.add_argument("--split-gate-bits", type=int, default=4, choices=[2, 3, 4, 6, 8],
+                          help="Bit width for the gate half when --split-gate-up-quant is enabled")
+    p_convert.add_argument("--split-up-bits", type=int, default=2, choices=[2, 3, 4, 6, 8],
+                          help="Bit width for the up half when --split-gate-up-quant is enabled")
+    p_convert.add_argument("--n2-down-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="Force Nex/N2 fused expert down_proj tensors to this bit width")
     p_convert.set_defaults(func=cmd_convert)
 
     # profile
@@ -313,6 +337,9 @@ def main():
 
     from .minimax_m3.cli import register as _register_minimax_m3
     _register_minimax_m3(subparsers)
+
+    from .prune_n2_jang_experts import register as _register_prune_n2
+    _register_prune_n2(subparsers)
 
     args = parser.parse_args()
 
