@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -34,11 +33,7 @@ class SwitchCallStats:
     total_calls: int = 0
     fast_calls: int = 0
     slow_calls: int = 0
-    weighted_calls: int = 0
     dispatch_seconds: float = 0.0
-    fast_dispatch_seconds: float = 0.0
-    slow_dispatch_seconds: float = 0.0
-    weighted_dispatch_seconds: float = 0.0
     slow_reasons: Counter[str] = field(default_factory=Counter)
     shape_counts: Counter[str] = field(default_factory=Counter)
 
@@ -52,19 +47,13 @@ class SwitchCallStats:
         top_k: int,
         bits: int | None,
         down_bits: int | None,
-        weighted: bool = False,
     ) -> None:
         self.total_calls += 1
         self.dispatch_seconds += float(seconds)
-        if weighted:
-            self.weighted_calls += 1
-            self.weighted_dispatch_seconds += float(seconds)
         if fast_path_eligible:
             self.fast_calls += 1
-            self.fast_dispatch_seconds += float(seconds)
         else:
             self.slow_calls += 1
-            self.slow_dispatch_seconds += float(seconds)
             self.slow_reasons[reason] += 1
         shape_key = f"batch={batch},k={top_k},bits={bits},down_bits={down_bits}"
         self.shape_counts[shape_key] += 1
@@ -80,11 +69,7 @@ class SwitchCallStats:
             "total_calls": self.total_calls,
             "fast_calls": self.fast_calls,
             "slow_calls": self.slow_calls,
-            "weighted_calls": self.weighted_calls,
             "dispatch_seconds": self.dispatch_seconds,
-            "fast_dispatch_seconds": self.fast_dispatch_seconds,
-            "slow_dispatch_seconds": self.slow_dispatch_seconds,
-            "weighted_dispatch_seconds": self.weighted_dispatch_seconds,
             "slow_reasons": dict(self.slow_reasons),
             "shape_counts": dict(self.shape_counts),
         }
@@ -249,7 +234,6 @@ class SwitchGLUProfiler:
         self.stats = SwitchCallStats(timing_mode=timing_mode)
         self._switch_cls: Any | None = None
         self._orig_call: Any | None = None
-        self._orig_weighted_decode: Any | None = None
 
     def __enter__(self) -> "SwitchGLUProfiler":
         from mlx_lm.models.switch_layers import SwitchGLU
@@ -257,10 +241,8 @@ class SwitchGLUProfiler:
 
         self._switch_cls = SwitchGLU
         self._orig_call = SwitchGLU.__call__
-        self._orig_weighted_decode = getattr(SwitchGLU, "_jangtq_weighted_decode", None)
         stats = self.stats
         orig_call = self._orig_call
-        orig_weighted_decode = self._orig_weighted_decode
         sync_outputs = self._sync_outputs
 
         def _profiled_call(module, x, indices):
@@ -283,35 +265,11 @@ class SwitchGLUProfiler:
             return out
 
         SwitchGLU.__call__ = _profiled_call
-        if callable(orig_weighted_decode):
-            def _profiled_weighted_decode(module, x, indices, scores):
-                classification = classify_switchglu_call(
-                    module, x, indices, tq_linear_type=TurboQuantSwitchLinear
-                )
-                t0 = time.perf_counter()
-                out = orig_weighted_decode(module, x, indices, scores)
-                if sync_outputs:
-                    _sync_mlx_output(out)
-                stats.record(
-                    True,
-                    time.perf_counter() - t0,
-                    "weighted-decode-fast-path",
-                    batch=classification.batch,
-                    top_k=classification.top_k,
-                    bits=classification.bits,
-                    down_bits=classification.down_bits,
-                    weighted=True,
-                )
-                return out
-
-            SwitchGLU._jangtq_weighted_decode = _profiled_weighted_decode
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._switch_cls is not None and self._orig_call is not None:
             self._switch_cls.__call__ = self._orig_call
-            if self._orig_weighted_decode is not None:
-                self._switch_cls._jangtq_weighted_decode = self._orig_weighted_decode
 
 
 def _sync_mlx_output(value: Any) -> None:
@@ -356,43 +314,10 @@ def read_model_info(model_path: str | Path) -> dict[str, Any]:
     }
 
 
-def runtime_tuning_info() -> dict[str, Any]:
-    """Return JANGTQ runtime tuning knobs active in this process."""
-    return {
-        "jangtq_gather_opt": os.environ.get("JANGTQ_GATHER_OPT"),
-        "jangtq_fused_swiglu_opt": os.environ.get("JANGTQ_FUSED_SWIGLU_OPT"),
-        "weighted_down_gather_enabled": os.environ.get("JANGTQ_ENABLE_WEIGHTED_DOWN_GATHER")
-        in {"1", "true", "yes"},
-        "switchglu_sort_threshold": os.environ.get("JANGTQ_SWITCHGLU_SORT_THRESHOLD", "64"),
-    }
-
-
-def maybe_quantize_lm_head(
-    model: Any,
-    *,
-    bits: int | None,
-    group_size: int,
-    quantized_linear_cls: Any | None = None,
-    eval_fn: Any | None = None,
-) -> dict[str, Any]:
-    """Optionally quantize the output projection after load for diagnostics."""
-    from jang_tools.mimo_v2.runtime import quantize_lm_head
-
-    return quantize_lm_head(
-        model,
-        bits=bits,
-        group_size=group_size,
-        quantized_linear_cls=quantized_linear_cls,
-        eval_fn=eval_fn,
-    )
-
-
 def loader_kind_for_model_info(model_info: dict[str, Any]) -> str:
     model_type = str(model_info.get("model_type") or "").lower()
     if model_type == "laguna":
         return "laguna-runtime"
-    if model_type == "mimo_v2":
-        return "mimo-v2-runtime"
     return "generic-jangtq"
 
 
@@ -404,16 +329,6 @@ def _load_model_and_tokenizer(model_path: str, model_info: dict[str, Any]):
 
         model, _cfg, _fmt = load_laguna(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        return model, tokenizer, loader_kind
-    if loader_kind == "mimo-v2-runtime":
-        from mlx_lm.utils import load
-        from jang_tools.mimo_v2 import mlx_register  # noqa: F401
-
-        model, tokenizer = load(
-            model_path,
-            lazy=True,
-            tokenizer_config={"trust_remote_code": True},
-        )
         return model, tokenizer, loader_kind
 
     from jang_tools.load_jangtq import load_jangtq_model
@@ -443,7 +358,6 @@ def write_profile_report(
     coherency: CoherencySummary,
     step_records: list[dict[str, Any]],
     model_info: dict[str, Any],
-    warmup_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     decode_tps = generated_tokens / max(decode_seconds, 1e-9)
     total_tps = generated_tokens / max(total_seconds, 1e-9)
@@ -475,7 +389,6 @@ def write_profile_report(
             "generated_tokens_per_second_total_wall": total_tps,
         },
         "switchglu": switch_stats.to_dict(),
-        "warmup": warmup_info or {"enabled": False, "tokens_requested": 0, "tokens_generated": 0},
         "coherency": coherency.to_dict(),
         "acceptance": {
             "status": acceptance_status,
@@ -489,48 +402,6 @@ def write_profile_report(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, sort_keys=True))
     return report
-
-
-def run_generation_warmup(
-    model: Any,
-    tokenizer: Any,
-    rendered_prompt: str,
-    *,
-    warmup_tokens: int,
-    sampler: Any,
-    stream_generate_fn: Any | None = None,
-) -> dict[str, Any]:
-    """Run an unmeasured generation pass to compile/materialize lazy MLX paths."""
-    if warmup_tokens <= 0:
-        return {"enabled": False, "tokens_requested": 0, "tokens_generated": 0}
-
-    if stream_generate_fn is None:
-        from mlx_lm.generate import stream_generate as stream_generate_fn
-
-    t0 = time.perf_counter()
-    generated = 0
-    finish_reason: str | None = None
-    prompt_tps = 0.0
-    for response in stream_generate_fn(
-        model,
-        tokenizer,
-        rendered_prompt,
-        max_tokens=warmup_tokens,
-        sampler=sampler,
-    ):
-        generated += 1
-        finish_reason = response.finish_reason or finish_reason
-        prompt_tps = float(response.prompt_tps or prompt_tps or 0.0)
-
-    return {
-        "enabled": True,
-        "tokens_requested": int(warmup_tokens),
-        "tokens_generated": int(generated),
-        "seconds": time.perf_counter() - t0,
-        "prompt_tokens_per_second": prompt_tps,
-        "finish_reason": finish_reason,
-        "excluded_from_speed": True,
-    }
 
 
 def _format_prompt(tokenizer: Any, prompt: str, use_chat_template: bool) -> str:
@@ -566,9 +437,6 @@ def profile_generate(
     use_chat_template: bool = True,
     temperature: float = 0.0,
     sync_switchglu: bool = False,
-    warmup_tokens: int = 0,
-    quantize_lm_head_bits: int | None = None,
-    quantize_lm_head_group_size: int = 64,
 ) -> dict[str, Any]:
     from mlx_lm.generate import stream_generate
     from mlx_lm.sample_utils import make_sampler
@@ -577,22 +445,10 @@ def profile_generate(
     load_t0 = time.perf_counter()
     model, tokenizer, loader_kind = _load_model_and_tokenizer(model_path, model_info)
     load_seconds = time.perf_counter() - load_t0
-    lm_head_quantization = maybe_quantize_lm_head(
-        model,
-        bits=quantize_lm_head_bits,
-        group_size=quantize_lm_head_group_size,
-    )
 
     rendered_prompt = _format_prompt(tokenizer, prompt, use_chat_template)
     prompt_ids = tokenizer.encode(rendered_prompt)
     sampler = make_sampler(temp=temperature)
-    warmup_info = run_generation_warmup(
-        model,
-        tokenizer,
-        rendered_prompt,
-        warmup_tokens=warmup_tokens,
-        sampler=sampler,
-    )
 
     output_parts: list[str] = []
     step_records: list[dict[str, Any]] = []
@@ -657,10 +513,7 @@ def profile_generate(
             "loader_kind": loader_kind,
             "load_seconds": load_seconds,
             "prompt_tokens_per_second": prompt_tps,
-            "runtime_tuning": runtime_tuning_info(),
-            "lm_head_quantization": lm_head_quantization,
         },
-        warmup_info=warmup_info,
     )
     return report
 
@@ -673,18 +526,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output", required=True, help="JSON report path")
     parser.add_argument("--raw-prompt", action="store_true", help="Do not apply tokenizer chat template")
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--quantize-lm-head-bits", type=int, choices=[2, 3, 4, 6, 8])
-    parser.add_argument("--quantize-lm-head-group-size", type=int, default=64)
-    parser.add_argument(
-        "--warmup-tokens",
-        type=int,
-        default=0,
-        help=(
-            "Run an unmeasured generation pass after load and before profiling. "
-            "Useful for separating cold MLX compile/materialization from steady "
-            "decode speed."
-        ),
-    )
     parser.add_argument(
         "--sync-switchglu",
         action="store_true",
@@ -704,9 +545,6 @@ def main(argv: list[str] | None = None) -> None:
         use_chat_template=not args.raw_prompt,
         temperature=args.temperature,
         sync_switchglu=args.sync_switchglu,
-        warmup_tokens=args.warmup_tokens,
-        quantize_lm_head_bits=args.quantize_lm_head_bits,
-        quantize_lm_head_group_size=args.quantize_lm_head_group_size,
     )
     speed = report["speed"]
     print(

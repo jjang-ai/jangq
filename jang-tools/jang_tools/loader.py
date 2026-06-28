@@ -1881,13 +1881,33 @@ def _fix_quantized_bits(model, weights):
             w_cols = module.weight.shape[-1]
             s_cols = module.scales.shape[-1]
             fixed = False
+            logical_input_dims = getattr(module, "dims", None)
+            if logical_input_dims is None:
+                logical_input_dims = getattr(module, "input_dims", None)
+            if logical_input_dims is not None:
+                try:
+                    logical_input_dims = int(logical_input_dims)
+                except Exception:
+                    logical_input_dims = None
             # Try group sizes in preference order.
             # Router/gate tensors prefer gs=64 (precision-critical).
             # Everything else prefers the module's initialized gs (from config.json).
             name_lower = name.lower()
             is_router = (".gate." in name_lower or name_lower.endswith(".gate")
                          or "shared_expert_gate" in name_lower)
-            if is_router:
+            if logical_input_dims:
+                gs_candidates = []
+                for gs in (module.group_size, 64, 128, 32):
+                    if (
+                        gs not in gs_candidates
+                        and logical_input_dims % int(gs) == 0
+                        and s_cols * int(gs) == logical_input_dims
+                    ):
+                        gs_candidates.append(int(gs))
+                for gs in (module.group_size, 64, 128, 32):
+                    if gs not in gs_candidates:
+                        gs_candidates.append(int(gs))
+            elif is_router:
                 gs_candidates = [64, module.group_size, 128]
             else:
                 gs_candidates = [module.group_size]
@@ -1902,6 +1922,8 @@ def _fix_quantized_bits(model, weights):
                     continue
                 try_bits = (w_cols * 32) // in_dim
                 if try_bits in (2, 3, 4, 5, 6, 8):
+                    if logical_input_dims and in_dim != logical_input_dims:
+                        continue
                     if try_bits != module.bits:
                         module.bits = try_bits
                     if try_gs != module.group_size:

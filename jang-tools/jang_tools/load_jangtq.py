@@ -38,7 +38,7 @@ Architectures supported:
 See the JANGTQ section of the project docs for full architecture, math,
 kernel inventory, and known traps.
 """
-import json, gc, os, re, warnings
+import json, gc, os, re
 from pathlib import Path
 
 import mlx.core as mx
@@ -256,6 +256,7 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     except Exception as _e:
         # Newer model_types (e.g. deepseek_v4) may trip transformers' config
         # validation. Fall back to direct PreTrainedTokenizerFast from tokenizer.json.
+        import warnings
         warnings.warn(f"load_tokenizer failed ({_e}); using PreTrainedTokenizerFast fallback")
         from transformers import PreTrainedTokenizerFast
         import os
@@ -296,51 +297,45 @@ def load_jangtq_model(model_path, skip_params_eval=False):
     #    is what real inference does, so every kernel shape that prefill
     #    will need is JIT-cached on the loader thread before return.
     _warmed = False
-    if skip_params_eval:
-        print(
-            "  [warmup] skipped because skip_params_eval=True",
-            flush=True,
-        )
-    else:
-        try:
-            from jang_tools.load_jangtq_kimi_vlm import _warmup_jit_per_layer
-            _warmup_jit_per_layer(model)
-            _warmed = True
-        except Exception as _e:
-            print(f"  [warmup] per-layer skipped ({type(_e).__name__}: {_e}); "
-                  f"trying full-model 1-token forward", flush=True)
+    try:
+        from jang_tools.load_jangtq_kimi_vlm import _warmup_jit_per_layer
+        _warmup_jit_per_layer(model)
+        _warmed = True
+    except Exception as _e:
+        print(f"  [warmup] per-layer skipped ({type(_e).__name__}: {_e}); "
+              f"trying full-model 1-token forward", flush=True)
 
-        if not _warmed:
-            try:
-                import time as _time
-                _t0 = _time.time()
-                # Some models expose `make_cache()`; others use `make_prompt_cache(model)`.
-                _cache = None
-                if hasattr(model, "make_cache"):
-                    _cache = model.make_cache()
-                else:
-                    try:
-                        from mlx_lm.models.cache import make_prompt_cache as _mpc
-                        _cache = _mpc(model)
-                    except Exception:
-                        _cache = None
-                _tiny_ids = mx.array([[0]], dtype=mx.int32)
+    if not _warmed:
+        try:
+            import time as _time
+            _t0 = _time.time()
+            # Some models expose `make_cache()`; others use `make_prompt_cache(model)`.
+            _cache = None
+            if hasattr(model, "make_cache"):
+                _cache = model.make_cache()
+            else:
                 try:
-                    if _cache is not None:
-                        _ = model(_tiny_ids, cache=_cache)
-                    else:
-                        _ = model(_tiny_ids)
-                except TypeError:
-                    # Some VLM wrappers want `inputs=` kwarg.
-                    _ = model(inputs=_tiny_ids, cache=_cache) if _cache is not None else model(inputs=_tiny_ids)
-                mx.synchronize()
-                print(f"  [warmup] full-model 1-token forward done "
-                      f"({_time.time() - _t0:.1f}s)", flush=True)
-                _warmed = True
-            except Exception as _fe:
-                print(f"  [warmup] full-model fallback ALSO skipped "
-                      f"({type(_fe).__name__}: {_fe}). First request will be slow.",
-                      flush=True)
+                    from mlx_lm.models.cache import make_prompt_cache as _mpc
+                    _cache = _mpc(model)
+                except Exception:
+                    _cache = None
+            _tiny_ids = mx.array([[0]], dtype=mx.int32)
+            try:
+                if _cache is not None:
+                    _ = model(_tiny_ids, cache=_cache)
+                else:
+                    _ = model(_tiny_ids)
+            except TypeError:
+                # Some VLM wrappers want `inputs=` kwarg.
+                _ = model(inputs=_tiny_ids, cache=_cache) if _cache is not None else model(inputs=_tiny_ids)
+            mx.synchronize()
+            print(f"  [warmup] full-model 1-token forward done "
+                  f"({_time.time() - _t0:.1f}s)", flush=True)
+            _warmed = True
+        except Exception as _fe:
+            print(f"  [warmup] full-model fallback ALSO skipped "
+                  f"({type(_fe).__name__}: {_fe}). First request will be slow.",
+                  flush=True)
 
     # Apply jang_config.json chat metadata to the tokenizer so downstream
     # generation works out-of-the-box (EOS stop, etc.). See
@@ -699,10 +694,7 @@ def _hydrate_dsv4_jangtq_streaming(
             fused_gate_up_swiglu_matmul,
             make_fused_gate_up_swiglu_decode,
         )
-        from jang_tools.turboquant.gather_tq_kernel import (
-            make_gather_tq_decode_broadcast,
-            make_gather_tq_decode_per_row,
-        )
+        from jang_tools.turboquant.gather_tq_kernel import make_gather_tq_decode_per_row
         from jang_tools.turboquant.hadamard_kernel import hadamard_rotate_metal
 
         _orig_switchglu_call = SwitchGLU.__call__
@@ -916,10 +908,6 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         rf"^({_VLM_PREFIX}layers\.\d+\.(?:ffn|mlp|block_sparse_moe)\.)"
         rf"switch_mlp\.(gate_up_proj|gate_proj|up_proj|down_proj)$"
     )
-    nemo_prestack_pat = re.compile(
-        rf"^({_VLM_PREFIX}backbone\.layers\.\d+\.mixer\.)"
-        rf"switch_mlp\.(fc1|fc2)$"
-    )
     mm_map  = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
     grouped_experts = {}
     # Pre-stacked tensors go straight into tq_groups with switch_mlp naming (no stacking).
@@ -1006,14 +994,6 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                 new_base = f"{layer_prefix}switch_mlp.{proj_name}"
                 prestacked[new_base] = parts
             continue
-        m = nemo_prestack_pat.match(base)
-        if m:
-            layer_prefix = m.group(1)
-            proj_name = m.group(2)
-            parts = tq_groups.pop(base)
-            new_base = f"{layer_prefix}switch_mlp.{proj_name}"
-            prestacked[new_base] = parts
-            continue
         m = qw_pat.match(base)
         if m:
             layer_prefix = m.group(1)
@@ -1071,6 +1051,32 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
     print("  Replacing modules with TurboQuantLinear...", flush=True)
     n_replaced = 0
 
+    def _tq_target_candidates(base: str) -> list[str]:
+        """Return possible runtime module paths for one TQ tensor group.
+
+        VLM skeletons can expose the text decoder under
+        ``language_model.model`` while bundles store text weights as
+        ``model.layers``. Regular weights are normalized later in
+        sanitize/load; TQ module replacement runs before that and needs the
+        same path reconciliation.
+        """
+        candidates = [base]
+        if base.startswith("model.layers."):
+            candidates.append(
+                "language_model.model.layers." + base[len("model.layers."):]
+            )
+        if base.startswith("model.language_model."):
+            candidates.append(
+                "language_model.model." + base[len("model.language_model."):]
+            )
+        seen = set()
+        ordered = []
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                ordered.append(candidate)
+        return ordered
+
     def get_module(root, dotted):
         cur = root
         for p in dotted.split("."):
@@ -1125,9 +1131,17 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         bits = parts["bits"]
         vals_per_u32 = 32 // bits
 
-        try:
-            existing = get_module(model, base)
-        except (AttributeError, IndexError, KeyError):
+        resolved_base = None
+        existing = None
+        for candidate in _tq_target_candidates(base):
+            try:
+                existing = get_module(model, candidate)
+                resolved_base = candidate
+                break
+            except (AttributeError, IndexError, KeyError):
+                continue
+
+        if resolved_base is None:
             allowlisted = any(p.search(base) for p in _hydrate_allowlist)
             if allowlisted:
                 print(f"    Skip allowlisted (not in model): {base}", flush=True)
@@ -1174,7 +1188,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
         new_module.packed = packed
         new_module.norms = norms
 
-        set_module(model, base, new_module)
+        set_module(model, resolved_base, new_module)
         n_replaced += 1
 
     print(f"  Replaced {n_replaced} modules", flush=True)
@@ -1330,27 +1344,6 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             _activation = getattr(self, "activation", None)
             _swiglu_limit = getattr(_activation, "swiglu_limit", 0.0) or 0.0
 
-            # Mixed gate/up bits are valid for Step JANGTQ_2K
-            # (gate=4, up=2, down=2), but the fused gate+up kernels take a
-            # single `bits` argument and therefore assume gate_proj and
-            # up_proj share the same packing width. Use the unfused TQ
-            # SwitchLinear path when they differ; it is slower but correct.
-            if gp.bits != up.bits:
-                x_exp = mx.expand_dims(x, (-2, -3))
-                do_sort = indices.size >= 64
-                idx = indices
-                inv_order = None
-                if do_sort:
-                    x_exp, idx, inv_order = _gather_sort(x_exp, indices)
-                if getattr(self, "training", False):
-                    idx = mx.stop_gradient(idx)
-                x_up = up(x_exp, idx, sorted_indices=do_sort)
-                x_gate = gp(x_exp, idx, sorted_indices=do_sort)
-                x_out = dp(self.activation(x_up, x_gate), idx, sorted_indices=do_sort)
-                if do_sort:
-                    x_out = _scatter_unsort(x_out, inv_order, indices.shape)
-                return x_out.squeeze(-2)
-
             # Decode fast path: batch=1, K=topk, broadcast mode.
             # Detect by: x has flattenable-to-(1, in_f) layout AND indices is 1D-equivalent.
             x_sq = x
@@ -1426,296 +1419,6 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
             "correct JANGTQ routed-expert decoding; refusing to continue with "
             f"stock SwitchGLU. Original error: {_e}"
         ) from _e
-
-    # Nemotron-H uses SwitchMLP(fc1 -> ReLU2 -> fc2), not SwitchGLU. The
-    # SwitchGLU fused gate/up patch above does not apply, so without this
-    # branch Ultra decodes through the generic dynamic gather path even though
-    # all routed projections are TurboQuantSwitchLinear.
-    try:
-        from mlx_lm.models.switch_layers import SwitchMLP, _gather_sort, _scatter_unsort
-        from jang_tools.turboquant.gather_tq_kernel import (
-            make_gather_tq_decode_broadcast,
-            make_gather_tq_decode_per_row,
-        )
-        from jang_tools.turboquant.hadamard_kernel import hadamard_rotate_metal
-
-        _ORIG_SWITCHMLP_CALL = SwitchMLP.__call__
-        _SWITCHMLP_DECODE_COMPILED = {}
-        _SWITCHMLP_WEIGHTED_DECODE_COMPILED = {}
-
-        def _get_compiled_switchmlp_decode(in_f, hidden_f, bits_fc1, bits_fc2, k):
-            key = (in_f, hidden_f, bits_fc1, bits_fc2, k)
-            if key in _SWITCHMLP_DECODE_COMPILED:
-                return _SWITCHMLP_DECODE_COMPILED[key]
-            gather_fc1 = make_gather_tq_decode_broadcast(in_f, hidden_f, bits_fc1, k)
-            gather_fc2 = make_gather_tq_decode_per_row(hidden_f, in_f, bits_fc2, k)
-
-            def _mlp(x_flat, p1, n1, p2, n2, cb1, cb2, signs1, signs2, idx):
-                x_rot = hadamard_rotate_metal(x_flat, signs1)
-                x_hidden = gather_fc1(x_rot, p1, n1, cb1, idx)
-                x_hidden = mx.square(mx.maximum(x_hidden, 0.0))
-                x_hidden_rot = hadamard_rotate_metal(x_hidden, signs2)
-                return gather_fc2(x_hidden_rot, p2, n2, cb2, idx)
-
-            _SWITCHMLP_DECODE_COMPILED[key] = mx.compile(_mlp)
-            return _SWITCHMLP_DECODE_COMPILED[key]
-
-        def _get_compiled_switchmlp_weighted_decode(in_f, hidden_f, bits_fc1, bits_fc2, k):
-            key = (in_f, hidden_f, bits_fc1, bits_fc2, k)
-            if key in _SWITCHMLP_WEIGHTED_DECODE_COMPILED:
-                return _SWITCHMLP_WEIGHTED_DECODE_COMPILED[key]
-            gather_fc1 = make_gather_tq_decode_broadcast(in_f, hidden_f, bits_fc1, k)
-            gather_fc2 = make_gather_tq_decode_per_row(hidden_f, in_f, bits_fc2, k)
-
-            def _mlp(x_flat, p1, n1, p2, n2, cb1, cb2, signs1, signs2, idx, scores_flat):
-                x_rot = hadamard_rotate_metal(x_flat, signs1)
-                x_hidden = gather_fc1(x_rot, p1, n1, cb1, idx)
-                x_hidden = mx.square(mx.maximum(x_hidden, 0.0))
-                x_hidden_rot = hadamard_rotate_metal(x_hidden, signs2)
-                y = gather_fc2(x_hidden_rot, p2, n2, cb2, idx)
-                return mx.sum(y * scores_flat.astype(y.dtype)[:, None], axis=0, keepdims=True)
-
-            _SWITCHMLP_WEIGHTED_DECODE_COMPILED[key] = mx.compile(_mlp)
-            return _SWITCHMLP_WEIGHTED_DECODE_COMPILED[key]
-
-        def _switchmlp_weighted_decode(self, x, indices, scores):
-            fc1 = self.fc1
-            fc2 = self.fc2
-            if not isinstance(fc1, TurboQuantSwitchLinear) or not isinstance(fc2, TurboQuantSwitchLinear):
-                y = _ORIG_SWITCHMLP_CALL(self, x, indices)
-                return (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
-
-            x_sq = x
-            while x_sq.ndim > 2 and x_sq.shape[-2] == 1:
-                x_sq = x_sq.squeeze(-2)
-            x_flat = x_sq.reshape(-1, fc1.in_features)
-            batch = x_flat.shape[0]
-            k = indices.shape[-1] if indices.ndim > 0 else 1
-            can_fast = (
-                batch == 1
-                and k > 0
-                and indices.ndim >= 1
-                and indices.size < 64
-                and not getattr(self, "training", False)
-            )
-            if not can_fast:
-                y = self(x, indices)
-                return (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
-
-            idx_flat = indices.reshape(-1).astype(mx.uint32)
-            scores_flat = scores.reshape(-1)
-            compiled_mlp = _get_compiled_switchmlp_weighted_decode(
-                fc1.in_features, fc1.out_features, fc1.bits, fc2.bits, k
-            )
-            y = compiled_mlp(
-                x_flat.astype(mx.float32),
-                fc1.packed, fc1.norms,
-                fc2.packed, fc2.norms,
-                fc1.codebook, fc2.codebook,
-                fc1.signs, fc2.signs,
-                idx_flat,
-                scores_flat,
-            )
-            out = y.reshape(*indices.shape[:-1], 1, fc1.in_features)
-            if out.dtype != x.dtype:
-                out = out.astype(x.dtype)
-            return out.squeeze(-2)
-
-        def _fused_switchmlp_call(self, x, indices):
-            fc1 = self.fc1
-            fc2 = self.fc2
-            if not isinstance(fc1, TurboQuantSwitchLinear) or not isinstance(fc2, TurboQuantSwitchLinear):
-                return _ORIG_SWITCHMLP_CALL(self, x, indices)
-
-            x_sq = x
-            while x_sq.ndim > 2 and x_sq.shape[-2] == 1:
-                x_sq = x_sq.squeeze(-2)
-            x_flat = x_sq.reshape(-1, fc1.in_features)
-            batch = x_flat.shape[0]
-            k = indices.shape[-1] if indices.ndim > 0 else 1
-            can_fast = (
-                batch == 1
-                and k > 0
-                and indices.ndim >= 1
-                and indices.size < 64
-                and not getattr(self, "training", False)
-            )
-            if can_fast:
-                idx_flat = indices.reshape(-1).astype(mx.uint32)
-                compiled_mlp = _get_compiled_switchmlp_decode(
-                    fc1.in_features, fc1.out_features, fc1.bits, fc2.bits, k
-                )
-                y = compiled_mlp(
-                    x_flat.astype(mx.float32),
-                    fc1.packed, fc1.norms,
-                    fc2.packed, fc2.norms,
-                    fc1.codebook, fc2.codebook,
-                    fc1.signs, fc2.signs,
-                    idx_flat,
-                )
-                out = y.reshape(*indices.shape[:-1], k, 1, fc1.in_features)
-                if out.dtype != x.dtype:
-                    out = out.astype(x.dtype)
-                return out.squeeze(-2)
-
-            x_exp = mx.expand_dims(x, (-2, -3))
-            do_sort = indices.size >= 64
-            idx = indices
-            inv_order = None
-            if do_sort:
-                x_exp, idx, inv_order = _gather_sort(x_exp, indices)
-            if getattr(self, "training", False):
-                idx = mx.stop_gradient(idx)
-            x_out = fc1(x_exp, idx, sorted_indices=do_sort)
-            x_out = self.activation(x_out)
-            x_out = fc2(x_out, idx, sorted_indices=do_sort)
-            if do_sort:
-                x_out = _scatter_unsort(x_out, inv_order, indices.shape)
-            return x_out.squeeze(-2)
-
-        patched_mlp = sum(
-            1 for name, m in model.named_modules()
-            if isinstance(m, SwitchMLP)
-            and isinstance(getattr(m, "fc1", None), TurboQuantSwitchLinear)
-            and isinstance(getattr(m, "fc2", None), TurboQuantSwitchLinear)
-        )
-        _switchmlp_enable = os.environ.get("JANGTQ_ENABLE_NEMOTRON_SWITCHMLP_FASTPATH", "").strip().lower()
-        _switchmlp_disable = os.environ.get("JANGTQ_DISABLE_NEMOTRON_SWITCHMLP_FASTPATH", "").strip().lower()
-        _switchmlp_disabled = (
-            _switchmlp_disable in {"1", "true", "yes", "on"}
-            or _switchmlp_enable in {"0", "false", "no", "off"}
-        )
-        if not _switchmlp_disabled:
-            SwitchMLP.__call__ = _fused_switchmlp_call
-            SwitchMLP._jangtq_weighted_decode = _switchmlp_weighted_decode
-            print(
-                f"  Patched SwitchMLP class for fused fc1+relu2+fc2 ({patched_mlp} TQ instances)",
-                flush=True,
-            )
-        else:
-            print(
-                "  SwitchMLP fused fc1+relu2+fc2 available but disabled by env "
-                f"({patched_mlp} TQ instances)",
-                flush=True,
-            )
-    except Exception as _e:
-        raise RuntimeError(
-            "JANGTQ SwitchMLP fusion failed. Nemotron-H routed experts require "
-            "the fc1+relu2+fc2 TurboQuant path; refusing to continue with stock "
-            f"SwitchMLP. Original error: {_e}"
-        ) from _e
-
-    # Nemotron-H MoE can avoid materializing the full (..., K, latent) routed
-    # expert output in decode. The SwitchMLP helper above returns the
-    # score-weighted latent sum directly for batch=1/small-K decode, while
-    # preserving the original path for prefill and A/B disable.
-    try:
-        from mlx_lm.models.nemotron_h import NemotronHMoE
-
-        _weighted_moe_disable = os.environ.get(
-            "JANGTQ_DISABLE_NEMOTRON_WEIGHTED_MOE_FASTPATH", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
-
-        if not _weighted_moe_disable and not hasattr(NemotronHMoE, "_jangtq_orig_call"):
-            NemotronHMoE._jangtq_orig_call = NemotronHMoE.__call__
-
-            def _patched_nemotron_moe_call(self, x):
-                weighted_decode = getattr(self.switch_mlp, "_jangtq_weighted_decode", None)
-                if weighted_decode is None:
-                    return NemotronHMoE._jangtq_orig_call(self, x)
-
-                x_sq = x
-                while x_sq.ndim > 2 and x_sq.shape[-2] == 1:
-                    x_sq = x_sq.squeeze(-2)
-                try:
-                    batch = x_sq.reshape(-1, x.shape[-1]).shape[0]
-                except Exception:
-                    batch = -1
-                if batch != 1 or getattr(self, "training", False):
-                    return NemotronHMoE._jangtq_orig_call(self, x)
-
-                residuals = x
-                inds, scores = self.gate(x)
-
-                routed_input = x
-                if self.moe_latent_size is not None:
-                    routed_input = self.fc1_latent_proj(routed_input)
-
-                y = weighted_decode(routed_input, inds, scores)
-
-                if self.moe_latent_size is not None:
-                    y = self.fc2_latent_proj(y)
-
-                if self.config.n_shared_experts is not None:
-                    y = y + self.shared_experts(residuals)
-
-                return y
-
-            NemotronHMoE.__call__ = _patched_nemotron_moe_call
-            print(
-                "  Patched Nemotron-H MoE weighted SwitchMLP decode",
-                flush=True,
-            )
-        elif _weighted_moe_disable:
-            print(
-                "  Nemotron-H MoE weighted SwitchMLP decode disabled by env",
-                flush=True,
-            )
-    except Exception as _e:
-        print(f"  Nemotron-H MoE weighted decode patch skipped: {_e}", flush=True)
-
-    # Nemotron-H can widen activations to float32 after the first residual add
-    # because RMSNorm and several kernels produce float32. On this bundle that
-    # makes downstream BF16 affine projections, especially lm_head, materially
-    # slower. Keep decode activations at the incoming low-precision dtype while
-    # leaving cache updates inside each mixer unchanged.
-    try:
-        from mlx_lm.models.nemotron_h import NemotronHBlock, Model as _NemotronHModel
-
-        _activation_disable = os.environ.get(
-            "JANGTQ_DISABLE_NEMOTRON_ACTIVATION_BF16", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
-
-        if not _activation_disable:
-            if not hasattr(NemotronHBlock, "_jangtq_orig_call"):
-                NemotronHBlock._jangtq_orig_call = NemotronHBlock.__call__
-
-                def _patched_nemotron_block_call(self, x, mask=None, cache=None):
-                    out = NemotronHBlock._jangtq_orig_call(
-                        self,
-                        x,
-                        mask=mask,
-                        cache=cache,
-                    )
-                    if x.dtype in (mx.bfloat16, mx.float16) and out.dtype != x.dtype:
-                        return out.astype(x.dtype)
-                    return out
-
-                NemotronHBlock.__call__ = _patched_nemotron_block_call
-
-            if not hasattr(_NemotronHModel, "_jangtq_orig_call"):
-                _NemotronHModel._jangtq_orig_call = _NemotronHModel.__call__
-
-                def _patched_nemotron_model_call(self, inputs, cache=None):
-                    out = self.backbone(inputs, cache=cache)
-                    _target_dtype = getattr(self.backbone.embeddings.weight, "dtype", None)
-                    if _target_dtype in (mx.bfloat16, mx.float16) and out.dtype != _target_dtype:
-                        out = out.astype(_target_dtype)
-                    return self.lm_head(out)
-
-                _NemotronHModel.__call__ = _patched_nemotron_model_call
-
-            print(
-                "  Patched Nemotron-H activation dtype widening (BF16 residual/lm_head inputs)",
-                flush=True,
-            )
-        else:
-            print(
-                "  Nemotron-H activation dtype widening patch disabled by env",
-                flush=True,
-            )
-    except Exception as _e:
-        print(f"  Nemotron-H activation dtype patch skipped: {_e}", flush=True)
 
     # P15: mx.compile ONLY pure router math (mlx_lm pattern — free function,
     # no closures over self, shapeless so prefill/decode share one graph).
@@ -2017,6 +1720,9 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                     queries = qkv[..., :Hq]
                     keys = qkv[..., Hq:Hq + Hk]
                     values = qkv[..., Hq + Hk:]
+                    if getattr(self, "use_qk_norm", False):
+                        queries = self.q_norm(queries)
+                        keys = self.k_norm(keys)
                     # Different model classes name the head-count
                     # attribute differently — Llama-style uses
                     # `num_attention_heads`, Qwen3 uses `n_heads`,
@@ -2038,33 +1744,8 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                         # the original __call__ rather than reshape
                         # to a wrong layout.
                         return orig_call(self, x, mask=mask, cache=cache)
-                    def _norm_weight_dim(norm):
-                        weight = getattr(norm, "weight", None)
-                        if weight is None:
-                            try:
-                                weight = norm["weight"]
-                            except Exception:
-                                weight = None
-                        shape = getattr(weight, "shape", None)
-                        return int(shape[-1]) if shape else 0
-
-                    q_norm = getattr(self, "q_norm", None)
-                    k_norm = getattr(self, "k_norm", None)
-                    q_norm_dim = _norm_weight_dim(q_norm) if q_norm is not None else 0
-                    k_norm_dim = _norm_weight_dim(k_norm) if k_norm is not None else 0
-                    if q_norm is not None and k_norm is not None and q_norm_dim == Hq and k_norm_dim == Hk:
-                        queries = q_norm(queries)
-                        keys = k_norm(keys)
-                    queries = queries.reshape(B, L, n_heads, -1)
-                    keys = keys.reshape(B, L, n_kv_heads, -1)
-                    if q_norm is not None and k_norm is not None and q_norm_dim != Hq and k_norm_dim != Hk:
-                        if q_norm_dim == queries.shape[-1] and k_norm_dim == keys.shape[-1]:
-                            queries = q_norm(queries)
-                            keys = k_norm(keys)
-                        else:
-                            return orig_call(self, x, mask=mask, cache=cache)
-                    queries = queries.transpose(0, 2, 1, 3)
-                    keys = keys.transpose(0, 2, 1, 3)
+                    queries = queries.reshape(B, L, n_heads, -1).transpose(0, 2, 1, 3)
+                    keys = keys.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
                     values = values.reshape(B, L, n_kv_heads, -1).transpose(0, 2, 1, 3)
                     # Some attention families don't apply rope at all
                     # (NemotronHAttention does cache update directly,
@@ -2094,10 +1775,7 @@ def _hydrate_jangtq_model(model, model_path, mxtq_seed, mxtq_bits_map,
                     out = scaled_dot_product_attention(
                         queries, keys, values, cache=cache, scale=sdpa_scale, mask=mask,
                     )
-                    out = out.transpose(0, 2, 1, 3)
-                    if getattr(self, "use_head_wise_attn_gate", False) and hasattr(self, "g_proj"):
-                        out = out * mx.sigmoid(self.g_proj(x))[..., None]
-                    out = out.reshape(B, L, -1)
+                    out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
                     return self.o_proj(out)
                 return _patched
             _attn_cls.__call__ = _make_patched(_orig_attn_call)

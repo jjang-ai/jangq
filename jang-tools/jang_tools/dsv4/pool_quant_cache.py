@@ -58,21 +58,51 @@ class _StateProxy(MutableMapping[str, Any]):
 
     def __init__(self, initial: dict[str, Any] | None = None):
         self._data = {"buffer_kv": None, "buffer_gate": None}
-        self._pooled_q = None
+        self._pooled_q_segments: list[Any] = []
+        self._pooled_materialized: Any = None
         if initial:
             for key, value in initial.items():
                 self[key] = value
 
     def __getitem__(self, key: str) -> Any:
         if key == "pooled":
-            return _dequant_pool(self._pooled_q)
+            if self._pooled_materialized is not None:
+                return self._pooled_materialized
+            if not self._pooled_q_segments:
+                return None
+            parts = [
+                part
+                for part in (_dequant_pool(qpool) for qpool in self._pooled_q_segments)
+                if part is not None
+            ]
+            if not parts:
+                return None
+            if len(parts) == 1:
+                self._pooled_materialized = parts[0]
+            else:
+                self._pooled_materialized = mx.concatenate(parts, axis=1)
+            return self._pooled_materialized
         return self._data[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
         if key == "pooled":
-            self._pooled_q = _quant_pool(value) if value is not None else None
+            self._pooled_q_segments = [] if value is None else [_quant_pool(value)]
+            self._pooled_materialized = value
         else:
             self._data[key] = value
+
+    def append_pooled(self, value: Any) -> None:
+        """Quantize and append only newly produced pool rows."""
+        if value is None or value.shape[1] <= 0:
+            return
+        self._pooled_q_segments.append(_quant_pool(value))
+        if self._pooled_materialized is None:
+            self._pooled_materialized = value
+        else:
+            self._pooled_materialized = mx.concatenate(
+                [self._pooled_materialized, value],
+                axis=1,
+            )
 
     def __delitem__(self, key: str) -> None:
         self[key] = None
@@ -92,9 +122,12 @@ class _StateProxy(MutableMapping[str, Any]):
             value = self._data.get(key)
             if value is not None:
                 total += getattr(value, "nbytes", 0)
-        if self._pooled_q is not None:
-            for part in self._pooled_q[:3]:
+        for qpool in self._pooled_q_segments:
+            if qpool is None:
+                continue
+            for part in qpool[:3]:
                 total += getattr(part, "nbytes", 0)
+        total += getattr(self._pooled_materialized, "nbytes", 0)
         return total
 
 
@@ -146,10 +179,25 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
         self.compressor_state = dict(zip(_STATE_KEYS, compressor_state))
         self.indexer_state = dict(zip(_STATE_KEYS, indexer_state))
 
+    def update_pool(self, new_pooled, state_key):
+        state = self._branch_state(state_key)
+        if new_pooled.shape[1] > 0:
+            if isinstance(state, _StateProxy):
+                state.append_pooled(new_pooled)
+                pool = state["pooled"]
+            else:
+                pool = state["pooled"]
+                pool = new_pooled if pool is None else mx.concatenate([pool, new_pooled], axis=1)
+                state["pooled"] = pool
+        else:
+            pool = state["pooled"]
+        if pool is None:
+            pool = mx.zeros((new_pooled.shape[0], 0, new_pooled.shape[-1]), new_pooled.dtype)
+        return pool
+
     @property
     def nbytes(self):
         total = self.local.nbytes
         total += self.compressor_state.quant_nbytes()
         total += self.indexer_state.quant_nbytes()
         return total
-

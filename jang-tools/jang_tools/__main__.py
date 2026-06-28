@@ -194,12 +194,20 @@ def cmd_convert(args):
         block_size=block_size,
         force_dtype=args.force_dtype,
         apply_mlp_asymmetry=not args.no_mlp_asymmetry_floor,
+        awq_norms_path=args.awq_norms,
+        awq_alpha=args.awq_alpha,
         expert_prune_keep=args.expert_prune_keep,
         expert_prune_map=args.expert_prune_map,
         split_gate_up_quant=args.split_gate_up_quant,
         split_gate_bits=args.split_gate_bits,
         split_up_bits=args.split_up_bits,
         n2_down_bits=args.n2_down_bits,
+        n2_linear_attn_input_bits=args.n2_linear_attn_input_bits,
+        n2_linear_attn_out_bits=args.n2_linear_attn_out_bits,
+        n2_self_attn_bits=args.n2_self_attn_bits,
+        n2_shared_expert_gate_up_bits=args.n2_shared_expert_gate_up_bits,
+        n2_token_io_bits=args.n2_token_io_bits,
+        n2_lm_head_bits=args.n2_lm_head_bits,
         progress_emitter=getattr(args, "progress_emitter", None),
     )
 
@@ -210,18 +218,6 @@ def cmd_convert(args):
 
 
 def main():
-    # Early-intercept passthrough subcommands BEFORE the strict top-level
-    # argparse runs. These forward their own --flags to a vendored tool's
-    # argparse main(); argparse.REMAINDER can't capture a leading --flag (the
-    # parent parser consumes it), so we slice the raw argv here instead. They
-    # are still registered below for `jang --help` discoverability.
-    if len(sys.argv) >= 2 and sys.argv[1] == "minimax-m3":
-        from .minimax_m3.cli import dispatch as _m3_dispatch
-        sys.exit(_m3_dispatch(sys.argv[2:]))
-    if len(sys.argv) >= 2 and sys.argv[1] == "prune-n2-experts":
-        from .prune_n2_jang_experts import dispatch as _n2_dispatch
-        sys.exit(_n2_dispatch(sys.argv[2:]))
-
     parser = argparse.ArgumentParser(
         prog="jang",
         description="JANG: Mixed-Precision Importance Quantization for Apple Silicon",
@@ -272,6 +268,12 @@ def main():
                           help="Apply Hadamard rotation before quantization (QuIP# style, ~0.5-1 bit quality gain)")
     p_convert.add_argument("--no-mlp-asymmetry-floor", action="store_true",
                           help="Disable routed-expert gate/down precision floors for legacy compact 2-bit MoE builds")
+    p_convert.add_argument("--awq-norms", type=str, default=None,
+                          help="Path to awq_activations.safetensors with per-layer per-channel norms "
+                               "(produced by `python -m jang_tools.awq_capture_jang`). Routed-expert AWQ "
+                               "scaling is applied when the file contains `layers.{N}.experts_input` keys.")
+    p_convert.add_argument("--awq-alpha", type=float, default=0.25,
+                          help="AWQ scaling exponent (default 0.25 — empirically optimal)")
     p_convert.add_argument("--expert-prune-keep", type=int, default=None,
                           help="Keep the top-K routed experts per layer by router row L2 while converting")
     p_convert.add_argument("--expert-prune-map", type=str, default=None,
@@ -284,6 +286,20 @@ def main():
                           help="Bit width for the up half when --split-gate-up-quant is enabled")
     p_convert.add_argument("--n2-down-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
                           help="Force Nex/N2 fused expert down_proj tensors to this bit width")
+    p_convert.add_argument("--n2-linear-attn-input-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force linear_attn.in_proj_qkv and "
+                               "linear_attn.in_proj_z to this bit width; out_proj is untouched")
+    p_convert.add_argument("--n2-linear-attn-out-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force linear_attn.out_proj to this bit width")
+    p_convert.add_argument("--n2-self-attn-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force self_attn projection tensors to this bit width")
+    p_convert.add_argument("--n2-shared-expert-gate-up-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force shared_expert gate/up tensors to this bit width")
+    p_convert.add_argument("--n2-token-io-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force embed_tokens and lm_head tensors to this bit width")
+    p_convert.add_argument("--n2-lm-head-bits", type=int, default=None, choices=[2, 3, 4, 6, 8],
+                          help="For Nex/N2 qwen3_5_moe, force lm_head tensors to this bit width; overrides "
+                               "--n2-token-io-bits for lm_head only")
     p_convert.set_defaults(func=cmd_convert)
 
     # profile
@@ -334,12 +350,6 @@ def main():
 
     from .recommend import register as _register_recommend
     _register_recommend(subparsers)
-
-    from .minimax_m3.cli import register as _register_minimax_m3
-    _register_minimax_m3(subparsers)
-
-    from .prune_n2_jang_experts import register as _register_prune_n2
-    _register_prune_n2(subparsers)
 
     args = parser.parse_args()
 

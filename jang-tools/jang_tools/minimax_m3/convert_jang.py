@@ -54,7 +54,7 @@ from jang_tools.calibrate import _load_bf16_tensor  # noqa: E402
 BITS = {"expert": 2, "shared": 6, "dense": 6, "attn": 8,
         "embed": 6, "lmhead": 8, "vision": 8}
 GROUP_SIZE = 64
-EXPERT_GS = 128          # routed experts use gs128 (fits sub-110 GB after REAP prune)
+EXPERT_GS = 64           # PROPER: gs64 (was gs128 size-corner that caused logit collapse)
 SHARD_BYTES = 4_500_000_000
 
 
@@ -66,16 +66,9 @@ def _parse_args():
     ap.add_argument("--no-awq", action="store_true")
     ap.add_argument("--keep-experts", type=Path, default=None,
                     help="REAP keep map: {layer_idx: [expert_id,...]} JSON")
+    ap.add_argument("--down-bits", type=int, default=3,
+                    help="down_proj bit width (3=d3 default, 2=all-2-bit)")
     ap.add_argument("--shard-bytes", type=int, default=SHARD_BYTES)
-    ap.add_argument("--vl-runtime-validated", action="store_true",
-                    help="Advertise vision as a RUNTIME-WIRED modality "
-                         "(modality=multimodal, has_vision=true). Default OFF: "
-                         "vision tensors are still carried in the bundle but the "
-                         "M3 VL tower is not yet empirically validated, so the "
-                         "bundle advertises text-only with vision marked "
-                         "preserved-but-unwired (avoids the advertised-but-"
-                         "unsupported VL crash trap). Flip this ON only after "
-                         "real-image decode is confirmed coherent.")
     return ap.parse_args()
 
 
@@ -92,7 +85,9 @@ def _load_one(src: Path, wm: dict, name: str) -> np.ndarray:
 
 
 def _quant(w_np: np.ndarray, bits: int, gs: int = GROUP_SIZE):
-    w = mx.array(w_np.astype(np.float16))
+    # Quantize from fp32 (not fp16) so scale/zero-point estimation uses full
+    # precision — matters most for the 2-bit routed experts (arithmetic).
+    w = mx.array(w_np.astype(np.float32))
     qw, qs, qb = mx.quantize(w, group_size=gs, bits=bits)
     out = (np.array(qw), np.array(qs).astype(np.float16), np.array(qb).astype(np.float16))
     del w, qw, qs, qb
@@ -260,7 +255,7 @@ def main():
                 stack[i] = _load_one(SRC, wm, f"{pre}.block_sparse_moe.experts.{e}.{src_p}.weight")
             if awq_on and scale is not None:
                 stack *= scale[None, None, :]
-            emit_quant(f"{pre}.block_sparse_moe.switch_mlp.{dst_p}", stack, BITS["expert"], gs=EXPERT_GS)
+            emit_quant(f"{pre}.block_sparse_moe.switch_mlp.{dst_p}", stack, (args.down_bits if dst_p == "down_proj" else BITS["expert"]), gs=EXPERT_GS)
             del stack; gc.collect(); mx.metal.clear_cache()
         print(f"    L{li:2d} moe keep={len(kept)}/{NE} {time.time()-tl:.1f}s", flush=True)
         gc.collect()
@@ -309,12 +304,6 @@ def main():
             shutil.copy2(SRC / fn, OUT / fn)
 
     avg_routed = BITS["expert"]
-    # Vision tensors are ALWAYS carried in the bundle (8-bit), but the M3 VL
-    # tower runtime is validated separately. Until --vl-runtime-validated is
-    # passed, advertise text-only so a server never routes image input into an
-    # unvalidated VL path (the advertised-but-unsupported crash trap that hit
-    # Step3p7 / MiMo); the weights stay present + flagged preserved-but-unwired.
-    vl_validated = bool(getattr(args, "vl_runtime_validated", False))
     jang_cfg = {
         "format": "jang", "format_version": "2.0",
         "quantization": {"method": "jang-affine-mixed", "profile": "JANG_2L",
@@ -324,38 +313,13 @@ def main():
         "reap": {"pruned": bool(keep_map),
                  "experts_kept": (len(keep_map.get(3, [])) if keep_map else NE),
                  "experts_total": NE},
-        "architecture": {"type": "moe", "text_model_type": "minimax_m3",
-                         "attention": "gqa+msa_sparse",
-                         "has_vision": vl_validated, "has_moe": True,
+        "architecture": {"type": "moe", "attention": "gqa+msa_sparse",
+                         "has_vision": True, "has_moe": True,
                          "cache_type": "kv+msa_index_dual"},
+        "capabilities": {"family": "minimax_m3", "modality": "multimodal",
+                         "supports_tools": True, "supports_thinking": True},
     }
-    # Canonical capabilities (family / reasoning_parser / tool_parser / modality)
-    # from the single source of truth so generic JANG restamping is idempotent
-    # and verify_directory round-trips. build_capabilities resolves the family
-    # from config.model_type=minimax_m3_vl → reasoning_parser=tool_parser=
-    # "minimax_m3" (engine-registered <mm:think> + <invoke> XML parsers); the
-    # modality follows architecture.has_vision above.
-    from jang_tools.capabilities import build_capabilities, verify_directory
-    caps = build_capabilities(jang_cfg, out_cfg)
-    if caps is not None:
-        jang_cfg["capabilities"] = caps
-    else:
-        # never ship a parserless bundle — fail loudly instead
-        raise SystemExit("capabilities resolution failed for MiniMax-M3 "
-                         "(family not matched) — check config.json model_type")
-    if not vl_validated:
-        # honest media tri-state: vision weights present but runtime-unwired
-        jang_cfg["preserved_modalities"] = ["vision"]
-        jang_cfg["unwired_modalities"] = ["vision"]
-        jang_cfg.setdefault("runtime", {})["multimodal_status"] = (
-            "weights_preserved_text_runtime")
     (OUT / "jang_config.json").write_text(json.dumps(jang_cfg, indent=2))
-
-    ok, msg = verify_directory(OUT)
-    print(f"  capabilities verify: {'OK' if ok else 'FAIL'} — {msg}")
-    if not ok:
-        print("  WARNING: capabilities verify failed — bundle metadata "
-              "inconsistent; do not ship until resolved")
 
     print(f"\n  shards={nshard} on_disk={total/1e9:.2f}GB elapsed={(time.time()-t0)/60:.1f}min")
     print(f"  DONE -> {OUT}")

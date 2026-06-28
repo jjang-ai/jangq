@@ -344,8 +344,6 @@ def _install_video_fallback(processor):
     token count. Callers still pass ``videos=[[frame1, frame2, ...]]`` — the
     wrapper then converts internally.
     """
-    if getattr(processor, "video_processor", None) is not None:
-        return
     if not hasattr(processor, "image_processor"):
         return
 
@@ -357,9 +355,47 @@ def _install_video_fallback(processor):
 
     temporal_patch = int(getattr(ip, "temporal_patch_size", 2) or 2)
 
+    def _is_video_processor_dependency_error(exc: Exception) -> bool:
+        if isinstance(exc, (ImportError, ModuleNotFoundError)):
+            return True
+        msg = str(exc)
+        if not msg:
+            return False
+        return (
+            "PyAV is not installed" in msg
+            or "PyAV" in msg
+            or "video operations in torchvision" in msg
+            or "torchvision.io" in msg
+            and "read_video" in msg
+        )
+
+    def _is_video_processor_frame_list_error(exc: Exception) -> bool:
+        msg = str(exc)
+        return (
+            isinstance(exc, ValueError)
+            and "Expected video as (T, C, H, W)" in msg
+            and "got shape" in msg
+        )
+
     def _patched_call(self, images=None, text=None, videos=None, **kwargs):
-        if videos is None or self.video_processor is not None:
+        if videos is None:
             return orig_call(self, images=images, text=text, videos=videos, **kwargs)
+
+        video_processor = getattr(self, "video_processor", None)
+        if video_processor is None:
+            pass
+        else:
+            try:
+                return orig_call(self, images=images, text=text, videos=videos, **kwargs)
+            except Exception as exc:  # pragma: no cover - environment dependent
+                if not (
+                    _is_video_processor_dependency_error(exc)
+                    or _is_video_processor_frame_list_error(exc)
+                ):
+                    raise
+                # Fall through to image-processor fallback for optional-dependency
+                # missing, or mlx-vlm video processors that expect a pre-decoded
+                # (T, C, H, W) array while callers pass frame path lists.
 
         # Lift each video's frames into a flat image batch, one row per frame.
         # image_processor produces image_grid_thw shape (sum_frames, 3) with t=1.
@@ -470,8 +506,19 @@ def load_jangtq_vlm_model(model_path) -> Tuple[nn.Module, object]:
 
     model, processor, _, model_config = _mlx_vlm_skeleton(model_path)
     print(f"  Built mlx_vlm skeleton: {type(model).__name__}", flush=True)
-    print(f"  vision_tower depth: {model.vision_tower.config.depth} layers", flush=True)
-    print(f"  language_model layers: {model.config.text_config.num_hidden_layers}", flush=True)
+    vision_module = getattr(model, "vision_tower", None) or getattr(model, "visual", None)
+    vision_config = getattr(vision_module, "config", None)
+    vision_depth = getattr(vision_config, "depth", None)
+    if vision_depth is not None:
+        print(f"  vision module depth: {vision_depth} layers", flush=True)
+    else:
+        print("  vision module depth: unavailable", flush=True)
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    text_layers = getattr(text_config, "num_hidden_layers", None)
+    if text_layers is not None:
+        print(f"  language_model layers: {text_layers}", flush=True)
+    else:
+        print("  language_model layers: unavailable", flush=True)
 
     # Now apply the same TQ + quantization treatment as load_jangtq_model.
     # We delegate to a helper inside load_jangtq that does everything *except*

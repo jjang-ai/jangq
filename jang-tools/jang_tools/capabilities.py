@@ -43,18 +43,6 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax":          ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
-    # MiniMax-M3 (minimax_m3_vl) — GQA + block-sparse MSA selection MoE,
-    # Gemma-style RMSNorm, swigluoai. Dedicated parsers (engine-registered):
-    # reasoning <mm:think>…</mm:think> → "minimax_m3"; tool calls
-    # <tool_call><invoke name="X">…xml…</invoke></tool_call> → "minimax_m3"
-    # (tag-named-param XML). Distinct ids so generic JANG restamping cannot
-    # drift M3 back to qwen3 / minimax_m2 / think_xml. think_in_template=False
-    # (default no-think prompts start in visible content, not an open block).
-    # capabilities.cache_type="kv": the MSA dual cache (keys/values/idx_keys)
-    # is fully positional/sliceable — the dual detail rides in
-    # architecture.cache_type="kv+msa_index_dual", not this coarse hint.
-    "minimax_m3":       ("minimax_m3",  "minimax_m3",  "minimax_m3", False, "kv"),
-    "minimax_m3_vl":    ("minimax_m3",  "minimax_m3",  "minimax_m3", False, "kv"),
     # MiMo V2.5 — hybrid full-attention + SWA KV. Cache topology details
     # live in the MiMo converter/runtime metadata; the shared capability stamp
     # keeps generic JANG restamping on the XML reasoning/tool parser path.
@@ -177,60 +165,131 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     return None, unique
 
 
-def _resolve_modalities(jang: dict, config: dict) -> dict[str, bool]:
+# Tensor-name substrings that mark an actual modal tower/embedder in the
+# bundle. Calibrated against the real-VL JANG bundles so the weight-gate below
+# never false-negatives them:
+#   - ZAYA1-VL / Qwen-VL / Holo3   → vision_tower / patch_embed / merger
+#   - gemma-4 (early-fusion)        → vision_embedder / embed_vision (+ embed_audio)
+# A text-only checkpoint that merely *carries* a vestigial vision_config (e.g.
+# qwen3_5_moe / Qwen-AgentWorld, which ships vision_config + VL preprocessor
+# files but ZERO vision weights) matches none of these → gated to text-only.
+_VISION_WEIGHT_PATTERNS = (
+    "visual", "vision_tower", "vision_model", "vision_embedder", "embed_vision",
+    "patch_embed", "merger", "mm_projector", "multi_modal_projector",
+    "image_newline", "siglip", "vit.",
+)
+_AUDIO_WEIGHT_PATTERNS = (
+    "audio_tower", "audio_model", "audio_encoder", "audio_embedder",
+    "embed_audio", "audio_projector", "whisper",
+)
+_VIDEO_WEIGHT_PATTERNS = (
+    "video_tower", "video_model", "video_embedder", "embed_video",
+)
+
+
+def _bundle_tensor_names(model_path: Path | None) -> list[str] | None:
+    """Best-effort enumeration of a bundle's tensor names (no weights loaded).
+
+    Returns None when the names can't be determined (no path, unreadable) so
+    callers fall back to config-based inference instead of wrongly gating.
+    """
+    if model_path is None:
+        return None
+    p = Path(model_path)
+    idx = p / "model.safetensors.index.json"
+    if idx.exists():
+        try:
+            wm = json.loads(idx.read_text()).get("weight_map", {})
+            if wm:
+                return list(wm.keys())
+        except Exception:
+            pass
+    try:
+        from safetensors import safe_open  # type: ignore
+
+        names: list[str] = []
+        for f in sorted(p.glob("*.safetensors")):
+            with safe_open(str(f), "np") as h:
+                names.extend(h.keys())
+        return names or None
+    except Exception:
+        return None
+
+
+def _weights_match(names: list[str], patterns: tuple[str, ...]) -> bool:
+    low = [n.lower() for n in names]
+    return any(pat in n for pat in patterns for n in low)
+
+
+def _resolve_modalities(
+    jang: dict,
+    config: dict,
+    model_path: Path | None = None,
+    tensor_names: list[str] | None = None,
+) -> dict[str, bool]:
     """Resolve source-backed modal components from JANG and HF config stamps.
 
-    Single source of truth for every modality decision. Priority per flag:
-      1. explicit top-level ``jang["has_<x>"]``           (authoritative — incl. False)
-      2. explicit ``jang["architecture"]["has_<x>"]``      (convert.py / M3 shape)
-      3. explicit ``config["has_<x>"]``
-      4. presence of ``config["<x>_config"]``              (HF heuristic, last resort)
-
-    Crucially an explicit ``False`` at a higher tier wins over a lower-tier
-    ``*_config`` presence — a bundle that *carries* vision weights but stamps
-    ``has_vision=False`` (vision preserved but runtime-unwired, e.g. MiniMax-M3
-    until its VL tower is validated) resolves to text, not vision. (M127 kept:
-    ``text_config`` alone is never a vision signal — only ``vision_config`` is.)
+    Config presence (``vision_config``/``audio_config``) or a stale ``has_*``
+    stamp can advertise a modality the checkpoint has no weights for. When the
+    bundle's tensor names are enumerable, a modality is only kept ``True`` if its
+    weights are actually present — this is what stops a vestigial ``vision_config``
+    (Qwen-AgentWorld / qwen3_5_moe) from being mis-stamped as a vision model.
     """
-    arch = jang.get("architecture")
-    arch = arch if isinstance(arch, dict) else {}
+    has_vision = bool(jang.get("has_vision", config.get("has_vision", bool(config.get("vision_config")))))
+    has_audio = bool(jang.get("has_audio", config.get("has_audio", bool(config.get("audio_config")))))
+    has_video = bool(jang.get("has_video", config.get("has_video", bool(config.get("video_config")))))
 
-    def resolve(flag: str, cfg_section: str) -> bool:
-        if flag in jang:
-            return bool(jang[flag])
-        if flag in arch:
-            return bool(arch[flag])
-        if flag in config:
-            return bool(config[flag])
-        # last-resort heuristic: KEY PRESENCE of the HF sub-config (not its
-        # truthiness) — an empty ``vision_config: {}`` still signals vision.
-        # Any explicit ``has_<x>`` above (incl. False) overrides this.
-        return cfg_section in config
+    names = tensor_names if tensor_names is not None else _bundle_tensor_names(model_path)
+    if names is not None:
+        if has_vision and not _weights_match(names, _VISION_WEIGHT_PATTERNS):
+            has_vision = False
+        if has_audio and not _weights_match(names, _AUDIO_WEIGHT_PATTERNS):
+            has_audio = False
+        if has_video and not _weights_match(names, _VIDEO_WEIGHT_PATTERNS):
+            has_video = False
 
     return {
         "text": True,
-        "vision": resolve("has_vision", "vision_config"),
-        "audio": resolve("has_audio", "audio_config"),
-        "video": resolve("has_video", "video_config"),
+        "vision": has_vision,
+        "audio": has_audio,
+        "video": has_video,
     }
 
 
-def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) -> str:
-    """text | vision | audio | multimodal, derived solely from _resolve_modalities.
+def _resolve_modality(
+    jang: dict,
+    config: dict,
+    model_path: Path | None = None,
+    tensor_names: list[str] | None = None,
+) -> str:
+    """text | vision | audio | multimodal. jang has_* stamps are authoritative.
 
-    _resolve_modalities already folds in every explicit stamp (top-level,
-    architecture, config) and the ``*_config`` heuristic with the correct
-    precedence, so there is no separate fallback here — an earlier such
-    fallback re-read ``config["vision_config"]`` and wrongly overrode an
-    explicit ``has_vision=False`` (the M3 vision-preserved-but-text-runtime
-    case), which is exactly the regression this consolidation removes.
+    M127 (iter 50): the fallback used to return "vision" if EITHER
+    ``text_config`` OR ``vision_config`` appeared in the HF config. But many
+    text-only MoE families (qwen3_moe, qwen3_5_moe, glm_moe_dsa, mistral4)
+    wrap their text params under ``text_config`` with NO ``vision_config``,
+    so any jang_config missing a ``has_vision`` stamp (legacy v1 files,
+    third-party JANG models, manually-edited configs) got misclassified as
+    vision. vmlx's CapabilityDetector would then route through
+    VLMModelFactory and fail to load. Tightened to require ``vision_config``
+    specifically — text_config alone is NOT a vision signal.
     """
-    modalities = _resolve_modalities(jang, config)
+    modalities = _resolve_modalities(jang, config, model_path, tensor_names)
     active_modal = [k for k in ("vision", "audio", "video") if modalities.get(k)]
     if len(active_modal) > 1:
         return "multimodal"
     if active_modal:
         return active_modal[0]
+
+    arch_dict = jang.get("architecture")
+    if isinstance(arch_dict, dict) and "has_vision" in arch_dict:
+        return "vision" if arch_dict["has_vision"] else "text"
+    # Config-presence fallback ONLY when weights couldn't be verified. When the
+    # tensor list was enumerable the gated modalities above are authoritative, so
+    # a vestigial vision_config (no tower weights) correctly resolves to text.
+    weights_known = tensor_names is not None or _bundle_tensor_names(model_path) is not None
+    if not weights_known and "vision_config" in config:
+        return "vision"
     return "text"
 
 
@@ -238,6 +297,7 @@ def build_capabilities(
     jang: dict,
     config: dict | None = None,
     model_path: Path | None = None,
+    tensor_names: list[str] | None = None,
 ) -> dict | None:
     """Return the canonical `capabilities` block for this model, or None.
 
@@ -254,8 +314,8 @@ def build_capabilities(
     if matched is None:
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
-    modality = _resolve_modality(jang, config, model_path)
-    modalities = _resolve_modalities(jang, config)
+    modality = _resolve_modality(jang, config, model_path, tensor_names)
+    modalities = _resolve_modalities(jang, config, model_path, tensor_names)
     # supports_thinking advertises whether the model architecturally produces
     # chain-of-thought reasoning. ZAYA / ZAYA1-VL DO reason — measured live:
     # `enable_thinking=False` (default template) still produces chain-of-thought
@@ -347,11 +407,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
         return False, f"capabilities missing keys: {sorted(missing)}"
 
     valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4",
-                       "openai_gptoss",
-                       # MiniMax-M3 <mm:think>…</mm:think> — dedicated engine
-                       # parser (vmlx_engine.reasoning.minimax_m3_parser,
-                       # registered id "minimax_m3").
-                       "minimax_m3", None}
+                       "openai_gptoss", None}
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
                   "functionary", "glm47", "minimax", "gemma4", "native",
@@ -364,12 +420,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # Tencent Hy3-preview emits its own XML-like tool tags
                   # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
                   # registers this parser as "hy_v3", SGLang as "hunyuan".
-                  "hunyuan",
-                  # MiniMax-M3 tag-named-param XML
-                  # (<tool_call><invoke name="X">…xml…</invoke></tool_call>);
-                  # engine parser vmlx_engine.tool_parsers.minimax_m3_tool_parser,
-                  # registered id "minimax_m3".
-                  "minimax_m3"}
+                  "hunyuan"}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
     valid_modality = {"text", "vision", "audio", "multimodal", "embedding", "rerank", "image"}
 

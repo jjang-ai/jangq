@@ -2,8 +2,8 @@
 
 This is NOT a JANGTQ/TurboQuant converter. It emits MLX MX-quantized weights
 (`weight`/`scales`[/`biases`]) with `weight_format=mxfp4|mxfp8`, quantizes the
-text decoder linears, and preserves the tied token embedding/output projection
-plus the thin multimodal *embedders* as fp16 passthrough.
+text decoder linears + the tied token embedding, and preserves the thin
+multimodal *embedders* as fp16 passthrough.
 
 Gemma 4 12B is an *early-fusion* omni-modal model: there is no standalone ViT
 or audio conformer stack in the released checkpoint. Image patches and audio
@@ -89,34 +89,6 @@ class QuantPolicy:
     method: str  # "affine" | "passthrough" | "skip"
 
 
-def _decoder_layer_subpath(tensor_name: str) -> tuple[int, str] | None:
-    marker = ".language_model.layers."
-    if marker not in tensor_name:
-        return None
-    tail = tensor_name.split(marker, 1)[1]
-    layer_s, dot, subpath = tail.partition(".")
-    if not dot:
-        return None
-    try:
-        return int(layer_s), subpath
-    except ValueError:
-        return None
-
-
-def _is_decoder_attention_weight(tensor_name: str) -> bool:
-    layer = _decoder_layer_subpath(tensor_name)
-    return bool(
-        layer is not None
-        and ".self_attn." in f".{layer[1]}"
-        and tensor_name.endswith(".weight")
-    )
-
-
-def _is_full_attention_layer(tensor_name: str) -> bool:
-    layer = _decoder_layer_subpath(tensor_name)
-    return bool(layer is not None and layer[0] in {5, 11, 17, 23, 29, 35, 41, 47})
-
-
 def sanitize_key(hf_key: str) -> str:
     """HF gemma4_unified key -> mlx_vlm gemma4 key layout."""
     k = hf_key
@@ -127,26 +99,13 @@ def sanitize_key(hf_key: str) -> str:
     return k
 
 
-def quant_policy(
-    tensor_name: str,
-    bits: int = 4,
-    *,
-    preserve_attention_fp16: bool = False,
-    preserve_full_attention_fp16: bool = False,
-    preserve_first_layers: int = 0,
-) -> QuantPolicy:
+def quant_policy(tensor_name: str, bits: int = 4) -> QuantPolicy:
     name = tensor_name.lower()
     if tensor_name.endswith("_scale_inv"):
         return QuantPolicy(0, "skip")
 
     # Multimodal embedders / towers stay fp16 so the omni-modal path survives.
     if any(frag in name for frag in _MULTIMODAL_FRAGMENTS):
-        return QuantPolicy(16, "passthrough")
-
-    # Gemma 4 12B ties input embeddings to output logits (no lm_head tensor).
-    # Keep that matrix dense; quantizing it poisons both token lookup and the
-    # final vocab projection.
-    if tensor_name.endswith("embed_tokens.weight"):
         return QuantPolicy(16, "passthrough")
 
     # Norms (input/post_attn/pre+post_ffw/q_norm/k_norm/final norm), biases,
@@ -164,22 +123,8 @@ def quant_policy(
     if len(tensor_name.split(".")) == 1:
         return QuantPolicy(16, "passthrough")
 
-    layer = _decoder_layer_subpath(tensor_name)
-    if layer is not None and tensor_name.endswith(".weight"):
-        layer_idx, _subpath = layer
-        if preserve_first_layers > 0 and layer_idx < preserve_first_layers:
-            return QuantPolicy(16, "passthrough")
-        if preserve_attention_fp16 and _is_decoder_attention_weight(tensor_name):
-            return QuantPolicy(16, "passthrough")
-        if (
-            preserve_full_attention_fp16
-            and _is_full_attention_layer(tensor_name)
-            and _is_decoder_attention_weight(tensor_name)
-        ):
-            return QuantPolicy(16, "passthrough")
-
-    # Everything else 2D = decoder linears (q/k/v/o, gate/up/down) -> MX affine
-    # quantized.
+    # Everything else 2D = decoder linears (q/k/v/o, gate/up/down) + tied
+    # token embedding -> MX affine quantized.
     return QuantPolicy(bits, "affine")
 
 
@@ -292,22 +237,6 @@ _TOOL_CHOICE_PATCH = """        {%- endfor %}
     {%- endif -%}"""
 
 
-_EMPTY_NO_THINK_TAIL = """{%- if add_generation_prompt -%}
-    {%- if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' -%}
-        {{- '<|turn>model\\n' -}}
-        {%- if not enable_thinking | default(false) -%}
-            {{- '<|channel>thought\\n<channel|>' -}}
-        {%- endif -%}
-    {%- endif -%}
-{%- endif -%}"""
-
-_SAFE_NO_THINK_TAIL = """{%- if add_generation_prompt -%}
-    {%- if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' -%}
-        {{- '<|turn>model\\n' -}}
-    {%- endif -%}
-{%- endif -%}"""
-
-
 def _patch_chat_template_tool_choice(text: str) -> str:
     """Inject the conditional tool_choice==required stanza (idempotent)."""
     if "Tool use is REQUIRED" in text:
@@ -317,40 +246,22 @@ def _patch_chat_template_tool_choice(text: str) -> str:
     return text
 
 
-def _patch_chat_template_no_thinking_tail(text: str) -> str:
-    """Remove Gemma 4's empty no-thinking thought-channel generation prefill."""
-    return text.replace(_EMPTY_NO_THINK_TAIL, _SAFE_NO_THINK_TAIL, 1)
-
-
-def _patch_chat_template(text: str) -> str:
-    """Apply all Gemma 4 chat-template compatibility patches (idempotent)."""
-    text = _patch_chat_template_no_thinking_tail(text)
-    text = _patch_chat_template_tool_choice(text)
-    return text
-
-
 def _copy_sidecars(src: Path, out: Path) -> None:
     for file_name in SIDECAR_FILES:
         src_file = src / file_name
         if src_file.exists():
             shutil.copy2(str(src_file), str(out / file_name))
-    # Patch the jinja template (tool_choice==required + safe no-thinking
-    # generation tail) and fold it into tokenizer_config so runtimes that read
-    # tokenizer_config.chat_template get the same, patched template.
+    # Patch the jinja template (tool_choice==required) and fold it into
+    # tokenizer_config so runtimes that read tokenizer_config.chat_template
+    # get the same, patched template.
     tok_cfg = out / "tokenizer_config.json"
     template = out / "chat_template.jinja"
     if template.exists():
-        patched = _patch_chat_template(template.read_text(encoding="utf-8"))
+        patched = _patch_chat_template_tool_choice(template.read_text(encoding="utf-8"))
         template.write_text(patched, encoding="utf-8")
         if tok_cfg.exists():
             cfg = json.loads(tok_cfg.read_text(encoding="utf-8"))
             cfg["chat_template"] = patched
-            gen_cfg = out / "generation_config.json"
-            if gen_cfg.exists():
-                gen = json.loads(gen_cfg.read_text(encoding="utf-8"))
-                for key in ("bos_token_id", "eos_token_id", "pad_token_id"):
-                    if gen.get(key) is not None:
-                        cfg[key] = gen[key]
             tok_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
@@ -363,32 +274,6 @@ def parse_args(default_bits: int = 4) -> argparse.Namespace:
     parser.add_argument("out", type=Path)
     parser.add_argument("--bits", type=int, default=default_bits, choices=[4, 8])
     parser.add_argument("--group-size", type=int, default=32)
-    parser.add_argument(
-        "--preserve-attention-fp16",
-        action="store_true",
-        help=(
-            "Keep all decoder self-attention projections fp16 while MXFP-quantizing "
-            "the remaining decoder linears. Diagnostic/audio-safe profile; not "
-            "the default uniform MXFP artifact."
-        ),
-    )
-    parser.add_argument(
-        "--preserve-full-attention-fp16",
-        action="store_true",
-        help=(
-            "Keep only full/global attention layer projections fp16. Useful for "
-            "Gemma 4 12B audio/root-cause probes."
-        ),
-    )
-    parser.add_argument(
-        "--preserve-first-layers",
-        type=int,
-        default=0,
-        help=(
-            "Keep all decoder projection weights in the first N layers fp16. "
-            "Useful for staged audio-quality probes."
-        ),
-    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--progress", choices=["json", "off"], default="off")
     parser.add_argument("--quiet-text", action="store_true")
@@ -398,14 +283,7 @@ def parse_args(default_bits: int = 4) -> argparse.Namespace:
 def main(default_bits: int = 4) -> None:
     args = parse_args(default_bits=default_bits)
     weight_format = f"mxfp{args.bits}"
-    profile_suffixes = []
-    if args.preserve_attention_fp16:
-        profile_suffixes.append("ATTNFP16")
-    if args.preserve_full_attention_fp16:
-        profile_suffixes.append("FULLATTNFP16")
-    if args.preserve_first_layers:
-        profile_suffixes.append(f"L0_{args.preserve_first_layers}_FP16")
-    profile = f"MXFP{args.bits}" + (("_" + "_".join(profile_suffixes)) if profile_suffixes else "")
+    profile = f"MXFP{args.bits}"
     progress = ProgressEmitter(
         json_to_stderr=(args.progress == "json"),
         quiet_text=args.quiet_text,
@@ -415,9 +293,6 @@ def main(default_bits: int = 4) -> None:
 
     config = json.loads((src / "config.json").read_text(encoding="utf-8"))
     text_cfg = config.get("text_config", config)
-    has_vision = bool(config.get("vision_config"))
-    has_audio = bool(config.get("audio_config"))
-    has_video = bool(config.get("video_config"))
     n_layers = int(text_cfg.get("num_hidden_layers", 0))
     layer_types = text_cfg.get("layer_types") or []
     n_full = sum(1 for t in layer_types if t == "full_attention")
@@ -429,10 +304,7 @@ def main(default_bits: int = 4) -> None:
     print(f"  Output:  {out}")
     print(f"  Layers:  {n_layers}  (full-attn {n_full} / sliding {n_layers - n_full})")
     print(f"  Norm:    scale_shift=0 (NO +1)")
-    active_modal = [name for name, enabled in (("vision", has_vision), ("audio", has_audio), ("video", has_video)) if enabled]
-    print(f"  Modal:   {','.join(active_modal) if active_modal else 'text'} embedders preserved fp16 where present")
-    if profile_suffixes:
-        print(f"  Repair:  selective fp16 passthrough profile={profile}")
+    print(f"  Modal:   vision+audio embedders preserved fp16 (early-fusion)")
     print(f"  MTP:     none")
 
     progress.phase(1, 3, "scan")
@@ -441,13 +313,7 @@ def main(default_bits: int = 4) -> None:
     if args.dry_run:
         counts: dict[str, int] = {}
         for name, _shape, _sf in tensors:
-            policy = quant_policy(
-                name,
-                bits=args.bits,
-                preserve_attention_fp16=args.preserve_attention_fp16,
-                preserve_full_attention_fp16=args.preserve_full_attention_fp16,
-                preserve_first_layers=args.preserve_first_layers,
-            )
+            policy = quant_policy(name, bits=args.bits)
             key = f"{policy.method}-{policy.bits}"
             counts[key] = counts.get(key, 0) + 1
         print(json.dumps(counts, indent=2, sort_keys=True))
@@ -473,13 +339,7 @@ def main(default_bits: int = 4) -> None:
             return
         shard_idx += 1
         name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
-        mx.save_safetensors(
-            str(out / name),
-            {
-                k: (mx.array(v) if isinstance(v, np.ndarray) else v)
-                for k, v in shard_tensors.items()
-            },
-        )
+        save_file(shard_tensors, str(out / name))
         for key in shard_tensors:
             shard_map[key] = name
         print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.2f} GB")
@@ -495,13 +355,7 @@ def main(default_bits: int = 4) -> None:
 
     progress.phase(2, 3, "convert")
     for tensor_name, shape, sf_path in tqdm(tensors, desc="  Processing"):
-        policy = quant_policy(
-            tensor_name,
-            bits=args.bits,
-            preserve_attention_fp16=args.preserve_attention_fp16,
-            preserve_full_attention_fp16=args.preserve_full_attention_fp16,
-            preserve_first_layers=args.preserve_first_layers,
-        )
+        policy = quant_policy(tensor_name, bits=args.bits)
         if policy.method == "skip":
             total_skipped += 1
             continue
@@ -510,10 +364,7 @@ def main(default_bits: int = 4) -> None:
         tensor = _load_tensor(sf_path, tensor_name, shape)
         if policy.method == "passthrough" or tensor.ndim < 2:
             tensor = _prepare_passthrough(out_name, tensor)
-            if any(frag in out_name.lower() for frag in _MULTIMODAL_FRAGMENTS):
-                add_tensor(out_name, mx.array(tensor.astype(np.float32), dtype=mx.bfloat16))
-            else:
-                add_tensor(out_name, tensor.astype(np.float16))
+            add_tensor(out_name, tensor.astype(np.float16))
             total_passthrough += 1
         else:
             qw, qs, qb = _affine_quantize(
@@ -553,32 +404,15 @@ def main(default_bits: int = 4) -> None:
 
     config.pop("quantization_config", None)
     config["weight_format"] = weight_format
-    config["has_vision"] = has_vision
-    config["has_audio"] = has_audio
-    config["has_video"] = has_video
-    config["modalities"] = {
-        "text": True,
-        "vision": has_vision,
-        "audio": has_audio,
-        "video": has_video,
-    }
     config["quantization"] = {
         "bits": args.bits,
         "group_size": args.group_size,
         "mode": weight_format,
         "quantization_backend": "mx.quantize",
         "norm_convention": "gemma4_scale_shift_zero",
-        "tied_embedding": "fp16_passthrough",
         "multimodal": "fp16_passthrough_embedders_early_fusion",
         "mtp": "none",
     }
-    if profile_suffixes:
-        config["quantization"]["selective_passthrough"] = {
-            "preserve_attention_fp16": bool(args.preserve_attention_fp16),
-            "preserve_full_attention_fp16": bool(args.preserve_full_attention_fp16),
-            "preserve_first_layers": int(args.preserve_first_layers),
-            "reason": "gemma4_12b_audio_quality_probe",
-        }
     caps = build_capabilities({}, config, out)
     if caps is not None:
         config["capabilities"] = caps
@@ -592,15 +426,8 @@ def main(default_bits: int = 4) -> None:
             "name": src.name,
             "architecture": text_cfg.get("model_type", config.get("model_type", "gemma4_unified_text")),
         },
-        "has_vision": has_vision,
-        "has_audio": has_audio,
-        "has_video": has_video,
-        "modalities": {
-            "text": True,
-            "vision": has_vision,
-            "audio": has_audio,
-            "video": has_video,
-        },
+        "has_vision": True,
+        "has_audio": True,
         "quantization": {
             "method": weight_format,
             "quantization_backend": "mx.quantize",
@@ -608,7 +435,6 @@ def main(default_bits: int = 4) -> None:
             "group_size": args.group_size,
             "bits": args.bits,
             "norm_convention": "gemma4_scale_shift_zero",
-            "tied_embedding": "fp16_passthrough",
             "multimodal": "fp16_passthrough_embedders_early_fusion",
             "mtp_policy": "none",
             "passthrough_bit_widths_used": [16],
@@ -623,13 +449,6 @@ def main(default_bits: int = 4) -> None:
             "full_attention_layers": [i for i, t in enumerate(layer_types) if t == "full_attention"],
         },
     }
-    if profile_suffixes:
-        jang_config["quantization"]["selective_passthrough"] = {
-            "preserve_attention_fp16": bool(args.preserve_attention_fp16),
-            "preserve_full_attention_fp16": bool(args.preserve_full_attention_fp16),
-            "preserve_first_layers": int(args.preserve_first_layers),
-            "reason": "gemma4_12b_audio_quality_probe",
-        }
     caps = build_capabilities(jang_config, config, out)
     if caps is not None:
         jang_config["capabilities"] = caps

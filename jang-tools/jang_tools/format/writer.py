@@ -60,17 +60,35 @@ def write_jang_v2_model(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Add quantization key to model config so mlx_lm creates QuantizedLinear layers
-    # Use COMPRESS tier bits as default (covers 94-99% of layers)
+    # Add quantization key to model config so mlx_lm creates QuantizedLinear layers.
+    # Mixed-bit JANG bundles must expose per-module overrides here. mlx-lm's
+    # quantization predicate reads config["quantization"][module_path] directly;
+    # a uniform top-level bit width forces loader-side shape repair and can build
+    # the wrong QuantizedLinear shape before weights are loaded.
     bit_widths = jang_config.get("quantization", {}).get("bit_widths_used", [4])
     block_size = jang_config.get("quantization", {}).get("block_size", 64)
     default_bits = min(bit_widths)
+    manifest = jang_config.get("quantization", {}).get("tensor_quantization_manifest", {})
 
     model_config_out = dict(model_config)
-    model_config_out["quantization"] = {
+    quantization = {
         "group_size": block_size,
         "bits": default_bits,
+        "mode": "affine",
     }
+    if isinstance(manifest, dict):
+        for module_path, spec in manifest.items():
+            if not isinstance(module_path, str) or not isinstance(spec, dict):
+                continue
+            bits = spec.get("bits")
+            group_size = spec.get("group_size")
+            if isinstance(bits, int) and isinstance(group_size, int):
+                quantization[module_path] = {
+                    "group_size": group_size,
+                    "bits": bits,
+                    "mode": "affine",
+                }
+    model_config_out["quantization"] = quantization
     _write_json(output_dir / "config.json", model_config_out)
 
     # Write JANG config

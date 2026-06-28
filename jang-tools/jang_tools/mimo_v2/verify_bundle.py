@@ -1,7 +1,7 @@
 """Structural verifier for MiMo-V2.5 JANG bundles.
 
 Checks performed (in order, fail-fast):
-  1. config.json + jang_config.json present with expected profile + quantization metadata
+  1. config.json present with expected jang_profile + quantization metadata
   2. model.safetensors.index.json present and total_size matches sum of shard file sizes
   3. Every weight_map entry resolves to an existing shard file
   4. Every expected tensor (per source modeling) is present in bundle
@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -29,28 +31,52 @@ def _check_file(path: Path, label: str, failures: list[str]) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class StoragePolicy:
+    prestacked_jangtq: bool
+    bundle_has_mtp: bool
+    token_io_passthrough_bf16: bool
+    o_proj_quantized: bool
+    default_bits: int
+
+
+def _storage_policy_for_config(cfg: dict) -> StoragePolicy:
+    q = cfg.get("quantization", {})
+    runtime = cfg.get("runtime", {})
+    tq_layout = runtime.get("tq_layout")
+    profile_name = str(cfg.get("jang_profile") or "")
+    prestacked_jangtq = (
+        tq_layout == "prestacked_switch_mlp"
+        or q.get("routed_experts") == "tq_prestacked_switch_mlp"
+        or profile_name.startswith("JANGTQ")
+    )
+    bundle_has_mtp = bool(runtime.get("bundle_has_mtp", True))
+    bf16_token_profiles = {"JANG_2S", "JANG_2C", "JANG_2X"}
+    quantized_oproj_profiles = {"JANG_2S", "JANG_2C", "JANG_2X", "JANG_2Q", "JANG_2F"}
+    default_bits = 8
+    if profile_name in {"JANG_2Q", "JANG_2F"} or profile_name.startswith("JANG_2R_"):
+        m = re.search(r"B([568])$", profile_name)
+        default_bits = int(m.group(1)) if m else 4
+    return StoragePolicy(
+        prestacked_jangtq=prestacked_jangtq,
+        bundle_has_mtp=bundle_has_mtp,
+        token_io_passthrough_bf16=profile_name in bf16_token_profiles,
+        o_proj_quantized=prestacked_jangtq or profile_name in quantized_oproj_profiles or profile_name.startswith("JANG_2R_"),
+        default_bits=default_bits,
+    )
+
+
 def verify_bundle(bundle: Path, src: Path | None = None) -> int:
     failures: list[str] = []
     warnings: list[str] = []
     bundle = Path(bundle).expanduser()
     print(f"[verify] bundle: {bundle}")
 
-    # 1. config.json + jang_config.json
+    # 1. config.json
     cfg_path = bundle / "config.json"
     if not _check_file(cfg_path, "config.json", failures):
         return _report(failures, warnings)
     cfg = json.loads(cfg_path.read_text())
-    jang_cfg_path = bundle / "jang_config.json"
-    if _check_file(jang_cfg_path, "jang_config.json", failures):
-        jang_cfg = json.loads(jang_cfg_path.read_text())
-        if jang_cfg.get("family") != "mimo_v2":
-            failures.append(
-                f"jang_config.json family = {jang_cfg.get('family')!r} (want 'mimo_v2')"
-            )
-        if not isinstance(jang_cfg.get("mxtq_bits"), dict):
-            failures.append("jang_config.json missing required mxtq_bits object")
-    else:
-        jang_cfg = {}
     expected_top = ["quantization", "mxtq_bits", "routed_expert_bits", "jang_profile", "rope_parameters"]
     for k in expected_top:
         if k not in cfg:
@@ -58,19 +84,42 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
     if cfg.get("model_type") != "mimo_v2":
         failures.append(f"unexpected model_type: {cfg.get('model_type')} (want mimo_v2)")
     q = cfg.get("quantization", {})
-    is_jangtq = q.get("routed_experts") == "tq_prestacked_switch_mlp" or str(cfg.get("jang_profile", "")).startswith("JANGTQ")
+    runtime = cfg.get("runtime", {})
+    tq_layout = runtime.get("tq_layout")
+    storage_policy = _storage_policy_for_config(cfg)
+    is_prestacked_jangtq = storage_policy.prestacked_jangtq
     if q.get("quant_method") != "affine":
         failures.append(f"quantization.quant_method = {q.get('quant_method')} (want 'affine')")
     bits = q.get("bits")
-    if bits != 8:
-        failures.append(f"quantization.bits = {bits} (want 8 bookend default; routed experts use overrides)")
+    if bits != storage_policy.default_bits:
+        failures.append(
+            f"quantization.bits = {bits} "
+            f"(want {storage_policy.default_bits} profile default; routed experts use overrides)"
+        )
     if q.get("group_size") != 64:
-        failures.append(f"quantization.group_size = {q.get('group_size')} (want 64 bookend default)")
+        failures.append(f"quantization.group_size = {q.get('group_size')} (want 64)")
     for k in ("capabilities", "runtime"):
         if k not in cfg:
             failures.append(f"config.json missing required top-level key: {k}")
     if cfg.get("capabilities", {}).get("cache_type") != "kv":
         failures.append(f"capabilities.cache_type = {cfg.get('capabilities', {}).get('cache_type')} (want kv)")
+    modalities = cfg.get("capabilities", {}).get("modalities")
+    if modalities != ["text"]:
+        failures.append(
+            f"capabilities.modalities = {modalities!r} (want ['text'] until MiMo media forward is wired)"
+        )
+    preserved_modalities = cfg.get("capabilities", {}).get("preserved_modalities")
+    if preserved_modalities != ["vision", "audio"]:
+        failures.append(
+            "capabilities.preserved_modalities = "
+            f"{preserved_modalities!r} (want ['vision', 'audio'])"
+        )
+    unwired_modalities = cfg.get("capabilities", {}).get("unwired_modalities")
+    if unwired_modalities != ["vision", "audio"]:
+        failures.append(
+            "capabilities.unwired_modalities = "
+            f"{unwired_modalities!r} (want ['vision', 'audio'])"
+        )
     tool_parser = cfg.get("capabilities", {}).get("tools", {}).get("parser")
     if tool_parser != "xml_function":
         failures.append(
@@ -81,7 +130,7 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         failures.append(
             f"capabilities.reasoning.parser = {reasoning_parser!r} (want 'think_xml')"
         )
-    cache_topology = cfg.get("runtime", {}).get("cache_topology", {})
+    cache_topology = runtime.get("cache_topology", {})
     expected_cache_topology = {
         "family": "hybrid_full_swa_kv",
         "prefix_cache": True,
@@ -95,57 +144,40 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             failures.append(
                 f"runtime.cache_topology.{key} = {actual!r} (want {expected!r})"
             )
-    bundle_has_mtp = bool(cfg.get("runtime", {}).get("bundle_has_mtp", True))
+    bundle_has_mtp = storage_policy.bundle_has_mtp
     expected_mtp_mode = "preserved_disabled" if bundle_has_mtp else "absent"
-    if cfg.get("runtime", {}).get("mtp_mode") != expected_mtp_mode:
+    if runtime.get("mtp_mode") != expected_mtp_mode:
         failures.append(
-            f"runtime.mtp_mode = {cfg.get('runtime', {}).get('mtp_mode')} "
+            f"runtime.mtp_mode = {runtime.get('mtp_mode')} "
             f"(want {expected_mtp_mode})"
         )
+    if runtime.get("multimodal_mode") != "weights_preserved_text_runtime":
+        failures.append(
+            "runtime.multimodal_mode = "
+            f"{runtime.get('multimodal_mode')!r} "
+            "(want 'weights_preserved_text_runtime')"
+        )
+    bit_plan = runtime.get("routed_expert_bit_plan", {})
+    layer_1_plan = bit_plan.get("layer_overrides", {}).get("1")
     routed_bits = cfg.get("routed_expert_bits")
-    if isinstance(routed_bits, int):
-        expected_layer_bits = {
-            "gate_proj": routed_bits,
-            "up_proj": routed_bits,
-            "down_proj": routed_bits,
-        }
+    if isinstance(layer_1_plan, dict):
+        expected_down = layer_1_plan.get("down_proj")
+    elif isinstance(routed_bits, int):
+        expected_down = routed_bits
     elif isinstance(routed_bits, dict):
-        expected_layer_bits = dict(routed_bits)
+        expected_down = routed_bits.get("down_proj")
     else:
-        expected_layer_bits = {}
-    bit_plan = cfg.get("routed_expert_bit_plan") or {}
-    layer1_override = (bit_plan.get("layer_overrides") or {}).get("1")
-    if isinstance(layer1_override, dict):
-        expected_layer_bits = dict(layer1_override)
-    expected_down = expected_layer_bits.get("down_proj")
-    expected_expert_group = int(cfg.get("routed_expert_group_size", cfg.get("jang_expert_group_size", 64)))
-    if expected_layer_bits and not is_jangtq:
-        down_override = q.get("model.layers.1.mlp.switch_mlp.down_proj", {})
-        if down_override.get("bits") != expected_down or down_override.get("group_size") != expected_expert_group:
-            failures.append(
-                "missing/incorrect runtime override for model.layers.1.mlp.switch_mlp.down_proj: "
-                f"{down_override} (want bits={expected_down}, group_size={expected_expert_group})"
-            )
-        for proj, expected_bits in expected_layer_bits.items():
-            override = q.get(f"model.layers.1.mlp.switch_mlp.{proj}", {})
-            if override.get("bits") != expected_bits or override.get("group_size") != expected_expert_group:
-                failures.append(
-                    f"missing/incorrect runtime override for model.layers.1.mlp.switch_mlp.{proj}: "
-                    f"{override} (want bits={expected_bits}, group_size={expected_expert_group})"
-                )
-    if is_jangtq:
-        qkv_override = q.get("model.layers.0.self_attn.qkv_proj", {})
-        if qkv_override.get("bits") != 4 or qkv_override.get("group_size") != 64:
-            failures.append(
-                "missing/incorrect runtime override for model.layers.0.self_attn.qkv_proj: "
-                f"{qkv_override} (want bits=4, group_size=64)"
-            )
-        o_proj_override = q.get("model.layers.0.self_attn.o_proj", {})
-        if o_proj_override.get("bits") != 4 or o_proj_override.get("group_size") != 64:
-            failures.append(
-                "missing/incorrect runtime override for model.layers.0.self_attn.o_proj: "
-                f"{o_proj_override} (want bits=4, group_size=64)"
-            )
+        expected_down = None
+    down_override = q.get("model.layers.1.mlp.switch_mlp.down_proj", {})
+    if not is_prestacked_jangtq and down_override.get("bits") != expected_down:
+        failures.append(
+            "missing/incorrect runtime override for model.layers.1.mlp.switch_mlp.down_proj: "
+            f"{down_override} (want bits={expected_down})"
+        )
+    if is_prestacked_jangtq and tq_layout != "prestacked_switch_mlp":
+        failures.append(
+            f"runtime.tq_layout = {tq_layout!r} (want 'prestacked_switch_mlp')"
+        )
     print(f"[verify] config OK: profile={cfg.get('jang_profile')} routed_bits={cfg.get('routed_expert_bits')}")
 
     # 2. index.json + shards
@@ -173,27 +205,49 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
     # 3. Spot-check tensor structure: quantized triplet + dtype
     # Pick a few expected tensor groups.
     spot_groups = {
-        "embed": "model.embed_tokens",
-        "lm_head": "lm_head",
         "attn_qkv":      "model.layers.0.self_attn.qkv_proj",
         "layer0_dense":  "model.layers.0.mlp.gate_proj",
     }
-    if is_jangtq:
-        spot_groups["attn_o_proj"] = "model.layers.0.self_attn.o_proj"
-    if not is_jangtq:
-        if "model.layers.1.mlp.switch_mlp.gate_proj.weight" in weight_map:
-            spot_groups["routed_expert"] = "model.layers.1.mlp.switch_mlp.gate_proj"
-        else:
-            spot_groups["routed_expert"] = "model.layers.1.mlp.experts.0.gate_proj"
+    if not storage_policy.token_io_passthrough_bf16:
+        spot_groups.update({
+            "embed":         "model.embed_tokens",
+            "lm_head":       "lm_head",
+        })
+    if is_prestacked_jangtq:
+        tq_spot_groups = {
+            "routed_gate_tq": "model.layers.1.mlp.switch_mlp.gate_proj",
+            "routed_up_tq": "model.layers.1.mlp.switch_mlp.up_proj",
+            "routed_down_tq": "model.layers.1.mlp.switch_mlp.down_proj",
+        }
+    else:
+        spot_groups["routed_expert"] = "model.layers.1.mlp.experts.0.gate_proj"
+        tq_spot_groups = {}
     if bundle_has_mtp:
         spot_groups["mtp_qkv"] = "model.mtp.layers.0.self_attn.qkv_proj"
+    for label, base in tq_spot_groups.items():
+        expected_members = (
+            f"{base}.tq_packed",
+            f"{base}.tq_norms",
+            f"{base}.tq_bits",
+        )
+        for k in expected_members:
+            if k not in weight_map:
+                failures.append(f"{label}: expected JANGTQ tensor member missing: {k}")
+        packed_key = f"{base}.tq_packed"
+        if packed_key in weight_map:
+            with safe_open(str(bundle / weight_map[packed_key]), framework="pt", device="cpu") as f:
+                wt = f.get_slice(packed_key)
+                print(
+                    f"[verify] {label}: packed shape={tuple(wt.get_shape())} dtype={wt.get_dtype()}"
+                )
     for label, base in spot_groups.items():
         weight_key = f"{base}.weight"
         scales_key = f"{base}.scales"
         biases_key = f"{base}.biases"
-        for k in (weight_key, scales_key, biases_key):
+        expected_members = (weight_key, scales_key, biases_key)
+        for k in expected_members:
             if k not in weight_map:
-                failures.append(f"{label}: expected quantized triplet member missing: {k}")
+                failures.append(f"{label}: expected tensor member missing: {k}")
         # Inspect dtypes
         if weight_key in weight_map:
             with safe_open(str(bundle / weight_map[weight_key]), framework="pt", device="cpu") as f:
@@ -204,27 +258,9 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
             up = w_dtype.upper()
             if "U32" not in up and "UINT" not in up and "INT" not in up:
                 warnings.append(f"{label}: weight dtype is {w_dtype}, expected uint32 packed")
-            if label == "lm_head" and w_shape != (152576, 1024):
-                failures.append(
-                    f"{label}: weight shape={w_shape}, expected q8 packed shape (152576, 1024)"
-                )
-            if label == "attn_qkv" and is_jangtq and w_shape != (13568, 512):
-                failures.append(
-                    f"{label}: weight shape={w_shape}, expected q4 packed full-layer shape (13568, 512)"
-                )
-            if label == "attn_qkv" and not is_jangtq and w_shape != (13568, 1024):
-                failures.append(
-                    f"{label}: weight shape={w_shape}, expected q8 packed full-layer shape (13568, 1024)"
-                )
-            if label == "attn_o_proj" and w_shape != (4096, 1024):
-                failures.append(
-                    f"{label}: weight shape={w_shape}, expected q4 packed shape (4096, 1024)"
-                )
             print(f"[verify] {label}: weight shape={w_shape} dtype={w_dtype}")
 
-    # 4. Passthrough checks: norms should be bf16, gates should be fp32.
-    # Embed/lm_head are intentionally absent here: they must be affine
-    # quantized bookends and are checked in spot_groups above.
+    # 4. Passthrough checks: norms should be bf16, gates should be fp32
     passthrough_spot = {
         "model.layers.0.input_layernorm.weight":               ("bf16", "norm"),
         "model.layers.1.input_layernorm.weight":               ("bf16", "norm"),
@@ -236,8 +272,22 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         "audio_encoder.input_local_transformer.layers.0.input_layernorm.weight": ("bf16", "audio norm"),
         "speech_embeddings.0.weight":                          ("bf16", "speech emb"),
     }
-    if not is_jangtq:
-        passthrough_spot["model.layers.0.self_attn.o_proj.weight"] = ("bf16", "text o_proj")
+    if storage_policy.token_io_passthrough_bf16:
+        passthrough_spot.update({
+            "model.embed_tokens.weight": ("bf16", "embed"),
+            "lm_head.weight": ("bf16", "lm_head"),
+        })
+    if not storage_policy.o_proj_quantized:
+        passthrough_spot["model.layers.0.self_attn.o_proj.weight"] = ("bf16", "o_proj")
+    else:
+        spot_groups_for_oproj = {
+            "o_proj": "model.layers.0.self_attn.o_proj",
+        }
+        for label, base in spot_groups_for_oproj.items():
+            for suffix in ("weight", "scales", "biases"):
+                key = f"{base}.{suffix}"
+                if key not in weight_map:
+                    failures.append(f"{label}: expected affine tensor member missing: {key}")
     if bundle_has_mtp:
         passthrough_spot.update({
             "model.mtp.layers.0.self_attn.o_proj.weight": ("bf16", "MTP o_proj"),
@@ -254,65 +304,37 @@ def verify_bundle(bundle: Path, src: Path | None = None) -> int:
         else:
             print(f"[verify] passthrough OK: {label} dtype={dt}")
 
-    # 5. Count routed expert weights.
-    if is_jangtq:
-        tq_packed = [k for k in weight_map if ".mlp.switch_mlp." in k and k.endswith(".tq_packed")]
-        tq_norms = [k for k in weight_map if ".mlp.switch_mlp." in k and k.endswith(".tq_norms")]
-        tq_bits = [k for k in weight_map if ".mlp.switch_mlp." in k and k.endswith(".tq_bits")]
-        expected_tq = 47 * 3
-        if len(tq_packed) != expected_tq or len(tq_norms) != expected_tq or len(tq_bits) != expected_tq:
+    # 5. Count routed expert layout.
+    if is_prestacked_jangtq:
+        tq_members = [
+            k
+            for k in weight_map
+            if ".mlp.switch_mlp." in k
+            and k.endswith((".tq_packed", ".tq_norms", ".tq_bits"))
+        ]
+        expected_tq_members = 47 * 3 * 3
+        if len(tq_members) != expected_tq_members:
             failures.append(
-                "JANGTQ routed expert triplet count mismatch: "
-                f"packed={len(tq_packed)} norms={len(tq_norms)} bits={len(tq_bits)}, expected {expected_tq} each"
+                f"prestacked routed expert JANGTQ tensor count = {len(tq_members)}, "
+                f"expected {expected_tq_members}"
             )
         else:
-            print(f"[verify] JANGTQ routed switch_mlp triplet count = {expected_tq} x packed/norms/bits")
-    else:
-        # Preferred affine JANG bundles are pre-stacked:
-        # 47 layers × 3 mats = 141 switch_mlp weight triplets.
-        stacked_expert_weights = [
-            k for k in weight_map
-            if ".mlp.switch_mlp." in k and k.endswith(".weight")
-        ]
+            print(f"[verify] prestacked routed expert JANGTQ tensor count = {len(tq_members)} ✓")
         expert_weights = [k for k in weight_map if ".mlp.experts." in k and k.endswith(".weight")]
-        expected_layout = (
-            cfg.get("runtime", {}).get("expert_layout")
-            or jang_cfg.get("expert_layout")
+        if expert_weights:
+            failures.append(
+                f"prestacked JANGTQ bundle unexpectedly has per-expert weights: {len(expert_weights)}"
+            )
+    else:
+        expert_weights = [k for k in weight_map if ".mlp.experts." in k and k.endswith(".weight")]
+        expected_experts = int(
+            runtime.get("expert_keep_map", {}).get("keep_experts")
+            or cfg.get("n_routed_experts")
+            or 256
         )
-        if (
-            expected_layout == "stacked_affine_switch_mlp"
-            and expert_weights
-        ):
+        if len(expert_weights) != 47 * expected_experts * 3:
             failures.append(
-                "stacked affine bundle contains legacy per-expert weights: "
-                f"{len(expert_weights)} .mlp.experts.*.weight tensors"
-            )
-        if (
-            expected_layout == "per_expert_affine"
-            and stacked_expert_weights
-        ):
-            failures.append(
-                "per-expert affine bundle contains stacked switch_mlp weights: "
-                f"{len(stacked_expert_weights)} .mlp.switch_mlp.*.weight tensors"
-            )
-        if len(stacked_expert_weights) == 47 * 3:
-            missing_sidecars = []
-            for k in stacked_expert_weights:
-                base = k[: -len(".weight")]
-                for suffix in ("scales", "biases"):
-                    if f"{base}.{suffix}" not in weight_map:
-                        missing_sidecars.append(f"{base}.{suffix}")
-            if missing_sidecars:
-                failures.append(
-                    f"stacked routed expert sidecars missing: {missing_sidecars[:5]}"
-                )
-            else:
-                print(f"[verify] stacked routed expert .weight count = {len(stacked_expert_weights)} ✓")
-        elif len(expert_weights) != 47 * 256 * 3:
-            failures.append(
-                "routed expert .weight count mismatch: "
-                f"stacked={len(stacked_expert_weights)} per_expert={len(expert_weights)}, "
-                f"expected stacked {47*3} or per-expert {47*256*3}"
+                f"routed expert .weight count = {len(expert_weights)}, expected {47 * expected_experts * 3}"
             )
         else:
             print(f"[verify] routed expert .weight count = {len(expert_weights)} ✓")

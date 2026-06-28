@@ -51,7 +51,7 @@ def main():
 
     need = args.batch * args.batches
     texts = _vera_samples(args.calib, need * 3,
-                          domains=("coding", "agentic", "shell", "security", "general", "business"))
+                          domains=("coding", "agentic", "shell", "security", "general", "business", "math", "arithmetic", "stem", "knowledge"))
     seqs = []
     for t in texts:
         ids = tok.encode(t)

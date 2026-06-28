@@ -8,9 +8,8 @@ Gemma 4 uses channel markers for reasoning/content separation:
   <channel|>...final content...<turn|>
 
 When enable_thinking=True, the model generates a thought channel before content.
-When enable_thinking=False, the patched Gemma 4 12B template does not prefill a
-thought channel; generation starts from the normal model turn opener and visible
-content follows directly.
+When enable_thinking=False, the template injects an empty thought block
+(<|channel>thought\n<channel|>) so no reasoning is produced.
 
 The parser handles both streaming and complete extraction, including partial
 marker buffering at chunk boundaries.
@@ -41,7 +40,7 @@ class Gemma4ReasoningParser(ReasoningParser):
         Input: "<|channel>thought\nLet me think...\n<channel|>The answer is 42.<turn|>"
         Output: reasoning="Let me think...", content="The answer is 42."
 
-    Example (thinking OFF):
+    Example (thinking OFF — empty thought block in prompt):
         Input: "The answer is 42.<turn|>"
         Output: reasoning=None, content="The answer is 42."
     """

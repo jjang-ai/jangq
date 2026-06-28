@@ -81,6 +81,10 @@ def quant_policy(tensor_name: str, bits: int = 4) -> QuantPolicy:
         or tensor_name.endswith(".dt_bias")
         or tensor_name.endswith("conv1d.weight")
         or tensor_name.endswith("conv1d.bias")
+        # lfm2 / LFM2.5 short-conv kernel: `...conv.conv.weight` has shape
+        # [hidden, 1, conv_L_cache] (last dim = conv_L_cache, e.g. 3), smaller
+        # than group_size and not group-quantizable — keep it fp16 passthrough.
+        or tensor_name.endswith("conv.conv.weight")
         or tensor_name.endswith(".mlp.gate.weight")
         or tensor_name.endswith("shared_expert_gate.weight")
     ):
@@ -190,7 +194,10 @@ def _scan_source(src: Path) -> list[tuple[str, list[int], Path]]:
                 items.append((key, list(header[key].get("shape", [])), sf_path))
         return items
 
-    for sf_path in sorted(src.glob("model-*.safetensors")):
+    # No index.json: single-file checkpoints are named `model.safetensors`
+    # (no shard suffix), so `model-*.safetensors` misses them. `model*.safetensors`
+    # matches both the single file and `model-00001-of-*.safetensors` shards.
+    for sf_path in sorted(src.glob("model*.safetensors")):
         with safe_open(str(sf_path), framework="numpy") as f:
             for key in f.keys():
                 if key.endswith("_scale_inv"):
@@ -302,6 +309,30 @@ def main(default_bits: int = 4) -> None:
         if shard_bytes >= MAX_SHARD:
             flush_shard()
 
+    # Per-expert MoE layout (e.g. Ornith / deepreinforce-ai qwen3_5_moe ships
+    # `...experts.<N>.{gate,up,down}_proj.weight` as 256 separate tensors). The
+    # runtime expects them stacked into `switch_mlp.{gate,up,down}_proj` of shape
+    # [num_experts, out, in] (the layout AgentWorld's source already provides via
+    # the fused `experts.gate_up_proj`). Partition the per-expert tensors out of
+    # the main loop and stack+quantize them as groups afterwards.
+    import re as _re
+    _PER_EXPERT_RE = _re.compile(
+        r"^(?P<prefix>.*\.experts)\.(?P<idx>\d+)\.(?P<proj>gate_proj|up_proj|down_proj)\.weight$"
+    )
+    _expert_groups: dict[tuple[str, str], list[tuple[int, str, list[int], Path]]] = {}
+    _regular: list[tuple[str, list[int], Path]] = []
+    for _nm, _shp, _sp in tensors:
+        _m = _PER_EXPERT_RE.match(_nm)
+        if _m:
+            _expert_groups.setdefault((_m.group("prefix"), _m.group("proj")), []).append(
+                (int(_m.group("idx")), _nm, _shp, _sp)
+            )
+        else:
+            _regular.append((_nm, _shp, _sp))
+    tensors = _regular
+    if _expert_groups:
+        print(f"  per-expert MoE: {len(_expert_groups)} groups to stack -> switch_mlp")
+
     progress.phase(2, 3, "convert")
     for tensor_name, shape, sf_path in tqdm(tensors, desc="  Processing"):
         policy = quant_policy(tensor_name, bits=args.bits)
@@ -351,6 +382,33 @@ def main(default_bits: int = 4) -> None:
         if (total_affine + total_passthrough) % 200 == 0:
             gc.collect()
             mx.clear_cache()
+
+    # Stack each per-expert group into a single [num_experts, out, in] tensor and
+    # quantize it as `switch_mlp.{proj}` (the runtime's grouped-GEMM layout).
+    for (prefix, proj), members in _expert_groups.items():
+        members.sort(key=lambda m: m[0])
+        idxs = [m[0] for m in members]
+        if idxs != list(range(len(idxs))):
+            raise ValueError(
+                f"non-contiguous experts for {prefix}.{proj}: got {len(idxs)} "
+                f"experts, indices {idxs[:3]}..{idxs[-3:]}"
+            )
+        stacked = np.stack(
+            [_load_tensor(sp, nm, shp) for (_i, nm, shp, sp) in members], axis=0
+        )
+        qw, qs, qb = _affine_quantize(stacked, bits=args.bits, group_size=args.group_size)
+        del stacked
+        # sanitize a representative key, then experts.0.<proj> -> switch_mlp.<proj>
+        sane = sanitize_key(f"{prefix}.0.{proj}.weight")[: -len(".weight")]
+        base = sane.replace(f".experts.0.{proj}", f".switch_mlp.{proj}")
+        add_tensor(f"{base}.weight", qw)
+        add_tensor(f"{base}.scales", qs)
+        if qb is not None:
+            add_tensor(f"{base}.biases", qb)
+        total_affine += 1
+        del qw, qs, qb
+        gc.collect()
+        mx.clear_cache()
 
     flush_shard()
 

@@ -69,6 +69,26 @@ STEP_PROFILES = {
 
 SEED = 42
 
+STEP37_CHAT_SAMPLING_DEFAULTS = {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "top_k": 0,
+}
+
+STEP37_CHAT_METADATA = {
+    "reasoning": {
+        "supported": True,
+        "parser": "qwen3",
+        "default_mode": "no_think",
+        "modes": ["no_think", "thinking"],
+    },
+    "tool_calling": {
+        "supported": True,
+        "parser": "step3p5",
+    },
+    "sampling_defaults": STEP37_CHAT_SAMPLING_DEFAULTS,
+}
+
 
 @dataclass(frozen=True)
 class TensorPlan:
@@ -540,6 +560,7 @@ def _write_configs(src: Path, out: Path, profile: str, plans: list[TensorPlan], 
             "embedding": 6,
             "routed_expert": routed_bits,
         },
+        "chat": STEP37_CHAT_METADATA,
     }
     caps = build_capabilities({"source_model": {"architecture": "step3p7"}, "has_vision": True}, config, out)
     if caps is not None:

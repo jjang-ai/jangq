@@ -59,7 +59,7 @@ def main():
     tok = _load_tokenizer(args.model)
 
     texts = _vera_samples(args.calib, args.batch * 3,
-                          domains=("coding", "agentic", "shell", "security", "general"))
+                          domains=("coding", "agentic", "shell", "security", "general", "math", "arithmetic", "stem", "knowledge"))
     seqs = []
     for t in texts:
         ids = tok.encode(t)

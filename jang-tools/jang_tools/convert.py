@@ -538,6 +538,7 @@ def convert_model(
     imatrix_path: Optional[str | Path] = None,
     use_awq: bool = False,
     awq_alpha: float = 0.25,
+    awq_norms_path: Optional[str | Path] = None,
     profile: Optional[str] = None,
     hadamard: bool = False,
     gptq_hessian_dir: Optional[str | Path] = None,
@@ -549,6 +550,12 @@ def convert_model(
     split_gate_bits: int = 4,
     split_up_bits: int = 2,
     n2_down_bits: Optional[int] = None,
+    n2_linear_attn_input_bits: Optional[int] = None,
+    n2_linear_attn_out_bits: Optional[int] = None,
+    n2_self_attn_bits: Optional[int] = None,
+    n2_shared_expert_gate_up_bits: Optional[int] = None,
+    n2_token_io_bits: Optional[int] = None,
+    n2_lm_head_bits: Optional[int] = None,
     *,
     progress_emitter=None,
 ) -> dict:
@@ -601,6 +608,18 @@ def convert_model(
         print(f"  Split up bits: {split_up_bits}")
     if n2_down_bits is not None:
         print(f"  N2 down_proj bits: {n2_down_bits}")
+    if n2_linear_attn_input_bits is not None:
+        print(f"  N2 linear_attn input bits: {n2_linear_attn_input_bits}")
+    if n2_linear_attn_out_bits is not None:
+        print(f"  N2 linear_attn out_proj bits: {n2_linear_attn_out_bits}")
+    if n2_self_attn_bits is not None:
+        print(f"  N2 self_attn bits: {n2_self_attn_bits}")
+    if n2_shared_expert_gate_up_bits is not None:
+        print(f"  N2 shared_expert gate/up bits: {n2_shared_expert_gate_up_bits}")
+    if n2_token_io_bits is not None:
+        print(f"  N2 token input/output bits: {n2_token_io_bits}")
+    if n2_lm_head_bits is not None:
+        print(f"  N2 lm_head bits: {n2_lm_head_bits}")
     if force_dtype:
         print(f"  Force source dtype: {force_dtype} (per-tensor sniff overridden)")
     print(f"{'='*60}\n")
@@ -680,8 +699,34 @@ def convert_model(
 
     # Step 2b: AWQ activation norms (optional)
     awq_norms = {}
-    if use_awq:
-        print("\n  [2b] Collecting AWQ activation norms...")
+    if awq_norms_path:
+        # Load pre-captured norms from a sidecar safetensors. Required for very
+        # large models (e.g. 397B) where a live MLX forward won't fit in RAM.
+        # The capture script `jang_tools.awq_capture_jang` produces this file
+        # with keys `layers.{N}.attn_input` and/or `layers.{N}.experts_input`.
+        print(f"\n  [2b] Loading AWQ activation norms from {awq_norms_path}")
+        from safetensors.numpy import load_file as _sf_load
+        awq_norms = _sf_load(str(awq_norms_path))
+        n_attn = sum(1 for k in awq_norms if k.endswith(".attn_input"))
+        n_exp = sum(1 for k in awq_norms if k.endswith(".experts_input"))
+        print(f"  Loaded {len(awq_norms)} norm tensors (attn:{n_attn}, experts:{n_exp})")
+        use_awq = True
+
+    # Pre-compute per-layer AWQ scales for the routed-expert path. The same
+    # vector is used to (a) multiply the expert weight on the input axis, and
+    # (b) divide the upstream post_attention_layernorm weight — i.e. the scale
+    # is fully **absorbed** into the model rather than carried as an awq_scales
+    # sidecar (which stock mlx_lm rejects as an unknown parameter).
+    _awq_experts_scales: dict[int, np.ndarray] = {}
+    if awq_norms:
+        from .awq import compute_awq_scales as _compute_awq_scales
+        import re as _re
+        for _k, _v in awq_norms.items():
+            _m = _re.match(r"^layers\.(\d+)\.experts_input$", _k)
+            if _m:
+                _awq_experts_scales[int(_m.group(1))] = _compute_awq_scales(_v, alpha=awq_alpha)
+    elif use_awq:
+        print("\n  [2b] Collecting AWQ activation norms (live MLX forward)...")
         try:
             from .awq import collect_activation_norms_mlx
             awq_norms = collect_activation_norms_mlx(str(model_path))
@@ -851,6 +896,60 @@ def convert_model(
         import gc; gc.collect()
         print(f"  Freed allocation arrays ({len(_tensor_bits)} tensor bit assignments retained)")
 
+    if n2_linear_attn_input_bits is not None:
+        _model_type = str(getattr(arch_config, "model_type", "") or "").lower()
+        if _model_type == "qwen3_5_moe":
+            _override_count = 0
+            for _name in list(_tensor_bits):
+                _lower = _name.lower()
+                if (
+                    ".linear_attn.in_proj_qkv.weight" in _lower
+                    or ".linear_attn.in_proj_z.weight" in _lower
+                ):
+                    _tensor_bits[_name] = int(n2_linear_attn_input_bits)
+                    _override_count += 1
+            print(
+                f"  N2 linear-attn input override: {_override_count} tensors "
+                f"→ {n2_linear_attn_input_bits}-bit"
+            )
+        else:
+            print(
+                "  N2 linear-attn input override skipped: "
+                f"model_type={_model_type or 'unknown'}"
+            )
+
+    _n2_extra_overrides = {
+        "linear_attn.out_proj.weight": n2_linear_attn_out_bits,
+        ".self_attn.": n2_self_attn_bits,
+        ".mlp.shared_expert.gate_proj.weight": n2_shared_expert_gate_up_bits,
+        ".mlp.shared_expert.up_proj.weight": n2_shared_expert_gate_up_bits,
+        "model.embed_tokens.weight": n2_token_io_bits,
+        "lm_head.weight": n2_lm_head_bits if n2_lm_head_bits is not None else n2_token_io_bits,
+    }
+    if any(_bits is not None for _bits in _n2_extra_overrides.values()):
+        _model_type = str(getattr(arch_config, "model_type", "") or "").lower()
+        if _model_type == "qwen3_5_moe":
+            _extra_counts: dict[str, int] = {}
+            for _name in list(_tensor_bits):
+                _lower = _name.lower()
+                for _needle, _bits in _n2_extra_overrides.items():
+                    if _bits is None:
+                        continue
+                    if _needle in _lower:
+                        _tensor_bits[_name] = int(_bits)
+                        _extra_counts[_needle] = _extra_counts.get(_needle, 0) + 1
+                        break
+            for _needle, _count in sorted(_extra_counts.items()):
+                print(
+                    f"  N2 override: {_needle} {_count} tensors "
+                    f"→ {_n2_extra_overrides[_needle]}-bit"
+                )
+        else:
+            print(
+                "  N2 extra compact overrides skipped: "
+                f"model_type={_model_type or 'unknown'}"
+            )
+
     expert_keep_by_layer: dict[int, np.ndarray] = {}
     original_num_experts = num_experts
     expert_prune_method: str | None = None
@@ -888,6 +987,9 @@ def convert_model(
         for _name in list(_tensor_bits):
             if _is_n2_expert_down(_name):
                 _tensor_bits[_name] = int(n2_down_bits)
+        if use_compact:
+            alloc_summary = summarize_allocation_compact(_tensor_bits, tensor_info, num_experts)
+            actual_bits = alloc_summary["average_bits"]
 
     print(f"  Target bits: {target_bits}")
     print(f"  Actual bits: {actual_bits:.2f}")
@@ -941,6 +1043,31 @@ def convert_model(
     expert_buffer = {}  # (layer_prefix, wtype) → {expert_id: {weight, scales, biases}}
     passthrough = {}
     passthrough_bits = {}
+    tensor_quantization_manifest: dict[str, dict] = {}
+
+    def _shape_list(arr) -> list[int]:
+        return [int(v) for v in getattr(arr, "shape", ())]
+
+    def _record_quantized_tensor(
+        output_base: str,
+        source_name: str,
+        bits_value: int,
+        group_size_value: int,
+        qweight,
+        scales,
+        biases,
+    ) -> None:
+        tensor_quantization_manifest[output_base] = {
+            "source_tensor": source_name,
+            "bits": int(bits_value),
+            "group_size": int(group_size_value),
+            "weight_key": f"{output_base}.weight",
+            "scales_key": f"{output_base}.scales",
+            "biases_key": f"{output_base}.biases",
+            "weight_shape": _shape_list(qweight),
+            "scales_shape": _shape_list(scales),
+            "biases_shape": _shape_list(biases),
+        }
 
     total_tensors = len(all_tensors_info)
     for i, (tensor_name, shape, n_blocks, sf_path) in enumerate(all_tensors_info):
@@ -1001,26 +1128,86 @@ def convert_model(
                     except Exception:
                         weights = _load_bf16_tensor(sf_path, tensor_name, shape)
 
-        # AWQ scaling
+        # AWQ scaling — applies to attention projections (input distribution =
+        # attn_input) AND, when capture covers it, routed experts (input
+        # distribution = experts_input = post_attention_layernorm output).
         awq_scales = None
         if use_awq:
             parts = tensor_name.split(".")
-            layer_key = None
+            layer_idx = None
             for i, part in enumerate(parts):
                 if part == "layers" and i + 1 < len(parts):
                     try:
                         layer_idx = int(parts[i + 1])
-                        layer_key = f"layers.{layer_idx}.attn_input"
                     except ValueError:
                         pass
                     break
+            # Pick which captured input distribution this tensor consumes:
+            #   - routed experts gate_up_proj (or split gate_proj/up_proj):
+            #     input is the post_attention_layernorm output ⇒ experts_input
+            #   - self-attention projections: input is the input_layernorm
+            #     output ⇒ attn_input
+            #   - experts.down_proj has an intermediate-dim input that we don't
+            #     capture; skipped automatically by the in_features match below.
+            layer_key = None
+            if layer_idx is not None:
+                is_routed_in = (
+                    ".experts.gate_up_proj" in tensor_name
+                    or ".experts.gate_proj" in tensor_name
+                    or ".experts.up_proj" in tensor_name
+                )
+                is_attn_proj = (
+                    ".self_attn.q_proj" in tensor_name
+                    or ".self_attn.k_proj" in tensor_name
+                    or ".self_attn.v_proj" in tensor_name
+                )
+                if is_routed_in:
+                    layer_key = f"layers.{layer_idx}.experts_input"
+                elif is_attn_proj:
+                    layer_key = f"layers.{layer_idx}.attn_input"
             if layer_key and layer_key in awq_norms:
                 from .awq import compute_awq_scales, apply_awq_scaling
                 in_features = shape[1] if len(shape) == 2 else shape[-1]
                 norms = awq_norms[layer_key]
                 if len(norms) == in_features:
                     awq_scales = compute_awq_scales(norms, alpha=awq_alpha)
-                    weights = apply_awq_scaling(weights, awq_scales)
+                    if weights.ndim >= 3:
+                        # 3D routed-expert weight (n_experts, out, in): broadcast
+                        # scales along the input axis. apply_awq_scaling is 2D-only.
+                        weights = weights * awq_scales[np.newaxis, np.newaxis, :]
+                    else:
+                        weights = apply_awq_scaling(weights, awq_scales)
+                    # Clear the sidecar marker — the math is fully absorbed via
+                    # the upstream LayerNorm modification (below); no awq_scales
+                    # sidecar is written so stock mlx_lm doesn't reject the bundle.
+                    awq_scales = None
+
+        # AWQ LayerNorm absorption (routed-expert path).
+        #
+        # If layer N had routed-expert AWQ applied (we multiplied its
+        # `experts.gate_up_proj` weight by `s` on the input axis), then to keep
+        # the model mathematically equivalent we must divide its upstream
+        # `post_attention_layernorm.weight` by `s` on the same axis. JANG stores
+        # norms un-shifted and the runtime adds +1; we want the runtime-applied
+        # gamma to be `gamma_orig / s`, so we store `(stored + 1) / s - 1`.
+        # No sidecar is needed — the scaling is fully absorbed.
+        if _awq_experts_scales and tensor_name.endswith(
+            ".post_attention_layernorm.weight"
+        ) and "vision" not in tensor_name and "visual" not in tensor_name:
+            _ln_layer_idx = None
+            for _i, _part in enumerate(tensor_name.split(".")):
+                if _part == "layers" and _i + 1 < len(tensor_name.split(".")):
+                    try:
+                        _ln_layer_idx = int(tensor_name.split(".")[_i + 1])
+                    except ValueError:
+                        pass
+                    break
+            if _ln_layer_idx in _awq_experts_scales:
+                _s = _awq_experts_scales[_ln_layer_idx].astype(np.float32)
+                if weights.shape[-1] == _s.shape[0]:
+                    weights = ((weights.astype(np.float32) + 1.0) / _s - 1.0).astype(
+                        weights.dtype
+                    )
 
         forced_bits = _forced_passthrough_bits(tensor_name)
         if forced_bits is not None:
@@ -1102,6 +1289,24 @@ def convert_model(
             v2_tensors[f"{up_base}.weight"] = up_qw
             v2_tensors[f"{up_base}.scales"] = up_scales
             v2_tensors[f"{up_base}.biases"] = up_biases
+            _record_quantized_tensor(
+                gate_base,
+                tensor_name,
+                split_gate_bits,
+                tensor_gs,
+                gate_qw,
+                gate_scales,
+                gate_biases,
+            )
+            _record_quantized_tensor(
+                up_base,
+                tensor_name,
+                split_up_bits,
+                tensor_gs,
+                up_qw,
+                up_scales,
+                up_biases,
+            )
             del weights, gate_weights, up_weights, gate_qw, gate_scales, gate_biases, up_qw, up_scales, up_biases
 
             _buf_bytes = sum(arr.nbytes for arr in v2_tensors.values())
@@ -1313,6 +1518,24 @@ def convert_model(
                 v2_tensors[f"{up_base}.weight"] = mlx_weight[:, mid:, :]
                 v2_tensors[f"{up_base}.scales"] = mlx_scales[:, mid:, :]
                 v2_tensors[f"{up_base}.biases"] = mlx_biases[:, mid:, :]
+                _record_quantized_tensor(
+                    gate_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{gate_base}.weight"],
+                    v2_tensors[f"{gate_base}.scales"],
+                    v2_tensors[f"{gate_base}.biases"],
+                )
+                _record_quantized_tensor(
+                    up_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{up_base}.weight"],
+                    v2_tensors[f"{up_base}.scales"],
+                    v2_tensors[f"{up_base}.biases"],
+                )
             else:
                 # 2D: (2*inter, packed) → split into gate + up
                 mid = mlx_weight.shape[0] // 2
@@ -1324,6 +1547,24 @@ def convert_model(
                 v2_tensors[f"{up_base}.weight"] = mlx_weight[mid:, :]
                 v2_tensors[f"{up_base}.scales"] = mlx_scales[mid:, :]
                 v2_tensors[f"{up_base}.biases"] = mlx_biases[mid:, :]
+                _record_quantized_tensor(
+                    gate_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{gate_base}.weight"],
+                    v2_tensors[f"{gate_base}.scales"],
+                    v2_tensors[f"{gate_base}.biases"],
+                )
+                _record_quantized_tensor(
+                    up_base,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{up_base}.weight"],
+                    v2_tensors[f"{up_base}.scales"],
+                    v2_tensors[f"{up_base}.biases"],
+                )
 
         # Handle 3D expert down_proj renaming
         elif is_3d and "experts" in base_name and "down_proj" in base_name:
@@ -1331,6 +1572,15 @@ def convert_model(
             v2_tensors[f"{sw_base}.weight"] = mlx_weight
             v2_tensors[f"{sw_base}.scales"] = mlx_scales
             v2_tensors[f"{sw_base}.biases"] = mlx_biases
+            _record_quantized_tensor(
+                sw_base,
+                tensor_name,
+                bits,
+                tensor_gs,
+                mlx_weight,
+                mlx_scales,
+                mlx_biases,
+            )
 
         # Handle per-expert 2D tensors (MiniMax/Mixtral/GLM-5: experts.N.w1)
         # Stack into 3D as soon as all experts for a group are collected,
@@ -1362,6 +1612,15 @@ def convert_model(
                     [expert_buffer[group_key][e]["scales"] for e in range(n_exp)])
                 v2_tensors[f"{sw_key}.biases"] = np.stack(
                     [expert_buffer[group_key][e]["biases"] for e in range(n_exp)])
+                _record_quantized_tensor(
+                    sw_key,
+                    tensor_name,
+                    bits,
+                    tensor_gs,
+                    v2_tensors[f"{sw_key}.weight"],
+                    v2_tensors[f"{sw_key}.scales"],
+                    v2_tensors[f"{sw_key}.biases"],
+                )
                 del expert_buffer[group_key]
 
         # Standard tensor — store directly
@@ -1369,6 +1628,15 @@ def convert_model(
             v2_tensors[f"{base_name}.weight"] = mlx_weight
             v2_tensors[f"{base_name}.scales"] = mlx_scales
             v2_tensors[f"{base_name}.biases"] = mlx_biases
+            _record_quantized_tensor(
+                base_name,
+                tensor_name,
+                bits,
+                tensor_gs,
+                mlx_weight,
+                mlx_scales,
+                mlx_biases,
+            )
 
         del weights
 
@@ -1454,6 +1722,44 @@ def convert_model(
                     except TypeError:
                         tensor = _load_bf16_tensor(sf_path, tensor_name, shape)
 
+                    # AWQ LayerNorm absorption (routed-expert path).
+                    # If layer N had routed-expert AWQ applied (we multiplied
+                    # `experts.gate_up_proj` by `s` on the input axis), then to
+                    # keep the model mathematically equivalent we must divide
+                    # the upstream `post_attention_layernorm.weight` by `s`.
+                    # JANG stores norms un-shifted (runtime adds +1), so we
+                    # write `(stored + 1) / s - 1` — runtime then sees
+                    # `gamma / s`, which cancels the `W * s` on the expert side.
+                    # No awq_scales sidecar is written; the math is fully absorbed.
+                    if (
+                        _awq_experts_scales
+                        and tensor_name.endswith(".post_attention_layernorm.weight")
+                        and "vision" not in tensor_name
+                        and "visual" not in tensor_name
+                    ):
+                        _ln_layer_idx = None
+                        _parts = tensor_name.split(".")
+                        for _i, _part in enumerate(_parts):
+                            if _part == "layers" and _i + 1 < len(_parts):
+                                try:
+                                    _ln_layer_idx = int(_parts[_i + 1])
+                                except ValueError:
+                                    pass
+                                break
+                        if _ln_layer_idx in _awq_experts_scales:
+                            _s = _awq_experts_scales[_ln_layer_idx].astype(np.float32)
+                            if tensor.shape[-1] == _s.shape[0]:
+                                _orig_dtype = tensor.dtype
+                                tensor = (
+                                    (tensor.astype(np.float32) + 1.0) / _s - 1.0
+                                ).astype(_orig_dtype)
+                                if not getattr(convert_model, "_awq_norm_log_printed", False):
+                                    print(
+                                        f"    AWQ norm absorption: dividing post_attention_layernorm "
+                                        f"by experts_input scales on {len(_awq_experts_scales)} layers"
+                                    )
+                                    convert_model._awq_norm_log_printed = True
+
                     forced_bits = _forced_passthrough_bits(tensor_name)
                     if forced_bits is not None:
                         tensor = _prepare_mlx_passthrough_tensor(tensor_name, tensor)
@@ -1534,9 +1840,18 @@ def convert_model(
             "split_gate_bits": split_gate_bits if split_gate_up_quant else None,
             "split_up_bits": split_up_bits if split_gate_up_quant else None,
             "n2_down_bits": n2_down_bits,
+            "n2_linear_attn_input_bits": n2_linear_attn_input_bits,
+            "n2_linear_attn_out_bits": n2_linear_attn_out_bits,
+            "n2_self_attn_bits": n2_self_attn_bits,
+            "n2_shared_expert_gate_up_bits": n2_shared_expert_gate_up_bits,
+            "n2_token_io_bits": n2_token_io_bits,
+            "n2_lm_head_bits": n2_lm_head_bits,
             "expert_prune_keep": expert_prune_keep,
             "expert_prune_map": str(expert_prune_map) if expert_prune_map else None,
             "expert_prune_method": expert_prune_method,
+            "tensor_quantization_manifest_schema": 1,
+            "tensor_quantization_manifest_count": len(tensor_quantization_manifest),
+            "tensor_quantization_manifest": tensor_quantization_manifest,
         },
         "source_model": {
             "name": model_path.name,
@@ -1571,7 +1886,13 @@ def convert_model(
     # so vmlx CapabilityDetector picks the right parsers without falling back
     # to silver/bronze. Reads `architecture.type` from this converter's schema.
     from .capabilities import build_capabilities
-    _caps = build_capabilities(jang_config, model_config)
+    # Pass the SOURCE tensor names so the modality gate can verify a modality
+    # actually has weights (e.g. qwen3_5_moe ships a vestigial vision_config with
+    # NO vision tower → must stamp text-only, not vision). Source names are the
+    # robust signal here: the v2 shards aren't written until write_jang_v2_model.
+    _caps = build_capabilities(
+        jang_config, model_config, tensor_names=list(source_tensor_names)
+    )
     if _caps is not None:
         jang_config["capabilities"] = _caps
         print(

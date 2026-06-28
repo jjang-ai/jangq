@@ -35,111 +35,18 @@ from mlx_lm.models.base import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
+from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 
-def regularize_jangtq_update_weights(weights: dict[str, Any]) -> dict[str, Any]:
-    """Map on-disk `.tq_*` triplets to TurboQuant module parameter names.
-
-    `hydrate_jangtq` swaps modules and assigns arrays, but MLX strict
-    `load_weights` still requires the new module parameters to be present in
-    the update dict. The `.tq_bits` scalar is construction metadata only.
-    """
-    out: dict[str, Any] = {}
-    for key, value in weights.items():
-        if key.endswith(".tq_packed"):
-            out[key[: -len(".tq_packed")] + ".packed"] = value
-        elif key.endswith(".tq_norms"):
-            out[key[: -len(".tq_norms")] + ".norms"] = value
-        elif key.endswith(".tq_bits"):
-            continue
-        else:
-            out[key] = value
-    return out
+_INPUTS_EMBEDS_UNSET = object()
 
 
-def prepare_mimo_jangtq_runtime(
-    model: nn.Module,
-    weights: dict[str, Any],
-    *,
-    mxtq_seed: int,
-) -> dict[str, Any]:
-    """Hydrate MiMo JANGTQ modules and enable the fast inference path."""
-    # MiMo's decode shape is hidden=4096, moe_intermediate=2048, top_k=8.
-    # Synthetic sweeps on the local M5 Max showed gather OPT=16 is faster than
-    # the generic JANGTQ default of 20 for this shape. Set before hydrate imports
-    # gather_tq_kernel; callers can still override explicitly.
-    os.environ.setdefault("JANGTQ_GATHER_OPT", "16")
-    from jang_tools.jangrt.inference_mode import ensure_inference_mode
-    from jang_tools.jangrt.jangtq_hydrate import hydrate_jangtq
-    from jang_tools.jangrt.switchglu_decode import install_switchglu_fused_decode
-
-    raw_tq_weights = weights
-    regular = hydrate_jangtq(model, weights, mxtq_seed=mxtq_seed)
-    install_switchglu_fused_decode()
-    ensure_inference_mode(model, label="MiMo-JANGTQ")
-    regular.update(regularize_jangtq_update_weights(raw_tq_weights))
-    return regular
-
-
-def maybe_weighted_jangtq_decode(
-    switch_mlp: Any,
-    x: Any,
-    indices: Any,
-    scores: Any,
-    *,
-    batch: int,
-) -> Any | None:
-    """Return weighted JANGTQ decode output for single-token decode if available."""
-    weighted_decode = getattr(switch_mlp, "_jangtq_weighted_decode", None)
-    if weighted_decode is None or batch != 1 or getattr(switch_mlp, "training", False):
-        return None
-    return weighted_decode(x, indices, scores)
-
-
-_MIMO_ROUTER_CACHE: dict[tuple[int, bool, int], Any] = {}
-
-
-def get_compiled_mimo_decode_router(
-    top_k: int,
-    norm_topk_prob: bool,
-    routed_scaling: float,
-) -> Any:
-    scaling_milli = int(round(float(routed_scaling) * 1000.0))
-    key = (int(top_k), bool(norm_topk_prob), scaling_milli)
-    if key in _MIMO_ROUTER_CACHE:
-        return _MIMO_ROUTER_CACHE[key]
-
-    def _router(x_fp32, weight_fp32, bias_fp32):
-        logits = x_fp32 @ weight_fp32.T
-        scores = mx.sigmoid(logits)
-        corrected = scores + bias_fp32.reshape(1, -1)
-        inds = mx.argpartition(-corrected, kth=top_k - 1, axis=-1)[..., :top_k]
-        weights = mx.take_along_axis(scores, inds, axis=-1)
-        if norm_topk_prob:
-            weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
-        return inds, weights * (float(scaling_milli) * 0.001)
-
-    compiled = mx.compile(_router)
-    _MIMO_ROUTER_CACHE[key] = compiled
-    return compiled
-
-
-def run_compiled_mimo_decode_router(
-    x_fp32: Any,
-    weight_fp32: Any,
-    bias_fp32: Any,
-    *,
-    top_k: int,
-    norm_topk_prob: bool,
-    routed_scaling: float,
-    batch: int,
-) -> Any | None:
-    if batch != 1:
-        return None
-    router = get_compiled_mimo_decode_router(top_k, norm_topk_prob, routed_scaling)
-    return router(x_fp32, weight_fp32, bias_fp32)
+class MiMoV2CausalLMOutput:
+    def __init__(self, logits: mx.array):
+        self.logits = logits
+        self.cross_attention_states = None
+        self.encoder_outputs = None
 
 
 # --------------------------------------------------------------------------
@@ -194,7 +101,6 @@ class ModelArgs(BaseModelArgs):
     # Quantization metadata.
     quantization: Optional[dict] = None
     mxtq_bits: Optional[int] = None
-    mxtq_seed: int = 42
     routed_expert_bits: Optional[int] = None
     debug_disable_attention_sink: bool = False
 
@@ -289,8 +195,6 @@ class MiMoV2Attention(nn.Module):
     ) -> mx.array:
         B, T, _ = x.shape
         qkv = self.qkv_proj(x)
-        if qkv.dtype != x.dtype:
-            qkv = qkv.astype(x.dtype)
         q = qkv[..., : self.q_size]
         k = qkv[..., self.q_size : self.q_size + self.k_size]
         v = qkv[..., self.q_size + self.k_size :]
@@ -325,8 +229,6 @@ class MiMoV2Attention(nn.Module):
         else:
             attn_out = scaled_dot_product_attention(q, k, v, cache=cache, scale=self.scale, mask=mask)
         attn_out = attn_out.transpose(0, 2, 1, 3).reshape(B, T, self.o_hidden)
-        if attn_out.dtype != x.dtype:
-            attn_out = attn_out.astype(x.dtype)
         return self.o_proj(attn_out)
 
 
@@ -370,7 +272,15 @@ def _sdpa_with_sink(
                           mx.array(-mx.inf, dtype=attn.dtype))
             attn = attn + cm
     elif mask is not None:
-        attn = attn + mask
+        if mask.dtype == mx.bool_:
+            additive_mask = mx.where(
+                mask,
+                mx.array(0.0, dtype=attn.dtype),
+                mx.array(-mx.inf, dtype=attn.dtype),
+            )
+            attn = attn + additive_mask
+        else:
+            attn = attn + mask
         # If a fully-formed mask was provided, sliding_window was already baked in by the caller.
     # Build sink column: shape (B, H, T, 1), value = sink_bias broadcast across (T,1).
     sink_col = mx.broadcast_to(sink_bias.reshape(1, H, 1, 1), (B, H, T, 1))
@@ -404,19 +314,6 @@ class MiMoV2MoEGate(nn.Module):
         # Compute in fp32 for routing precision.
         x_fp32 = x.astype(mx.float32)
         w_fp32 = self.weight.astype(mx.float32)
-        compiled = run_compiled_mimo_decode_router(
-            x_fp32,
-            w_fp32,
-            self.e_score_correction_bias.astype(mx.float32),
-            top_k=self.top_k,
-            norm_topk_prob=self.norm_topk_prob,
-            routed_scaling=self.routed_scaling,
-            batch=x_fp32.shape[0],
-        )
-        if compiled is not None:
-            topk_indices, topk_weights = compiled
-            return topk_indices, topk_weights.astype(x.dtype)
-
         logits = x_fp32 @ w_fp32.T  # (N, n_experts)
         scores = mx.sigmoid(logits)
         # noaux_tc with n_group=1 degenerates to plain top-k over all experts.
@@ -446,15 +343,6 @@ class MiMoV2MoE(nn.Module):
         B, T, H = x.shape
         x_flat = x.reshape(-1, H)
         topk_idx, topk_w = self.gate(x_flat)
-        weighted = maybe_weighted_jangtq_decode(
-            self.switch_mlp,
-            x_flat,
-            topk_idx,
-            topk_w,
-            batch=x_flat.shape[0],
-        )
-        if weighted is not None:
-            return weighted.reshape(B, T, H)
         # SwitchGLU returns per-token per-expert outputs of shape (N, K, H).
         out = self.switch_mlp(x_flat, topk_idx)
         # Weighted sum across the K selected experts.
@@ -522,11 +410,15 @@ class MiMoV2Backbone(nn.Module):
 
     def __call__(
         self,
-        input_ids: mx.array,
+        input_ids: Optional[mx.array] = None,
+        inputs_embeds: Optional[mx.array] = None,
         cache: Optional[list[KVCache]] = None,
         mask: Optional[mx.array] = None,
+        **kwargs: Any,
     ) -> mx.array:
-        h = self.embed_tokens(input_ids)
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("Specify input_ids or inputs_embeds")
+        h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
         if cache is None:
             cache = [None] * len(self.layers)
         for layer, c in zip(self.layers, cache):
@@ -553,12 +445,25 @@ class Model(nn.Module):
 
     def __call__(
         self,
-        input_ids: mx.array,
+        input_ids: Optional[mx.array] = None,
+        inputs_embeds: Any = _INPUTS_EMBEDS_UNSET,
         cache: Optional[list[KVCache]] = None,
         mask: Optional[mx.array] = None,
-    ) -> mx.array:
-        h = self.model(input_ids, cache=cache, mask=mask)
-        return self.lm_head(h)
+        **kwargs: Any,
+    ) -> mx.array | MiMoV2CausalLMOutput:
+        mllm_style_call = inputs_embeds is not _INPUTS_EMBEDS_UNSET
+        normalized_inputs_embeds = None if inputs_embeds is _INPUTS_EMBEDS_UNSET else inputs_embeds
+        h = self.model(
+            input_ids,
+            inputs_embeds=normalized_inputs_embeds,
+            cache=cache,
+            mask=mask,
+            **kwargs,
+        )
+        logits = self.lm_head(h)
+        if mllm_style_call:
+            return MiMoV2CausalLMOutput(logits)
+        return logits
 
     @property
     def layers(self) -> list[nn.Module]:
@@ -567,10 +472,17 @@ class Model(nn.Module):
     def make_cache(self) -> list[KVCache]:
         caches: list[KVCache] = []
         for layer in self.model.layers:
-            if layer.is_swa:
-                caches.append(RotatingKVCache(max_size=self.args.sliding_window, keep=4))
-            else:
-                caches.append(KVCache())
+            # SWA layers MUST use a plain KVCache, NOT RotatingKVCache.
+            # RotatingKVCache(max_size=window) corrupts generation when the
+            # PREFILL exceeds max_size: _update_concat stores the full prompt,
+            # then the first decode step trims+rotates inconsistently, desyncing
+            # the rope'd key positions from the rotated buffer -> degenerate
+            # newline/im_end loops once total length > sliding_window (128).
+            # KVCache stores all keys and lets create_attention_mask(window_size)
+            # enforce the sliding window via make_mask in BOTH prefill and decode,
+            # which matches the (coherent) no-cache full-reforward path exactly.
+            # (A correct windowed rotating cache is a future memory optimization.)
+            caches.append(KVCache())
         return caches
 
     def sanitize(self, weights: dict[str, mx.array]) -> dict[str, mx.array]:
@@ -578,18 +490,9 @@ class Model(nn.Module):
 
         Mainly: stack the 256 individual `experts.{0..255}.{gate,up,down}_proj.weight`
         tensors per MoE layer into the SwitchGLU's three batched weight tensors.
-        JANGTQ bundles are already pre-stacked under `switch_mlp.*.tq_*`; hydrate
-        those modules before the regular affine update path.
         Also drops MTP weights, vision weights, and audio weights (loaded in
         separate multimodal runtime, see future mimo_v2_multimodal.py).
         """
-        if any(key.endswith(".tq_packed") for key in weights):
-            weights = prepare_mimo_jangtq_runtime(
-                self,
-                weights,
-                mxtq_seed=int(self.args.mxtq_seed),
-            )
-
         new_weights: dict[str, mx.array] = {}
         # Defer expert stacking — collect them by (layer, projection) first.
         expert_stash: dict[tuple[int, str], dict[int, mx.array]] = {}

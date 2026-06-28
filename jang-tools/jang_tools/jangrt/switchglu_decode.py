@@ -34,7 +34,6 @@ Created by Jinho Jang (eric@jangq.ai).
 """
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import mlx.core as mx
@@ -75,9 +74,7 @@ def install_switchglu_fused_decode() -> bool:
         make_fused_gate_up_swiglu_decode,
     )
     from jang_tools.turboquant.gather_tq_kernel import (
-        make_fused_rot_gather_decode,
         make_gather_tq_decode_per_row,
-        make_weighted_gather_tq_decode_per_row,
     )
     from jang_tools.turboquant.hadamard_kernel import hadamard_rotate_metal
 
@@ -107,99 +104,19 @@ def install_switchglu_fused_decode() -> bool:
         fused_gu = make_fused_gate_up_swiglu_decode(
             in_f, out_f, bits, K, swiglu_limit=swiglu_limit
         )
-        fused_rot_gather_dn = None
-        if os.environ.get("JANGTQ_ENABLE_FUSED_ROT_GATHER_DOWN") in {"1", "true", "yes"}:
-            fused_rot_gather_dn = make_fused_rot_gather_decode(out_f, in_f, dp_bits, K)
         gather_dn = make_gather_tq_decode_per_row(out_f, in_f, dp_bits, K)
-        weighted_gather_dn = make_weighted_gather_tq_decode_per_row(out_f, in_f, dp_bits, K)
 
         def _mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx):
             x_rot = hadamard_rotate_metal(x_flat, signs_in)
             x_act = fused_gu(x_rot, pg, ng, pu, nu, cb_gate, idx)        # (K, out_f)
-            if fused_rot_gather_dn is not None:
-                y = fused_rot_gather_dn(x_act, signs_dn, pd, nd, cb_down, idx)
-            else:
-                x_act_rot = hadamard_rotate_metal(x_act, signs_dn)
-                y = gather_dn(x_act_rot, pd, nd, cb_down, idx)            # (K, in_f)
+            x_act_rot = hadamard_rotate_metal(x_act, signs_dn)
+            y = gather_dn(x_act_rot, pd, nd, cb_down, idx)                # (K, in_f)
             return y
 
-        def _weighted_mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx, scores):
-            x_rot = hadamard_rotate_metal(x_flat, signs_in)
-            x_act = fused_gu(x_rot, pg, ng, pu, nu, cb_gate, idx)        # (K, out_f)
-            x_act_rot = hadamard_rotate_metal(x_act, signs_dn)
-            return weighted_gather_dn(
-                x_act_rot,
-                pd,
-                nd,
-                cb_down,
-                idx,
-                scores.astype(mx.float32),
-            )
-
-        def _weighted_sum_mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx, scores):
-            y = _mlp(x_flat, pg, ng, pu, nu, pd, nd, cb_gate, cb_down, signs_in, signs_dn, idx)
-            return mx.sum(y * scores.astype(y.dtype)[:, None], axis=0, keepdims=True)
-
-        if os.environ.get("JANGTQ_ENABLE_WEIGHTED_DOWN_GATHER") in {"1", "true", "yes"}:
-            decode_compiled[key] = (mx.compile(_mlp), mx.compile(_weighted_mlp))
-        else:
-            decode_compiled[key] = (mx.compile(_mlp), mx.compile(_weighted_sum_mlp))
+        decode_compiled[key] = mx.compile(_mlp)
         return decode_compiled[key]
 
     orig_call = SwitchGLU.__call__
-
-    def _sort_threshold() -> int:
-        raw = os.environ.get("JANGTQ_SWITCHGLU_SORT_THRESHOLD", "64")
-        try:
-            value = int(raw)
-        except ValueError:
-            return 64
-        return max(0, value)
-
-    def _jangtq_weighted_decode(self, x, indices, scores):
-        gp = self.gate_proj
-        up = self.up_proj
-        dp = self.down_proj
-        if not isinstance(gp, TurboQuantSwitchLinear) or not isinstance(up, TurboQuantSwitchLinear):
-            return None
-        if getattr(self, "training", False):
-            return None
-
-        x_sq = x
-        while x_sq.ndim > 2 and x_sq.shape[-2] == 1:
-            x_sq = x_sq.squeeze(-2)
-        x_flat = x_sq.reshape(-1, gp.in_features)
-        if x_flat.shape[0] != 1 or indices.size >= 64:
-            return None
-
-        _activation = getattr(self, "activation", None)
-        _swiglu_limit = float(getattr(_activation, "swiglu_limit", 0.0) or 0.0)
-        K = indices.shape[-1] if indices.ndim > 0 else 1
-        idx_flat = indices.reshape(-1).astype(mx.uint32)
-        scores_flat = scores.reshape(-1)
-        compiled_entry = _get_compiled_decode(
-            gp.in_features, gp.out_features, gp.bits, K,
-            swiglu_limit=_swiglu_limit, dp_bits=dp.bits,
-        )
-        if isinstance(compiled_entry, tuple):
-            _compiled_mlp, compiled_weighted_mlp = compiled_entry
-            return compiled_weighted_mlp(
-                x_flat.astype(mx.float32),
-                gp.packed, gp.norms, up.packed, up.norms,
-                dp.packed, dp.norms,
-                gp.codebook, dp.codebook,
-                gp.signs, dp.signs, idx_flat,
-                scores_flat,
-            )
-
-        y = compiled_entry(
-            x_flat.astype(mx.float32),
-            gp.packed, gp.norms, up.packed, up.norms,
-            dp.packed, dp.norms,
-            gp.codebook, dp.codebook,
-            gp.signs, dp.signs, idx_flat,
-        )
-        return mx.sum(y * scores_flat.astype(y.dtype)[:, None], axis=0, keepdims=True)
 
     def _fused_switchglu_call(self, x, indices):
         gp = self.gate_proj
@@ -220,17 +137,15 @@ def install_switchglu_fused_decode() -> bool:
         x_flat = x_sq.reshape(-1, gp.in_features)
         batch = x_flat.shape[0]
         K = indices.shape[-1] if indices.ndim > 0 else 1
-        sort_threshold = _sort_threshold()
-        do_sort_ok = indices.ndim >= 1 and indices.size < sort_threshold
+        do_sort_ok = indices.ndim >= 1 and indices.size < 64
         can_fast = (batch == 1 and K > 0 and do_sort_ok and not getattr(self, "training", False))
 
         if can_fast:
             idx_flat = indices.reshape(-1).astype(mx.uint32)
-            compiled_entry = _get_compiled_decode(
+            compiled_mlp = _get_compiled_decode(
                 gp.in_features, gp.out_features, gp.bits, K,
                 swiglu_limit=_swiglu_limit, dp_bits=dp.bits,
             )
-            compiled_mlp = compiled_entry[0] if isinstance(compiled_entry, tuple) else compiled_entry
             y = compiled_mlp(
                 x_flat.astype(mx.float32),
                 gp.packed, gp.norms, up.packed, up.norms,
@@ -245,8 +160,7 @@ def install_switchglu_fused_decode() -> bool:
 
         # Slow path: dynamic-shape detection (prefill, sorted routing, training).
         x_exp = mx.expand_dims(x, (-2, -3))
-        sort_threshold = _sort_threshold()
-        do_sort = indices.size >= sort_threshold
+        do_sort = indices.size >= 64
         idx = indices
         inv_order = None
         if do_sort:
@@ -269,7 +183,6 @@ def install_switchglu_fused_decode() -> bool:
         return x_out.squeeze(-2)
 
     SwitchGLU.__call__ = _fused_switchglu_call
-    SwitchGLU._jangtq_weighted_decode = _jangtq_weighted_decode
     _INSTALLED = True
     return True
 

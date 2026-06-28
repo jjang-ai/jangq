@@ -67,7 +67,10 @@ def inspect_mimo_source(src_dir: str | Path) -> MiMoSourceContract:
     has_mtp = any(k.startswith("model.mtp.") for k in weight_map)
     capabilities = {
         "family": "mimo_v2",
-        "modality": "multimodal",
+        "modality": "text",
+        "modalities": ["text"],
+        "preserved_modalities": ["vision", "audio"],
+        "unwired_modalities": ["vision", "audio"],
         "cache_type": "kv",
         "supports_tools": True,
         "supports_thinking": True,
@@ -75,6 +78,7 @@ def inspect_mimo_source(src_dir: str | Path) -> MiMoSourceContract:
         "tool_parser": "xml_function",
         "tool_status": "template_uses_xml_function_tool_call",
         "think_in_template": False,
+        "multimodal_status": "weights_preserved_text_runtime",
     }
     runtime = {
         "bundle_has_mtp": has_mtp,

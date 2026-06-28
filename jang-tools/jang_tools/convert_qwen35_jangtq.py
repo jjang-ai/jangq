@@ -63,6 +63,14 @@ progress = ProgressEmitter(
 from jang_tools.calibrate import _load_bf16_tensor
 from jang_tools.turboquant.linear import tq_quantize_weight, tq_quantize_experts
 
+EOS_FIXES = {
+    "qwen3_5_moe": {248044: 248046},  # <|endoftext|> -> <|im_end|>
+    "qwen3_5": {248044: 248046},
+    "qwen3_vl": {248044: 248046},
+    "qwen3_moe_vl": {248044: 248046},
+    "qwen3_5_vl": {248044: 248046},
+}
+
 
 SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else None
@@ -243,6 +251,7 @@ try:
     total_passthrough = 0
     total_skipped = 0
     shard_map = {}
+    affine_quant_overrides = {}
 
 
     def flush_shard():
@@ -265,6 +274,15 @@ try:
         shard_bytes += arr.nbytes
         if shard_bytes >= MAX_SHARD:
             flush_shard()
+
+
+    def record_affine_quant(out_name, bits):
+        base = out_name[:-7] if out_name.endswith(".weight") else out_name
+        affine_quant_overrides[base] = {
+            "group_size": 64,
+            "bits": int(bits),
+            "mode": "affine",
+        }
 
 
     # === Resume support ===
@@ -327,7 +345,9 @@ try:
         if done_keys and is_already_done(out_name, method, split_gate_up):
             skipped_resume += 1
             if method == "mxtq":   total_mxtq += (2 if split_gate_up else 1)
-            elif method == "affine": total_affine += 1
+            elif method == "affine":
+                record_affine_quant(out_name, bits)
+                total_affine += 1
             else:                    total_passthrough += 1
             continue
 
@@ -361,6 +381,7 @@ try:
             w = mx.array(tensor.astype(np.float16))
             qw, qs, qb = mx.quantize(w, group_size=64, bits=bits)
             base = out_name[:-7] if out_name.endswith(".weight") else out_name
+            record_affine_quant(out_name, bits)
             add_tensor(f"{base}.weight", np.array(qw))
             add_tensor(f"{base}.scales", np.array(qs).astype(np.float16))
             add_tensor(f"{base}.biases", np.array(qb).astype(np.float16))
@@ -429,11 +450,71 @@ try:
         json.dump(index, f, indent=2)
 
 
-    # Write config (strip any fp8/awq sections; force the default bits to expert bits)
+    # Write config (strip any fp8/awq sections). The default quantization
+    # metadata must describe the affine skeleton, not routed MXTQ experts.
+    # JANGTQ2 still has 8-bit affine attention/embed/head/shared-expert weights;
+    # routed-expert MXTQ bits live in mxtq_bits/jang_config and are not affine
+    # nn.quantize targets.
     config.pop("quantization_config", None)
     routed_bits_meta = _MIXED_EXPERT_BITS or EXPERT_BITS
-    default_expert_bits = 2 if _MIXED_EXPERT_BITS else EXPERT_BITS
-    config["quantization"] = {"group_size": 64, "bits": default_expert_bits}
+    affine_default_bits = 8
+    quantization = {
+        "group_size": 64,
+        "bits": affine_default_bits,
+        "mode": "affine",
+    }
+    quantization.update(dict(sorted(affine_quant_overrides.items())))
+    config["quantization"] = quantization
+
+    model_type = config.get("model_type", "") or text_cfg.get("model_type", "")
+    eos_fix_map = EOS_FIXES.get(model_type, {})
+    if eos_fix_map:
+        old_eos = text_cfg.get("eos_token_id")
+        if old_eos in eos_fix_map:
+            new_eos = eos_fix_map[old_eos]
+            text_cfg["eos_token_id"] = new_eos
+            config["text_config"] = text_cfg
+            print(f"  eos_token_id fix: {old_eos} -> {new_eos} (text_config)", flush=True)
+        old_eos_top = config.get("eos_token_id")
+        if old_eos_top in eos_fix_map:
+            new_eos = eos_fix_map[old_eos_top]
+            config["eos_token_id"] = new_eos
+            print(f"  eos_token_id fix: {old_eos_top} -> {new_eos} (top-level)", flush=True)
+        if config.get("eos_token_id") is None and text_cfg.get("eos_token_id") is not None:
+            config["eos_token_id"] = text_cfg["eos_token_id"]
+
+    gen_cfg_src = SRC / "generation_config.json"
+    eos_fixed_generation_config = False
+    if eos_fix_map and gen_cfg_src.exists():
+        try:
+            gen_cfg = json.loads(gen_cfg_src.read_text(encoding="utf-8"))
+        except Exception as _e:
+            print(f"  WARNING: couldn't parse generation_config.json for eos-fix: {_e}", flush=True)
+            gen_cfg = None
+        if isinstance(gen_cfg, dict):
+            old_eos = gen_cfg.get("eos_token_id")
+            if isinstance(old_eos, int) and old_eos in eos_fix_map:
+                gen_cfg["eos_token_id"] = eos_fix_map[old_eos]
+                eos_fixed_generation_config = True
+                print(
+                    f"  eos_token_id fix: {old_eos} -> {gen_cfg['eos_token_id']} (generation_config)",
+                    flush=True,
+                )
+            elif isinstance(old_eos, list):
+                new_list = [eos_fix_map.get(e, e) if isinstance(e, int) else e for e in old_eos]
+                if new_list != old_eos:
+                    gen_cfg["eos_token_id"] = new_list
+                    eos_fixed_generation_config = True
+                    print(
+                        f"  eos_token_id fix: {old_eos} -> {new_list} (generation_config)",
+                        flush=True,
+                    )
+            if eos_fixed_generation_config:
+                (OUT / "generation_config.json").write_text(
+                    json.dumps(gen_cfg, indent=2),
+                    encoding="utf-8",
+                )
+
     # Surface the JANGTQ flags at the top level so Swift's
     # `LLMModelFactory.qwen3_5_moe` dispatch can detect MXTQ format
     # without reading the sidecar.
@@ -474,7 +555,10 @@ try:
         "quantization": {
             "method": "affine+mxtq",
             "group_size": 64,
-            "bits_default": default_expert_bits,
+            "bits_default": affine_default_bits,
+            "affine_override_count": len(affine_quant_overrides),
+            "routed_expert_bits": routed_bits_meta,
+            "mxtq_tensor_group_count": total_mxtq,
         },
     }
     from jang_tools.convert import _build_mtp_runtime_metadata
@@ -525,6 +609,8 @@ try:
               "configuration.json",
               # If the model ships custom .py files, preserve them
               f"modeling_{src_arch}.py", f"configuration_{src_arch}.py"]:
+        if f == "generation_config.json" and eos_fixed_generation_config:
+            continue
         src_f = SRC / f
         if src_f.exists():
             shutil.copy2(str(src_f), str(OUT / f))
