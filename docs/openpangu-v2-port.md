@@ -139,7 +139,40 @@ paged/SSD caching.** The right sequence:
   these localized the bugs (but note: with a broken mHC/conv, disabling a
   still-correct component like sinks can look "better" — re-bisect after each fix).
 
-## Open items
+## OPEN: coherent but weak prompt-conditioning (the current wall)
+
+After all 10 fixes the model emits **fluent, structured, sophisticated prose**
+(e.g. "2+2?" → a full multi-paragraph Chinese essay on geometry-teaching pedagogy)
+but **barely conditions on the actual prompt** — different prompts give
+different-but-off-topic essays; a bare "Repeat: banana banana" isn't copied.
+
+Ruled OUT: chat template (renders correctly), tokenization (special tokens
+`<|message_start|>`/`<think>` are single tokens, prompt tokenizes clean), decode/
+conv-state carry (output is coherent, not garbled → streaming works), and every
+architectural component (all match the omni-npu reference).
+
+Two live hypotheses, need to separate them:
+1. **2-bit experts** — JANG_2L is 3.17-bit avg but the ROUTED EXPERTS are 2-bit
+   (attn/embed/lm_head are 8/6-bit). Experts do the heavy compute in an MoE; at
+   2-bit, instruction-following/factual precision collapses while 8-bit attention
+   keeps fluency. Plausibly THE cause.
+2. A subtle prefill/first-token bug not caught by structural diffing.
+
+**Definitive next tests** (do these, don't hand-wave "it's quant"):
+- **Minimal decode loop** (per Eric's guidance): drive the model OUTSIDE osaurus's
+  BatchEngine — a raw prefill + greedy TokenIterator loop, KV-cache only, no
+  prefix/paged/SSD/batching — on a forced-factual prompt. Check the FIRST decode
+  token argmax. If it's right there but wrong through osaurus → engine/cache bug.
+  If wrong even in the minimal loop → model (quant or prefill bug).
+- **Higher-bit A/B**: quantize the bf16 (187GB) down to 6-bit or 8-bit (fits ~60-90GB)
+  with the jang quantizer and re-run the same prompts. If 8-bit answers correctly →
+  it's the 2-bit experts, port is fully correct. If 8-bit is ALSO off → a residual
+  bug. This is the cleanest separator; the only reason it wasn't done is the bf16
+  download + convert cost.
+- **Per-layer numerical diff** would be ideal but the reference only runs on Ascend
+  (torch_npu), not on Mac.
+
+## Open items (structural)
 - DSA lightning indexer (top-2048 on the 16 dsa_layers) — needed only for >2048 ctx.
 - MTP depth-3 head (layers 46-48) for spec-decode.
 - osaurus catalog: isOpenPanguV2Family + isKnownHybridModel + cache_type hybrid auto-load.
