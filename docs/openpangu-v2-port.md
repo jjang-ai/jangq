@@ -139,7 +139,37 @@ paged/SSD caching.** The right sequence:
   these localized the bugs (but note: with a broken mHC/conv, disabling a
   still-correct component like sinks can look "better" — re-bisect after each fix).
 
-## OPEN: coherent but weak prompt-conditioning (the current wall)
+## ROOT CAUSE of "coherent but ignores the prompt" — SOLVED (runtime bug, NOT quant)
+
+**The bug: the attention-sink mask was inverted for boolean masks.** `createCausalMask`
+(MLXLMCommon/KVCache.swift) returns a **BOOLEAN** mask (`linds .>= rinds`, true=attend).
+`OpenPanguV2Attention.prependSinkMask` prepended `MLXArray.zeros(dtype: .bool)` = **false**
+for the 128 sink columns → the attention sinks were **MASKED OUT during prefill**. So the
+prompt's KV was computed WITHOUT the sink attention the model was trained with → the model
+could not condition on the prompt (fluent but context-blind: "2+2"→pedagogy essay,
+"favorite color"→WordPress code, first-token = word-fragment). Decode used `mask=.none`
+(sinks attended), so the prefill/decode inconsistency is why sinks-ON was
+coherent-but-wrong while sinks-OFF was degenerate.
+
+**Fix:** in `prependSinkMask`, prepend `true` (visible) for the sink columns on a bool mask
+(`MLXArray.ones(...).asType(.bool)`); keep `0` for an additive float mask.
+
+**Proof (RunBench BENCH_COHERENT, TokenIterator, JANG_2L 2-bit, temp=0):**
+- "My favorite color is blue." → reasons about keeping it brief (on-topic)
+- "What is my favorite color?" → *"From the previous interaction, the user stated: 'My
+  favorite color is blue.' So, I know the favorite color is blue."* (multi-turn context ✓)
+- "Is that a warm or cool color?" → **"Blue is a cool color."** (correct, complete)
+
+**Lesson**: JANG_2L (2-3 bit) was NEVER the problem — coherent-but-wrong is always a runtime
+bug. Diagnostic ladder that found it: (1) all weights load (2482/2482, param-vs-weight diff),
+(2) forward numerically healthy (state trace: streams differentiate, magnitudes sane, no NaN),
+(3) simple TokenIterator path reproduces it → not the engine, (4) top-logit probe = word-
+fragments → prompt not conditioning, (5) read the mask convention → bool, (6) sink prepend
+used `false` → sinks masked in prefill. Env-gated probes left in the code:
+`OPENPANGU_STATE_TRACE`, `OPENPANGU_LOGIT_PROBE`, `VMLX_DUMP_UNLOADED_PARAMS`,
+`OPENPANGU_ALL_SIMPLE_CACHE`, plus MHC_BYPASS/NO_CONVS/NO_SINKS/ROPE_TRAD.
+
+## (historical) coherent but weak prompt-conditioning
 
 After all 10 fixes the model emits **fluent, structured, sophisticated prose**
 (e.g. "2+2?" → a full multi-paragraph Chinese essay on geometry-teaching pedagogy)
