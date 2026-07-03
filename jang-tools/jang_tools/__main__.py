@@ -184,6 +184,13 @@ def cmd_convert(args):
 
     from .convert import DEFAULT_BLOCK_SIZE
     block_size = args.block_size if args.block_size > 0 else DEFAULT_BLOCK_SIZE
+    if getattr(args, "mlp_up_floor", None):
+        # Raise the routed-expert up_proj floor for this build. Module-level dict
+        # is the single source the allocator floors read from (see allocate.py).
+        from . import allocate as _alloc
+        _alloc.MLP_ASYMMETRY_FLOORS["up_proj"] = args.mlp_up_floor
+        _alloc.MLP_ASYMMETRY_FLOORS["w3"] = args.mlp_up_floor
+        print(f"  MLP up_proj floor raised to {args.mlp_up_floor}-bit (routed experts)")
     result = convert_model(
         model_path=args.model,
         output_path=output,
@@ -268,6 +275,10 @@ def main():
                           help="Apply Hadamard rotation before quantization (QuIP# style, ~0.5-1 bit quality gain)")
     p_convert.add_argument("--no-mlp-asymmetry-floor", action="store_true",
                           help="Disable routed-expert gate/down precision floors for legacy compact 2-bit MoE builds")
+    p_convert.add_argument("--mlp-up-floor", type=int, default=None, choices=[3, 4],
+                          help="Raise the routed-expert up_proj asymmetry floor (default: none, up stays at "
+                               "the COMPRESS bit width). Needed on small-expert MoE (moe_intermediate_size "
+                               "~1024, e.g. openpangu_v2) where 2-bit up_proj causes adjacent-token collapse")
     p_convert.add_argument("--awq-norms", type=str, default=None,
                           help="Path to awq_activations.safetensors with per-layer per-channel norms "
                                "(produced by `python -m jang_tools.awq_capture_jang`). Routed-expert AWQ "

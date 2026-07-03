@@ -250,6 +250,149 @@ SLIDING_WINDOW_CONFIGS = {
 }
 
 
+# openPangu-v2 (Huawei openpangu_v2 family — MLA + DSA + SWA + mHC + parameterized
+# sinks + Conv1d convs + sandwich norm + native MTP at layers.{N..N+num_nextn-1}).
+# All entries with importance_weight=0.0 are fp16 passthrough (state / tiny tensors).
+OPENPANGU_V2_LAYER_CONFIGS = {
+    # --- Indexer (DSA) — small 2D linears, per-DSA-layer only ---
+    "self_attn.indexer.wq_b": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=1.5,
+        description="DSA Indexer query projection"
+    ),
+    "self_attn.indexer.wk": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=1.5,
+        description="DSA Indexer key projection"
+    ),
+    "self_attn.indexer.weights_proj": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=1.8,
+        description="DSA Indexer per-head weighting — tiny, precision-sensitive"
+    ),
+    "self_attn.indexer.k_norm": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="DSA Indexer key norm — RMSNorm, keep fp16"
+    ),
+    # --- Parameterized sinks (128 learned positions per layer) — STATE ---
+    "self_attn.param_sink_compressed_kv": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Parameterized compressed-KV sink — learned state, fp16 passthrough"
+    ),
+    "self_attn.param_sink_k_pe": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Parameterized rotary-K sink — learned state, fp16 passthrough"
+    ),
+    # --- Attention-side Conv1d (per-layer) — same rule as lfm2 conv.conv.weight ---
+    "self_attn.qa_conv": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Q-side Conv1d — passthrough (small kernel, not group-quantizable)"
+    ),
+    "self_attn.o_conv": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="O-side Conv1d — passthrough"
+    ),
+    "self_attn.compresskv_conv": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Compressed-KV Conv1d — passthrough"
+    ),
+    # --- Per-layer mHC branches — tiny scalars/vectors ---
+    "attn_mhc_module.branch_alpha": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="mHC attention branch alpha — scalar/small state"
+    ),
+    "attn_mhc_module.branch_beta": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="mHC attention branch beta — scalar/small state"
+    ),
+    "attn_mhc_module.norm_gamma": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="mHC attention norm gamma — RMSNorm-shaped, fp16"
+    ),
+    "attn_mhc_module.phi": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=1.3,
+        description="mHC attention per-stream projection"
+    ),
+    "mlp_mhc_module.branch_alpha": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="mHC MLP branch alpha — new in openpangu-v2"
+    ),
+    "mlp_mhc_module.branch_beta": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="mHC MLP branch beta"
+    ),
+    "mlp_mhc_module.norm_gamma": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="mHC MLP norm gamma"
+    ),
+    "mlp_mhc_module.phi": LayerQuantConfig(
+        min_bits=4, preferred_bits=8, importance_weight=1.3,
+        description="mHC MLP per-stream projection"
+    ),
+    # --- Sandwich norm around MLP (per layer) ---
+    "pre_mlp_layernorm": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Sandwich-norm pre-MLP — RMSNorm, fp16"
+    ),
+    "post_mlp_layernorm": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Sandwich-norm post-MLP — RMSNorm, fp16"
+    ),
+    "block_post_layernorm": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Block post layernorm (on select layers per block_post_layernorm_idx)"
+    ),
+    # --- Top-level 4-stream merge (NEW vs DSV4) ---
+    "merge_mhc_module.branch_alpha_pre": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Top-level mHC merge alpha_pre — scalar, fp16"
+    ),
+    "merge_mhc_module.branch_beta_pre": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Top-level mHC merge beta_pre — scalar, fp16"
+    ),
+    "merge_mhc_module.norm_gamma": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Top-level mHC merge norm_gamma"
+    ),
+    "merge_mhc_module.weight": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Top-level mHC merge weight — tiny"
+    ),
+    "merge_mhc_module.phi": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Top-level mHC merge phi projection — tiny, keep fp16"
+    ),
+    # --- Router e_score_correction_bias (per MoE layer, 1D 256-element) ---
+    "e_score_correction_bias": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="Router expert-score correction bias — fp16 passthrough"
+    ),
+    # --- MTP-specific per-layer tensors (layers.{num_hidden_layers..}) ---
+    ".eh_proj.": LayerQuantConfig(
+        min_bits=4, preferred_bits=6, importance_weight=1.5,
+        description="MTP embed-hidden mixer — spec-decode critical"
+    ),
+    ".enorm.": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="MTP embed norm — fp16"
+    ),
+    ".hnorm.": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="MTP hidden norm — fp16"
+    ),
+    "shared_head.norm": LayerQuantConfig(
+        min_bits=8, preferred_bits=8, importance_weight=0.0,
+        description="MTP own pre-classifier norm — fp16"
+    ),
+    "shared_head.head": LayerQuantConfig(
+        min_bits=6, preferred_bits=8, importance_weight=2.0,
+        description="MTP own classifier — high precision (token logits)"
+    ),
+    ".embed_tokens": LayerQuantConfig(  # MTP layer's own embed_tokens
+        min_bits=4, preferred_bits=4, importance_weight=1.5,
+        description="MTP per-layer embed_tokens (own copy)"
+    ),
+}
+
+
 def detect_architecture(model_path: str | Path) -> ArchConfig:
     """
     Detect model architecture from config.json and return quantization config.
@@ -425,10 +568,25 @@ def _classify_architecture(
     if num_experts > 1:
         layers = {**TRANSFORMER_LAYER_CONFIGS, **MOE_LAYER_CONFIGS}
 
-        # Check for MLA + MoE (DeepSeek-V2/V3, Mistral 4)
-        _has_mla = _cfg("kv_lora_rank") or "Deepseek" in arch_str or "mistral4" in str(tc.get("model_type", ""))
+        # Check for MLA + MoE (DeepSeek-V2/V3, Mistral 4, openPangu-v2)
+        _has_mla = (
+            _cfg("kv_lora_rank")
+            or "Deepseek" in arch_str
+            or "mistral4" in str(tc.get("model_type", ""))
+            or model_type == "openpangu_v2"
+        )
         if _has_mla:
             layers.update(MLA_LAYER_CONFIGS)
+
+        # openPangu-v2 adds: DSA Indexer + parameterized sinks + Conv1d convs
+        # (qa/o/compresskv) + mHC per-layer AND per-MLP AND top-level merge
+        # + sandwich norm (pre/post-MLP + block_post) + MTP layers at
+        # standard `model.layers.{num_hidden_layers..num_hidden_layers+num_nextn-1}`.
+        # Adds ~40 new tensor-name patterns beyond MLA; register them all so the
+        # allocator classifies them correctly (state/small → fp16 passthrough,
+        # 2D linears → attention-tier).
+        if model_type == "openpangu_v2":
+            layers.update(OPENPANGU_V2_LAYER_CONFIGS)
 
         # Check for vision encoder in MoE model (Mistral 4 is VLM + MoE)
         if has_vision:

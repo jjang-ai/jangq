@@ -85,10 +85,63 @@ EOS_FIXES: dict[str, dict[int, int]] = {
 }
 
 
-def _is_mtp_tensor_name(tensor_name: str) -> bool:
-    """Return true for model-family MTP tensor namespaces."""
+_LAYERS_INDEX_RE = re.compile(r"\.layers\.(\d+)\.")
+
+
+def _is_mtp_tensor_name(tensor_name: str, base_layers: int | None = None) -> bool:
+    """Return true for model-family MTP tensor namespaces.
+
+    Two detection modes:
+      * **Namespace prefix** — any tensor with `mtp.` / `.mtp.` / `.mtp_` (legacy
+        family shapes like MiMo, some Qwen MoE variants).
+      * **Index-based** (when ``base_layers`` is passed) — any tensor at
+        `.layers.N.` where ``N >= base_layers``. This covers the openpangu-v2 /
+        MiniMax-M3 / DSV3-style layout where MTP layers extend the standard
+        ``model.layers.`` sequence without a special prefix.
+
+    Rationale: the earlier prefix-only path silently missed MTP on
+    openpangu-v2 (its 3 MTP layers live at ``model.layers.46/47/48.*``) and
+    the same false-negative was the root of the MiniMax-M3 "tensor_count: 0"
+    stamp. Making the scan index-aware retroactively fixes both.
+    """
     name = tensor_name.lower()
-    return name.startswith("mtp.") or ".mtp." in name or ".mtp_" in name
+    if name.startswith("mtp.") or ".mtp." in name or ".mtp_" in name:
+        return True
+    if base_layers is not None and base_layers > 0:
+        m = _LAYERS_INDEX_RE.search(tensor_name)
+        if m and int(m.group(1)) >= base_layers:
+            return True
+    return False
+
+
+def _mtp_layer_indices(base_layers: int, num_mtp: int) -> list[int]:
+    """Concrete MTP layer indices for the openpangu-v2 / DSV3-style layout."""
+    return list(range(base_layers, base_layers + num_mtp))
+
+
+def _mtp_shared_head_analysis(tensor_names: set[str], base_layers: int, num_mtp: int) -> dict:
+    """Determine whether MTP heads share embed_tokens / lm_head with the base.
+
+    openpangu-v2: MTP layers ship own ``embed_tokens`` and ``shared_head.head``
+    → shared_embed=False, shared_lm_head=False.
+    DSV3-family with only base lm_head: shared_lm_head=True.
+    """
+    have_own_embed = False
+    have_own_head = False
+    for idx in _mtp_layer_indices(base_layers, num_mtp):
+        stem = f".layers.{idx}."
+        for nm in tensor_names:
+            if stem in nm:
+                if nm.endswith(".embed_tokens.weight"):
+                    have_own_embed = True
+                if nm.endswith(".shared_head.head.weight"):
+                    have_own_head = True
+        if have_own_embed and have_own_head:
+            break
+    return {
+        "shared_embed": not have_own_embed,
+        "shared_lm_head": not have_own_head,
+    }
 
 
 def _is_vision_tensor_name(tensor_name: str) -> bool:
@@ -104,13 +157,21 @@ def _is_vision_tensor_name(tensor_name: str) -> bool:
     )
 
 
-def _sanitize_output_tensor_name(tensor_name: str) -> str:
-    """Map wrapped HF checkpoint keys to the runtime-facing MLX names."""
+def _sanitize_output_tensor_name(tensor_name: str, is_vl: bool = False) -> str:
+    """Map wrapped HF checkpoint keys to the runtime-facing MLX names.
+
+    ``is_vl`` gates VL-only remaps. The ``lm_head`` → ``language_model.lm_head``
+    prefix is required for the VLMModelFactory dispatch path (image-text-to-text
+    runtimes expect a ``language_model.`` namespace) but wrongly breaks text-only
+    models: the runtime then loads ``lm_head`` from a namespace the base model
+    doesn't own, producing garbage on load. See the Kanana lesson
+    (project_convert_lm_head_vl_prefix_bug.md); the ``is_vl`` gate is the fix.
+    """
     if tensor_name.startswith("model.language_model."):
         return tensor_name.replace("model.language_model", "language_model.model", 1)
     if tensor_name.startswith("model.visual"):
         return tensor_name.replace("model.visual", "vision_tower", 1)
-    if tensor_name == "lm_head.weight" or tensor_name.startswith("lm_head."):
+    if is_vl and (tensor_name == "lm_head.weight" or tensor_name.startswith("lm_head.")):
         return "language_model." + tensor_name
     if ".feed_forward.w1.weight" in tensor_name:
         return tensor_name.replace(".feed_forward.w1.weight", ".feed_forward.gate_proj.weight")
@@ -160,28 +221,67 @@ def _configured_mtp_layers_from_config(config: dict) -> int:
 def _build_mtp_runtime_metadata(config: dict, tensor_names: set[str]) -> dict:
     """Build explicit runtime metadata for MTP-capable bundles.
 
-    The current directive is to keep and enable MTP metadata when source MTP
-    tensors exist. Runtimes that cannot speculate yet can still run plain
-    autoregressive decode, but converters must not zero the fields.
+    Passes ``num_hidden_layers`` to the MTP tensor scan so families that pack
+    MTP layers at indices ``[num_hidden_layers, num_hidden_layers+num_nextn)``
+    of the standard ``model.layers.`` prefix (openpangu-v2, DSV3-style,
+    MiniMax-M3) are recognised. Emits a richer runtime block:
+
+    ``layer_indices``        — explicit index list — runtime skips pattern matching
+    ``layer_prefix``         — where MTP tensors live in the bundle
+    ``shared_embed``         — do MTP heads reuse the base ``model.embed_tokens``?
+    ``shared_lm_head``       — do MTP heads reuse the base ``lm_head``?
+    ``spec_decoding_ready``  — every declared MTP layer has tensors in the bundle
+    ``mode``                 — ``included`` | ``metadata_only_missing_weights`` | ``partial``
     """
+    text_cfg = config.get("text_config", {}) if isinstance(config, dict) else {}
     mtp_layers = _configured_mtp_layers_from_config(config)
-    mtp_tensor_count = sum(1 for name in tensor_names if _is_mtp_tensor_name(name))
+    base_layers = int(config.get("num_hidden_layers", 0) or text_cfg.get("num_hidden_layers", 0) or 0)
+
+    mtp_tensor_count = sum(
+        1 for name in tensor_names if _is_mtp_tensor_name(name, base_layers=base_layers)
+    )
     if mtp_layers == 0 and mtp_tensor_count == 0:
         return {}
 
+    # Per-layer coverage — determines spec_decoding_ready & partial vs full.
+    layer_indices = _mtp_layer_indices(base_layers, mtp_layers) if base_layers and mtp_layers else []
+    per_layer_counts: list[int] = []
+    for idx in layer_indices:
+        stem = f".layers.{idx}."
+        per_layer_counts.append(sum(1 for nm in tensor_names if stem in nm))
+    all_layers_have_tensors = bool(per_layer_counts) and all(c > 0 for c in per_layer_counts)
+
     bundle_has_mtp = mtp_tensor_count > 0
-    mtp_mode = "preserved_enabled" if bundle_has_mtp else "metadata_only_missing_weights"
+    if not bundle_has_mtp:
+        mode = "metadata_only_missing_weights"
+    elif all_layers_have_tensors:
+        mode = "included"
+    else:
+        mode = "partial"
+
+    share_info = (
+        _mtp_shared_head_analysis(tensor_names, base_layers, mtp_layers)
+        if bundle_has_mtp and base_layers and mtp_layers
+        else {"shared_embed": None, "shared_lm_head": None}
+    )
+
     return {
         "runtime": {
             "bundle_has_mtp": bundle_has_mtp,
             "mtp_layers": mtp_layers,
-            "mtp_mode": mtp_mode,
+            "mtp_mode": mode,
         },
         "mtp": {
             "kept": bundle_has_mtp,
             "enabled": bundle_has_mtp,
             "num_layers": mtp_layers,
             "tensor_count": mtp_tensor_count,
+            "layer_indices": layer_indices,
+            "layer_prefix": "model.layers",
+            "shared_embed": share_info["shared_embed"],
+            "shared_lm_head": share_info["shared_lm_head"],
+            "spec_decoding_ready": bundle_has_mtp and all_layers_have_tensors,
+            "per_layer_tensor_counts": per_layer_counts,
         },
         "bundle_has_mtp": bundle_has_mtp,
         "mtp_layers": mtp_layers,
@@ -1082,7 +1182,7 @@ def convert_model(
                 except TypeError:
                     w = _load_bf16_tensor(sf_path, tensor_name, shape)
                 w_out = w.astype(np.float16) if w.dtype != np.float16 else w
-                passthrough[_sanitize_output_tensor_name(tensor_name)] = (
+                passthrough[_sanitize_output_tensor_name(tensor_name, is_vl=arch_config.has_vision_encoder)] = (
                     _prepare_vision_passthrough_tensor(tensor_name, w_out)
                 )
             continue
@@ -1238,7 +1338,7 @@ def convert_model(
         # Gate is tiny (128 × 4096 = 0.5 MB per layer) so size impact is negligible.
         # This ensures maximum routing precision and avoids bf16/f16 dtype issues.
         if _is_moe_router_gate(tensor_name) and num_experts > 0:
-            passthrough[_sanitize_output_tensor_name(tensor_name)] = weights.astype(np.float16)
+            passthrough[_sanitize_output_tensor_name(tensor_name, is_vl=arch_config.has_vision_encoder)] = weights.astype(np.float16)
             # offset already incremented at line 412 — do NOT increment again
             print(f"    Gate passthrough (f16): {tensor_name} → {weights.shape}")
             continue
@@ -1280,7 +1380,7 @@ def convert_model(
                 bits=split_up_bits,
                 group_size=tensor_gs,
             )
-            base_name = _sanitize_output_tensor_name(tensor_name)
+            base_name = _sanitize_output_tensor_name(tensor_name, is_vl=arch_config.has_vision_encoder)
             gate_base = base_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
             up_base = base_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
             v2_tensors[f"{gate_base}.weight"] = gate_qw
@@ -1498,7 +1598,7 @@ def convert_model(
             _metal_cache_clear_error = _e
 
         # --- Store with MLX-ready names and shapes ---
-        base_name = _sanitize_output_tensor_name(tensor_name)
+        base_name = _sanitize_output_tensor_name(tensor_name, is_vl=arch_config.has_vision_encoder)
         if base_name.endswith(".weight"):
             base_name = base_name[:-7]
 
@@ -1699,7 +1799,7 @@ def convert_model(
                 # Skip importance tensors (calibration-only)
                 if tensor_name.endswith(".importance"):
                     continue
-                out_name = _sanitize_output_tensor_name(tensor_name)
+                out_name = _sanitize_output_tensor_name(tensor_name, is_vl=arch_config.has_vision_encoder)
                 if out_name in passthrough:
                     continue
                 base = out_name.replace(".weight", "")
@@ -1715,8 +1815,15 @@ def convert_model(
                 for d in shape:
                     n_el *= d
                 is_tiny_nd = len(shape) > 2 and n_el < 100_000
+                # Architecture-declared passthrough (openpangu-v2 sinks, mHC merge,
+                # etc.): if the tensor matches a skip_patterns entry, force it
+                # through as fp16 passthrough regardless of shape. Without this
+                # gate, 2D state tensors like `param_sink_compressed_kv` (shape
+                # [128, 512]) get dropped by both the quant loop (skip-listed)
+                # and this passthrough loop (`is_small` false for ndim=2).
+                is_arch_passthrough = any(sp in tensor_name for sp in skip_patterns)
 
-                if is_norm or is_bias or is_small or is_tiny_nd or is_vision:
+                if is_norm or is_bias or is_small or is_tiny_nd or is_vision or is_arch_passthrough:
                     try:
                         tensor = f.get_tensor(tensor_name)
                     except TypeError:

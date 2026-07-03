@@ -57,6 +57,12 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # both "dsml" and "deepseek_v4" as aliases. Stamping "deepseek" here
     # routed freshly-converted DSV4 bundles through the wrong parser.
     "deepseek_v4":      ("deepseek_v4", "deepseek_r1", "dsml",     True,  "mla"),
+    # openPangu-v2 (Huawei) — MLA + DSA-per-3rd-layer + SWA + mHC + native MTP.
+    # Reuse deepseek_r1 reasoning parser until we sample openpangu's own thinking
+    # format. Tool parser defaults to "qwen" (harmless; the source ships its own
+    # chat_template.jinja anyway). Cache type is hybrid-plus (DSA and SWA share
+    # per-layer caches with different behaviour — see runtime plan doc 06).
+    "openpangu_v2":     ("openpangu_v2","deepseek_r1", "qwen",     True,  "hybrid"),
     # GLM 4 (dense + MoE, no MLA)
     "glm4":             ("glm4",        "deepseek_r1", "glm47",    False, "kv"),
     "glm4_moe":         ("glm4_moe",    "deepseek_r1", "glm47",    False, "kv"),

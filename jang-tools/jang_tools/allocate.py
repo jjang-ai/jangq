@@ -138,6 +138,30 @@ TIER_RULES = [
     ("indexer.weights_proj", Tier.CRITICAL),
     ("indexers_proj", Tier.CRITICAL),
 
+    # ── openPangu-v2 mHC branch merge (per-layer AND per-MLP) + top-level ────
+    # `attn_mhc_module.phi` / `mlp_mhc_module.phi` are per-stream projections that
+    # merge the 4 mHC streams into the residual. Small tensor (hidden × mhc_num_stream
+    # × head_dim ≈ 2560 × 4 × 192 = 2M params) but any noise here scrambles the
+    # multi-head-cascade output for the whole layer. Verified: at 2-bit the tensor
+    # reaches 62% rel err vs source and the model degenerates 4/5 turns.
+    # Must be CRITICAL (8-bit). Applies to openpangu-v2 and any future mHC-family.
+    ("attn_mhc_module.phi", Tier.CRITICAL),
+    ("mlp_mhc_module.phi", Tier.CRITICAL),
+    ("merge_mhc_module.phi", Tier.CRITICAL),
+
+    # ── MTP embed-hidden mixer (DSV3-style spec-decode heads) ────────────────
+    # `eh_proj` concatenates prev-layer hidden with the next-token embedding and
+    # projects them down to hidden_size. If noisy, the MTP head produces broken
+    # draft logits — verified: at 2-bit the tensor is 47% rel err. Keep CRITICAL
+    # so speculative decoding stays useful. openpangu-v2 + DSV3 + DSV4 all have it.
+    ("eh_proj", Tier.CRITICAL),
+    # `shared_head.head` is the MTP layer's OWN lm_head (DSV3/openpangu-v2 MTP
+    # blocks each carry one). It must match lm_head's tier — verified on
+    # openpangu-v2 JANG_2L build 3: fell through to COMPRESS and got 2-bit
+    # while lm_head was 8-bit, breaking MTP draft logits. `shared_head.norm`
+    # is a norm and passes through fp16 separately.
+    ("shared_head.head", Tier.CRITICAL),
+
     # ── Full Softmax Attention ───────────────────────────────
     # Standard Q/K/V/O projections — critical for coherence
     ("q_proj", Tier.CRITICAL),
