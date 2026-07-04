@@ -768,6 +768,32 @@ def convert_model(
     if num_experts >= 512:
         print(f"  MLP asymmetry: 512+ experts → gate_proj=IMPORTANT(4-bit), down_proj=3-bit floor")
 
+    # Small-expert MoE up_proj floor. The general assumption "up_proj is a linear
+    # multiplicand, 2-bit OK" (see allocate.MLP_ASYMMETRY_FLOORS) BREAKS when the
+    # routed-expert intermediate is tiny: 2-bit up_proj then collapses into
+    # adjacent-token repetition / symbol-soup. Proven on openpangu_v2
+    # (moe_intermediate_size=1024, 256 experts): JANG_2L (2-bit up) emits garbage,
+    # JANG_3M (up floored to 4) is coherent — and bf16 ground-truth confirms the
+    # runtime is faithful, so this is purely a quant floor. Auto-raise up_proj/w3
+    # to 4-bit for small-expert MoE unless the user already set --mlp-up-floor.
+    _moe_inter = _raw_config.get(
+        "moe_intermediate_size",
+        _raw_config.get("text_config", {}).get("moe_intermediate_size", 0),
+    )
+    _small_expert_moe = arch_config.has_moe_layers and (
+        arch_config.model_type == "openpangu_v2" or (0 < _moe_inter <= 1024)
+    )
+    if _small_expert_moe:
+        from . import allocate as _alloc
+        if "up_proj" not in _alloc.MLP_ASYMMETRY_FLOORS:
+            _alloc.MLP_ASYMMETRY_FLOORS["up_proj"] = 4
+            _alloc.MLP_ASYMMETRY_FLOORS["w3"] = 4
+            print(
+                f"  Small-expert MoE (moe_intermediate_size={_moe_inter or '?'}, "
+                f"{arch_config.model_type}) → up_proj floor auto-raised to 4-bit "
+                f"(prevents adjacent-token collapse; override with --mlp-up-floor)"
+            )
+
     # Step 2: Calibrate (compute importance scores)
     # Skip calibration for profile and K-quant allocation — they use tier
     # classification only, never importance scores. Saves 10-30 seconds.
