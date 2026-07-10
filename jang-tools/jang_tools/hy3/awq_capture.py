@@ -4,15 +4,26 @@ Created by Jinho Jang (eric@jangq.ai) — 2026-07-09.
 
 Streams the 597 GB BF16 Hy3 source layer-by-layer (never holds the model) over
 a batch of equal-length calibration sequences and accumulates, per sparse MoE
-layer, the per-input-channel max of |post_attention_layernorm output| — the
-input the router + shared expert + routed experts all read. Emits AWQ scales
+layer, per-input-channel activation statistics of the post_attention_layernorm
+output — the input the router + shared expert + routed experts all read.
 
-    s = clip((max|x| + eps)^alpha, min=1.0)
+Emits (fp32, shape (hidden,) unless noted):
 
-in the layout jang_tools.convert_hy3_jang consumes:
+    model.layers.{li}.mlp.input_max      per-channel max|x|
+    model.layers.{li}.mlp.input_absmean  per-channel mean|x|   (AWQ default stat)
+    model.layers.{li}.mlp.act_sample     (n_sample, hidden) real activation rows
 
-    model.layers.{li}.mlp.input_scale   (hidden,) fp32
-    model.layers.{li}.mlp.input_max     (hidden,) fp32   (diagnostics)
+`input_scale` is NOT written here. Scale selection is a separate, measured
+step (`jang_tools.hy3.awq_search`) that grid-searches the exponent against the
+true objective ||Q(W*s) @ (x/s) - W@x|| on real expert weights and the real
+activation rows above.
+
+Why not the MiniMax-M3 formula `s = clip(max|x|^0.5, min=1.0)`: Hy3's
+post-attn-norm activations are small (median max|x| ~= 0.62; layers 1-40 have
+max|x| < 1.0 on EVERY channel), so that floor collapses s to exactly 1.0 for
+70.7% of all channels and for 100% of channels in layers 1..40 — i.e. AWQ
+would silently no-op across half the network, precisely where the 2-bit routed
+experts need protection most. Measured 2026-07-09.
 
 The forward mirrors the serving path exactly:
   - standard RMSNorm (not gemma-style)
@@ -28,7 +39,7 @@ Usage (on the box, external drive source):
   python3 -m jang_tools.hy3.awq_capture \
       --model /Volumes/EricsLLMDrive/sources/Hy3 \
       --calib /Volumes/EricsLLMDrive/sources/vera-agentic-coder/vera-keep.jsonl \
-      --out   /Volumes/EricsLLMDrive/sources/Hy3-awq-scales.safetensors \
+      --out   /Volumes/EricsLLMDrive/sources/Hy3-awq-stats.safetensors \
       --batch 8 --seq-len 512 --device mps
 """
 
@@ -45,7 +56,6 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 EPS = 1e-6
-SCALE_FLOOR = 1.0
 
 
 class Hy3Streamer:
@@ -105,9 +115,10 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--device", default="mps")
-    ap.add_argument("--alpha", type=float, default=0.5)
+    ap.add_argument("--n-sample", type=int, default=128,
+                    help="activation rows kept per layer for awq_search's error objective")
     ap.add_argument("--max-layers", type=int, default=None,
-                    help="debug: stop after N layers (partial scales, do NOT convert with them)")
+                    help="debug: stop after N layers (partial stats, do NOT convert with them)")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -149,7 +160,10 @@ def main() -> None:
     B, T = len(seqs), args.seq_len
     input_ids = torch.tensor(seqs, device=device)
     print(f"  Hy3 AWQ capture: B={B} T={T} ({B*T} tokens) device={device} "
-          f"alpha={args.alpha} layers={NL}", flush=True)
+          f"n_sample={args.n_sample} layers={NL}", flush=True)
+    # Deterministic row subsample (same rows every layer -> comparable across depth).
+    g = torch.Generator().manual_seed(1234)
+    sample_rows = torch.randperm(B * T, generator=g)[: args.n_sample].sort().values
 
     embed = st.get("model.embed_tokens.weight")
     h = embed[input_ids.reshape(-1)].reshape(B, T, H)
@@ -158,6 +172,8 @@ def main() -> None:
     cos, sin = precompute_rope(hd, T, theta, device, h.dtype)
 
     act_max: dict[int, np.ndarray] = {}
+    act_absmean: dict[int, np.ndarray] = {}
+    act_sample: dict[int, np.ndarray] = {}
     n_run = NL if args.max_layers is None else min(args.max_layers, NL)
     t0 = time.time()
 
@@ -205,9 +221,12 @@ def main() -> None:
             continue
 
         # capture: the experts/router/shared input
-        cmax = hpost.float().abs().amax(dim=(0, 1)).cpu().numpy()
+        flat_f32 = hpost.float().reshape(-1, H)
+        cmax = flat_f32.abs().amax(dim=0).cpu().numpy()
         prev = act_max.get(li)
         act_max[li] = cmax if prev is None else np.maximum(prev, cmax)
+        act_absmean[li] = flat_f32.abs().mean(dim=0).cpu().numpy()
+        act_sample[li] = flat_f32[sample_rows.to(flat_f32.device)].cpu().numpy()
 
         # router (dots1 group_expert_select, n_group=1): sigmoid scores;
         # bias ONLY biases the choice; weights are the raw sigmoid scores.
@@ -254,14 +273,15 @@ def main() -> None:
 
     out = {}
     for li, vec in act_max.items():
-        s = np.power(vec + EPS, args.alpha).astype(np.float32)
-        s = np.maximum(s, SCALE_FLOOR).astype(np.float32)
-        out[f"model.layers.{li}.mlp.input_scale"] = s
         out[f"model.layers.{li}.mlp.input_max"] = vec.astype(np.float32)
+        out[f"model.layers.{li}.mlp.input_absmean"] = act_absmean[li].astype(np.float32)
+        out[f"model.layers.{li}.mlp.act_sample"] = act_sample[li].astype(np.float32)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     save_file(out, args.out)
-    print(f"\n  wrote {len(act_max)} layer scales -> {args.out} "
+    print(f"\n  wrote stats for {len(act_max)} layers -> {args.out} "
           f"({(time.time()-t0)/60:.1f} min)", flush=True)
+    print("  next: python -m jang_tools.hy3.awq_search --model <src> --stats "
+          f"{args.out} --out <scales.safetensors>", flush=True)
 
 
 if __name__ == "__main__":
