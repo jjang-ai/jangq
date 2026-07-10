@@ -40,6 +40,10 @@ _HY3_TO_DOTS1_FIELD_MAP = {
 
 @dataclass
 class ModelArgs(dots1.ModelArgs):
+    # 1 for Hy3 final (model.layers.80 = DSV3-style MTP layer). Kept on args so
+    # the vmlx native-MTP patch can attach the head; 0 disables cleanly.
+    num_nextn_predict_layers: int = 0
+
     @classmethod
     def from_dict(cls, params):
         remapped = {}
@@ -163,6 +167,43 @@ class Hy3DecoderLayer(nn.Module):
         return h + r
 
 
+class Hy3MTPLayer(nn.Module):
+    """Hy3 native MTP head (model.layers.80 re-namespaced to mtp.{i}.* by the
+    JANG converter). Mirrors vLLM's HYV3MultiTokenPredictorLayer exactly:
+
+        fused = eh_proj(concat([enorm(embed(next_ids)), hnorm(hidden)], -1))
+        out   = final_layernorm(decoder_block(fused))
+
+    where hidden is the backbone's PRE-final-norm last-layer output and
+    decoder_block is a full Hy3 layer (GQA + qk_norm + sigmoid-router MoE +
+    shared expert). Output feeds the SHARED base lm_head (fp32 contract).
+    Recursive drafting feeds the post-final-norm output back as `hidden`
+    (same as vLLM's spec_step recursion — it gets hnorm'ed again)."""
+
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.enorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.hnorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.eh_proj = nn.Linear(args.hidden_size * 2, args.hidden_size, bias=False)
+        # layer_idx >= first_k_dense_replace -> MoE mlp (the MTP layer is MoE)
+        self.block = Hy3DecoderLayer(args, layer_idx=args.num_hidden_layers)
+        self.final_layernorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+
+    def __call__(
+        self,
+        hidden: mx.array,
+        next_token_ids: mx.array,
+        embed_tokens: nn.Module,
+        cache: Optional[Any] = None,
+    ) -> mx.array:
+        e = self.enorm(embed_tokens(next_token_ids))
+        hn = self.hnorm(hidden)
+        fused = self.eh_proj(mx.concatenate([e, hn], axis=-1))
+        mask = create_attention_mask(fused, cache)
+        out = self.block(fused, mask, cache)
+        return self.final_layernorm(out)
+
+
 class Hy3InnerModel(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -173,13 +214,16 @@ class Hy3InnerModel(nn.Module):
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
+        """Returns the PRE-final-norm hidden state; ``Model.__call__`` applies
+        ``self.norm`` before the lm_head so the MTP head can fuse the raw
+        backbone hidden (DSV3/vLLM contract)."""
         h = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
         mask = create_attention_mask(h, cache[0])
         for layer, c in zip(self.layers, cache):
             h = layer(h, mask, c)
-        return self.norm(h)
+        return h
 
 
 class Model(nn.Module):
@@ -191,10 +235,9 @@ class Model(nn.Module):
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
-    def __call__(self, inputs: mx.array, cache=None):
-        out = self.model(inputs, cache)
+    def _head_logits(self, normed: mx.array) -> mx.array:
         if self.args.tie_word_embeddings:
-            return self.model.embed_tokens.as_linear(out)
+            return self.model.embed_tokens.as_linear(normed)
         # `enable_lm_head_fp32=True` in Hy3 config — accumulate the 4096-dim
         # contraction in fp32. Mirror DSV4's pattern: dequantize the
         # quantized lm_head weight, then matmul in fp32. Without this the
@@ -212,7 +255,53 @@ class Model(nn.Module):
             ).astype(mx.float32)
         else:
             w_f = self.lm_head.weight.astype(mx.float32)
-        return out.astype(mx.float32) @ w_f.T
+        return normed.astype(mx.float32) @ w_f.T
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache=None,
+        return_hidden: bool = False,
+        return_logits: bool = True,
+        n_confirmed: int = 0,  # accepted for driver parity; Hy3 is pure-KV
+    ):
+        hidden = self.model(inputs, cache)
+        if not return_logits:
+            return hidden
+        logits = self._head_logits(self.model.norm(hidden))
+        if return_hidden:
+            return logits, hidden
+        return logits
+
+    # ── native MTP surface (vmlx batch_generator contract) ──
+    # `self.mtp` is only attached by vmlx's mlx_lm_mtp patch (gated on
+    # is_mtp_active()); with it absent this model is indistinguishable from a
+    # stock no-MTP build and sanitize strips mtp.* weights.
+
+    def attach_mtp(self) -> None:
+        n = int(getattr(self.args, "num_nextn_predict_layers", 0) or 0)
+        if n <= 0:
+            raise ValueError("num_nextn_predict_layers=0 — no MTP head to attach")
+        self.mtp = [Hy3MTPLayer(self.args) for _ in range(n)]
+
+    def mtp_forward(self, hidden_states, next_token_ids, mtp_cache,
+                    return_hidden: bool = False):
+        h = hidden_states
+        if mtp_cache is None:
+            mtp_cache = [None] * len(self.mtp)
+        for blk, c in zip(self.mtp, mtp_cache):
+            h = blk(h, next_token_ids, self.model.embed_tokens, c)
+        logits = self._head_logits(h)
+        if return_hidden:
+            return logits, h
+        return logits
+
+    def make_mtp_cache(self):
+        if hasattr(self, "mtp"):
+            from mlx_lm.models.cache import KVCache
+
+            return [KVCache() for _ in self.mtp]
+        return []
 
     @property
     def layers(self):
@@ -222,11 +311,20 @@ class Model(nn.Module):
         N = self.args.num_hidden_layers
         n_experts = self.args.n_routed_experts
 
-        # 1) Drop MTP layer (`model.layers.{N}.*`) — preserved_disabled mode.
+        # 1) MTP weights. New JANG bundles ship the head re-namespaced to
+        #    mtp.{i}.* with FINAL param names (they load directly onto
+        #    Hy3MTPLayer). Keep them only when the head is attached (vmlx
+        #    native-MTP patch); otherwise strip. Legacy source-style
+        #    model.layers.{N}.* MTP tensors (preview bundles, raw bf16
+        #    source) are always dropped — the head is never loaded from them.
         weights = {
             k: v for k, v in weights.items()
             if not k.startswith(f"model.layers.{N}.")
         }
+        if not hasattr(self, "mtp"):
+            weights = {
+                k: v for k, v in weights.items() if not k.startswith("mtp.")
+            }
 
         # 2) Rename hy_v3-specific tensor keys onto our model's expected paths.
         for layer in range(self.args.first_k_dense_replace, N):
