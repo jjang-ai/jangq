@@ -207,6 +207,18 @@ def classify_tensor(name: str, policy: Hy3JangPolicy) -> tuple[int, str]:
 
 SHARD_BYTES = 4_500_000_000
 
+# Audited 2026-07-10 (loop gate on the final post-train): at temp 0.9 the
+# 2-bit routed tail loops with top_p>=0.95 (3/6 seeds at 1.0, 2/6 at 0.95);
+# top_p 0.9 and min_p 0.05 each independently drop it to 0/6. Stamp both
+# floors — min_p also covers the MoE chunked-prefill cold/warm routing nudge.
+# The vendor recommendation (0.9/1.0/-1) remains in generation_config;
+# explicit request params always override this stamp.
+HY3_CHAT_SAMPLING_DEFAULTS = {
+    "temperature": 0.9,
+    "top_p": 0.9,
+    "min_p": 0.05,
+}
+
 
 def _parse_args(argv=None):
     ap = argparse.ArgumentParser(description="Tencent Hy3 -> all-affine JANG")
@@ -640,11 +652,8 @@ def main(argv=None) -> None:
                 "modes": ["no_think", "low", "high"],
             },
             "tool_calling": {"supported": True, "parser": "hunyuan"},
-            # Final-release official recommendation. The May PREVIEW JANG_2L
-            # looped at temp 0.9 past ~1.5-2.2K tokens and was stamped greedy;
-            # the final model is a new post-train — gate the loop explicitly
-            # before overriding these.
-            "sampling_defaults": {"temperature": 0.9, "top_p": 1.0, "top_k": -1},
+            # See HY3_CHAT_SAMPLING_DEFAULTS for the audit trail.
+            "sampling_defaults": dict(HY3_CHAT_SAMPLING_DEFAULTS),
         },
     }
 
