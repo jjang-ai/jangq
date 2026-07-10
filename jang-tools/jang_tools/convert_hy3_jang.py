@@ -547,6 +547,9 @@ def main(argv=None) -> None:
             % (8 if policy.mtp_policy.endswith("8") else 4)
         ) if mtp_preserved else "MTP dropped (smallest-affine profile)",
     }
+    # Seed block. Canonicalized below via jang_tools.capabilities so the
+    # modalities/has_* fields match what verify_directory recomputes — a
+    # hand-written block fails verify ("re-stamp at the very end").
     capabilities = {
         "reasoning_parser": "qwen3",
         "tool_parser": "hunyuan",
@@ -557,9 +560,7 @@ def main(argv=None) -> None:
         "modality": "text",
         "cache_type": "kv",
     }
-    out_cfg["capabilities"] = capabilities
     out_cfg["runtime"] = runtime_block
-    (OUT / "config.json").write_text(json.dumps(out_cfg, indent=2))
 
     # ── jang_config.json ──
     bits_map = {
@@ -588,8 +589,12 @@ def main(argv=None) -> None:
             "mode": "affine",
             "bits": bits_map,
             "routed_avg_bits": sum(policy.routed_bits.values()) / 3.0,
-            "awq": {"enabled": bool(awq_layer),
-                    "scope": "routed+shared gate/up + router gate fold"},
+            "awq": {
+                "enabled": bool(awq_layer),
+                # Don't describe a fold that didn't happen.
+                "scope": ("routed+shared gate/up + router gate fold"
+                          if awq_layer else None),
+            },
         },
         "architecture": {
             "type": "moe", "attention": "gqa+qk_norm",
@@ -614,6 +619,24 @@ def main(argv=None) -> None:
             "sampling_defaults": {"temperature": 0.9, "top_p": 1.0, "top_k": -1},
         },
     }
+
+    # Canonicalize capabilities from the FINAL jang_config + config + the
+    # written tensor index (build_capabilities inspects tensor names to decide
+    # modalities). Must run after every jang_config mutation, before writing.
+    try:
+        from jang_tools.capabilities import build_capabilities
+
+        caps = build_capabilities(jang_cfg, out_cfg, OUT)
+        if caps:
+            jang_cfg["capabilities"] = caps
+            out_cfg["capabilities"] = caps
+        else:
+            print("  [capabilities] WARN: family unresolved; keeping seed block",
+                  flush=True)
+    except Exception as exc:  # pragma: no cover
+        print(f"  [capabilities] {type(exc).__name__}: {exc}", flush=True)
+
+    (OUT / "config.json").write_text(json.dumps(out_cfg, indent=2))
     (OUT / "jang_config.json").write_text(json.dumps(jang_cfg, indent=2))
 
     # ── sidecars ──
@@ -633,15 +656,18 @@ def main(argv=None) -> None:
             tc["chat_template"] = tpl_p.read_text(encoding="utf-8")
             tok_cfg_p.write_text(json.dumps(tc, indent=2, ensure_ascii=False))
 
-    try:
-        from jang_tools.capabilities import verify_directory
-        ok, msg = verify_directory(OUT)
-        print(f"  verify: ok={ok}  msg={msg}", flush=True)
-    except Exception as exc:  # pragma: no cover
-        print(f"  [verify] {type(exc).__name__}: {exc}", flush=True)
-
     print(f"\n  shards={nshard} on_disk={total / 1e9:.2f}GB "
           f"elapsed={(time.time() - t0) / 60:.1f}min")
+
+    # Verify LAST and make failure loud: a bundle whose capabilities block
+    # doesn't round-trip is a bundle the engine may mis-route at load.
+    from jang_tools.capabilities import verify_directory
+
+    ok, msg = verify_directory(OUT)
+    print(f"  verify: ok={ok}  msg={msg}", flush=True)
+    if not ok:
+        raise SystemExit(f"capabilities verify FAILED for {OUT}: {msg}")
+
     print(f"  DONE -> {OUT}")
 
 
