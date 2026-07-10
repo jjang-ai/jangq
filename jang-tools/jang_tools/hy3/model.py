@@ -236,26 +236,38 @@ class Model(nn.Module):
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def _head_logits(self, normed: mx.array) -> mx.array:
+        """Logits with the `enable_lm_head_fp32=True` accumulation contract.
+
+        Hy3 needs the dim=4096 contraction accumulated in fp32; in bf16 it
+        drifts logits enough to flip plausible top-k picks toward
+        high-baseline-energy junk tokens (doubled letters, etc).
+
+        We get that by feeding **fp32 activations** into `quantized_matmul`,
+        NOT by dequantizing the weight. The old dequant-then-matmul path
+        materialized a (vocab, hidden) fp32 matrix — 120832x4096 ~= 2 GB for
+        Hy3 — on EVERY token, in both the backbone and the MTP head. Measured
+        on the JANG_2L bundle (2026-07-09): 13.5 ms/call vs 1.2 ms here, an
+        11x saving on ~1/3 of a decode step; it was also what made native MTP
+        a net slowdown, since the head pays this cost a second time.
+        Numerics: max rel diff 4.4e-4 vs the dequant reference, argmax
+        identical.
+        """
         if self.args.tie_word_embeddings:
             return self.model.embed_tokens.as_linear(normed)
-        # `enable_lm_head_fp32=True` in Hy3 config — accumulate the 4096-dim
-        # contraction in fp32. Mirror DSV4's pattern: dequantize the
-        # quantized lm_head weight, then matmul in fp32. Without this the
-        # bf16 accumulation drifts logits by ~0.5/elem on the dim=4096
-        # contraction, enough to flip plausible top-k token picks toward
-        # high-baseline-energy junk tokens (doubled letters, etc).
-        if hasattr(self.lm_head, "scales"):
-            w_f = mx.dequantize(
-                self.lm_head.weight,
-                self.lm_head.scales,
-                getattr(self.lm_head, "biases", None),
-                group_size=self.lm_head.group_size,
-                bits=self.lm_head.bits,
-                mode=getattr(self.lm_head, "mode", "affine"),
-            ).astype(mx.float32)
-        else:
-            w_f = self.lm_head.weight.astype(mx.float32)
-        return normed.astype(mx.float32) @ w_f.T
+        lm = self.lm_head
+        x = normed.astype(mx.float32)
+        if hasattr(lm, "scales"):
+            return mx.quantized_matmul(
+                x,
+                lm.weight,
+                lm.scales,
+                getattr(lm, "biases", None),
+                transpose=True,
+                group_size=lm.group_size,
+                bits=lm.bits,
+                mode=getattr(lm, "mode", "affine"),
+            )
+        return x @ lm.weight.astype(mx.float32).T
 
     def __call__(
         self,
