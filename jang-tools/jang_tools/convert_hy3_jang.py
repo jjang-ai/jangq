@@ -93,7 +93,13 @@ _PROFILES = {
         dense_ffn_bits=8,
         embed_bits=6,
         lm_head_bits=8,
-        default_mtp_policy="preserve-affine8",
+        # MTP dropped by default: measured 2026-07-10, native speculative decode
+        # is a ~-3% NET LOSS on the 2-bit routed backbone (verify forward is
+        # per-row 2-bit MoE compute; the affine-8 head accepts at ~58% vs a ~59%
+        # break-even). It only pays off with a higher-bit routed backbone. So the
+        # smallest-affine profile ships without the 3.87 GB head. Pass
+        # --mtp-policy preserve-affine8 to keep it (still supported).
+        default_mtp_policy="drop",
     ),
     "JANG_2K": dict(
         group_size=128,
