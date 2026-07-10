@@ -244,6 +244,8 @@ def main() -> None:
         mxv = float(act_max[li].max())
         print(f"    L{li:2d} moe   {time.time()-tl:5.1f}s act_max={mxv:.2f} "
               f"finite={torch.isfinite(h).all().item()}", flush=True)
+        if device.type == "mps":
+            torch.mps.empty_cache()
 
     out = {}
     for li, vec in act_max.items():
