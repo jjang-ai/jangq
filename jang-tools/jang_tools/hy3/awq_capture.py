@@ -49,21 +49,26 @@ SCALE_FLOOR = 1.0
 
 
 class Hy3Streamer:
-    """Lazy per-tensor loader over the source weight_map (bf16 -> compute dtype)."""
+    """Lazy per-tensor loader over the source weight_map (bf16 -> compute dtype).
+
+    Opens/closes the shard per read. Caching open safe_open handles looks
+    cheaper but accumulates mmap'd regions across the 99x7GB shards — by
+    ~L28 of the 597GB stream the box (128GB unified) descends into kernel
+    thrash (sshd stops answering) and MPS aborts with SIGABRT. Bounding the
+    live mapping to one shard keeps the page cache evictable.
+    """
 
     def __init__(self, src: Path, device, dtype=torch.bfloat16):
         self.src = src
         self.wm = json.loads((src / "model.safetensors.index.json").read_text())["weight_map"]
         self.device = device
         self.dtype = dtype
-        self._handles: dict[str, object] = {}
 
     def get(self, name: str, dtype=None) -> torch.Tensor:
         fn = self.wm[name]
-        if fn not in self._handles:
-            self._handles[fn] = safe_open(str(self.src / fn), framework="pt")
-        t = self._handles[fn].get_tensor(name)
-        return t.to(self.device, dtype or self.dtype)
+        with safe_open(str(self.src / fn), framework="pt") as f:
+            t = f.get_tensor(name)
+            return t.to(self.device, dtype or self.dtype)
 
     def has(self, name: str) -> bool:
         return name in self.wm
