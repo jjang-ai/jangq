@@ -151,7 +151,6 @@ def main() -> None:
     del embed
 
     cos, sin = precompute_rope(hd, T, theta, device, h.dtype)
-    causal = torch.triu(torch.full((T, T), float("-inf"), device=device), 1)
 
     act_max: dict[int, np.ndarray] = {}
     n_run = NL if args.max_layers is None else min(args.max_layers, NL)
@@ -180,7 +179,7 @@ def main() -> None:
         out = torch.nn.functional.scaled_dot_product_attention(
             q, k.repeat_interleave(n_heads // n_kv, dim=1),
             v.repeat_interleave(n_heads // n_kv, dim=1),
-            attn_mask=causal,
+            is_causal=True,
         )
         out = out.transpose(1, 2).reshape(B, T, n_heads * hd)
         h = r + out @ st.get(f"{pre}.self_attn.o_proj.weight").T
