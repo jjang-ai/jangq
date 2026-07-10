@@ -576,6 +576,18 @@ def main(argv=None) -> None:
     }
     if mtp_preserved:
         bits_map["mtp"] = 8 if policy.mtp_policy.endswith("8") else 4
+    # `quantization.bits` MUST be a scalar: vmlx's `_jang_default_bits` does
+    # `int(quant["bits"])` for the default width of any module without an
+    # explicit config.json override, and it is evaluated eagerly inside a
+    # `setdefault(...)` call, so a dict here raises TypeError at load even
+    # when config.json carries correct per-tensor overrides. The per-role map
+    # lives under `bits_by_role`. Do NOT name it `mxtq_bits` — that key routes
+    # the loader down the TurboQuant hydrate path, and this is an affine bundle.
+    bit_widths_used = sorted(
+        {policy.attention_bits, policy.shared_expert_bits, policy.dense_ffn_bits,
+         policy.embed_bits, policy.lm_head_bits, *policy.routed_bits.values()}
+        | ({8 if policy.mtp_policy.endswith("8") else 4} if mtp_preserved else set())
+    )
     jang_cfg = {
         "format": "jang",
         "format_version": "2.0",
@@ -586,8 +598,11 @@ def main(argv=None) -> None:
             "method": "jang-affine-mixed",
             "profile": policy.profile,
             "block_size": gs,
+            "group_size": gs,
             "mode": "affine",
-            "bits": bits_map,
+            "bits": 8,  # conservative default for un-overridden modules
+            "bits_by_role": bits_map,
+            "bit_widths_used": bit_widths_used,
             "routed_avg_bits": sum(policy.routed_bits.values()) / 3.0,
             "awq": {
                 "enabled": bool(awq_layer),
