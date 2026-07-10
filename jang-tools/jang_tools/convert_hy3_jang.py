@@ -540,6 +540,13 @@ def main(argv=None) -> None:
     out_cfg["_name_or_path"] = OUT.name
 
     mtp_preserved = policy.mtp_policy != "drop" and n_mtp > 0
+    if not mtp_preserved:
+        # The MTP tensors are not written, so the config must not advertise an
+        # MTP head — otherwise a loader that keys head construction on
+        # num_nextn_predict_layers>0 would try to build a head with no weights.
+        out_cfg["num_nextn_predict_layers"] = 0
+        if isinstance(out_cfg.get("text_config"), dict):
+            out_cfg["text_config"]["num_nextn_predict_layers"] = 0
     runtime_block = {
         "bundle_has_mtp": mtp_preserved,
         "mtp_layers": n_mtp if mtp_preserved else 0,
