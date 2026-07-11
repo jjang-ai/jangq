@@ -676,6 +676,24 @@ def main(argv=None) -> None:
     (OUT / "config.json").write_text(json.dumps(out_cfg, indent=2))
     (OUT / "jang_config.json").write_text(json.dumps(jang_cfg, indent=2))
 
+    if mtp_preserved:
+        # Measured 2026-07-10 on Hy3-JANG_2K-MTP (greedy 600-tok x3/arm):
+        # baseline 27.8 tok/s; d1 30.6 (+10%, ~full acceptance); d2 26.3
+        # (-6%, 24.5%); d3 19.1 (-31%, 1.9%). Depth 1 is the only profitable
+        # depth for the hy3 head; stamp it so the engine autodetects it
+        # without env forcing.
+        (OUT / "vmlx_mtp_tuning.json").write_text(json.dumps({
+            "native_mtp": {
+                "best_depth": 1,
+                "validated": True,
+                "measured": (
+                    "2026-07-10 Hy3-JANG_2K-MTP depth sweep: d1 +10% vs "
+                    "baseline (~full acceptance), d2 -6% (24.5%), d3 -31% "
+                    "(1.9%). Depth 1 pinned."
+                ),
+            },
+        }, indent=1))
+
     # ── sidecars ──
     for fn in ("tokenizer.json", "tokenizer_config.json", "vocab.json",
                "merges.txt", "special_tokens_map.json", "added_tokens.json",
