@@ -263,7 +263,12 @@ def _mlx_vlm_skeleton(model_path: Path):
 
     config.setdefault("text_config", config.pop("llm_config", {}))
     config.setdefault("vision_config", {})
-    config.setdefault("audio_config", {})
+    # Keep the key present for ModelConfig.from_dict, but None — a forced {}
+    # made update_module_configs resolve <Family>Config classes that do not
+    # exist (step3p7 has an audio_config ATTR but no AudioConfig class ->
+    # AttributeError on every Step-3.7 JANGTQ load, 2026-07-12). Bundles
+    # that really carry audio declare audio_config themselves.
+    config.setdefault("audio_config", None)
 
     model_config = model_class.ModelConfig.from_dict(config)
     model_config = update_module_configs(
