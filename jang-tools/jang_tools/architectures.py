@@ -250,6 +250,37 @@ SLIDING_WINDOW_CONFIGS = {
 }
 
 
+def is_verified_minicpm4_05b_config(
+    config: dict,
+    model_path: str | Path | None = None,
+) -> bool:
+    """Match only the text-only MiniCPM source covered by live validation."""
+    has_sidecar_modality = False
+    if model_path is not None:
+        root = Path(model_path)
+        has_sidecar_modality = any(
+            (root / name).exists()
+            for name in (
+                "preprocessor_config.json",
+                "video_preprocessor_config.json",
+            )
+        )
+    return (
+        config.get("architectures") == ["MiniCPMForCausalLM"]
+        and "vision_config" not in config
+        and "audio_config" not in config
+        and "video_config" not in config
+        and not has_sidecar_modality
+        and config.get("scale_emb") == 12
+        and config.get("scale_depth") == 1.4
+        and config.get("dim_model_base") == 256
+        and config.get("hidden_size") == 1024
+        and config.get("num_hidden_layers") == 24
+        and config.get("vocab_size") == 73448
+        and config.get("intermediate_size") == 4096
+    )
+
+
 def detect_architecture(model_path: str | Path) -> ArchConfig:
     """
     Detect model architecture from config.json and return quantization config.
@@ -270,6 +301,17 @@ def detect_architecture(model_path: str | Path) -> ArchConfig:
         config = json.load(f)
 
     model_type = config.get("model_type", "")
+    verified_minicpm = is_verified_minicpm4_05b_config(config, model_path)
+    if not model_type and verified_minicpm:
+        # The official MiniCPM4-0.5B source omits model_type. Keep inference
+        # converter-local and exact so direct `jang convert` gets the same
+        # handling as the vMLX metadata-overlay route.
+        model_type = "minicpm"
+    elif str(model_type).lower() == "minicpm" and not verified_minicpm:
+        raise ValueError(
+            "MiniCPM JANG conversion is limited to the validated text-only "
+            "MiniCPM4-0.5B source signature"
+        )
     architectures = config.get("architectures", [])
 
     # Detect attention type (check both top-level and text_config)

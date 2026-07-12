@@ -589,6 +589,82 @@ def _quantize_mlx_native(
     return mlx_weight, mlx_scales, mlx_biases
 
 
+def _add_missing_minicpm_lm_head_alias(
+    model_type,
+    all_tensors_info,
+    source_tensor_names,
+    tie_word_embeddings=None,
+):
+    """Expose MiniCPM's sanitizer-created output head to the allocator."""
+    aliases = {}
+    if str(model_type or "").lower() != "minicpm":
+        return aliases
+    if "lm_head.weight" in source_tensor_names:
+        return aliases
+    if tie_word_embeddings is False:
+        raise ValueError(
+            "MiniCPM source declares tie_word_embeddings=false but has no "
+            "lm_head.weight; refusing to synthesize an untied output head "
+            "from embeddings"
+        )
+
+    embedding_info = next(
+        (info for info in all_tensors_info if info[0] == "model.embed_tokens.weight"),
+        None,
+    )
+    if embedding_info is None:
+        raise ValueError(
+            "MiniCPM source has neither lm_head.weight nor "
+            "model.embed_tokens.weight; refusing to create a headless "
+            "untied artifact"
+        )
+
+    _, shape, n_blocks, source_path = embedding_info
+    all_tensors_info.append(("lm_head.weight", shape, n_blocks, source_path))
+    source_tensor_names.add("lm_head.weight")
+    aliases["lm_head.weight"] = "model.embed_tokens.weight"
+    return aliases
+
+
+def _quantized_output_tensor_name(tensor_name, model_type):
+    """Keep every MiniCPM output head at the top-level runtime key."""
+    if str(model_type or "").lower() == "minicpm" and tensor_name == "lm_head.weight":
+        return tensor_name
+    return _sanitize_output_tensor_name(tensor_name)
+
+
+def _append_alias_allocation_inputs(
+    tensor_source_aliases,
+    all_tensors_info,
+    importance_data,
+    all_importance,
+    all_tensor_names_for_alloc,
+):
+    """Add virtual tensors to the non-compact allocator's parallel arrays."""
+    for alias_name in tensor_source_aliases:
+        tensor_info = next(
+            (info for info in all_tensors_info if info[0] == alias_name),
+            None,
+        )
+        if tensor_info is None:
+            continue
+        _, _shape, n_blocks, _source_path = tensor_info
+        base_name = alias_name[:-7] if alias_name.endswith(".weight") else alias_name
+        imp = importance_data.get(f"{base_name}.importance")
+        if imp is None:
+            imp = np.ones(n_blocks, dtype=np.float32) * 0.5
+        all_importance.append(imp)
+        all_tensor_names_for_alloc.extend([alias_name] * n_blocks)
+
+
+def _normalize_minicpm_output_config(model_type, model_config):
+    """Route MiniCPM logits through the independently quantized output head."""
+    if str(model_type or "").lower() == "minicpm":
+        model_config["model_type"] = "minicpm"
+        model_config.setdefault("rope_theta", 10000.0)
+        model_config["tie_word_embeddings"] = False
+
+
 def convert_model(
     model_path: str | Path,
     output_path: str | Path,
@@ -808,7 +884,11 @@ def convert_model(
                     continue
                 if "q_norm" in tensor_name or "k_norm" in tensor_name:
                     continue
-                if "lm_head" in tensor_name and _tie_embeddings:
+                if (
+                    "lm_head" in tensor_name
+                    and _tie_embeddings
+                    and str(arch_config.model_type or "").lower() != "minicpm"
+                ):
                     continue
                 if _is_vision_tensor_name(tensor_name):
                     continue
@@ -837,6 +917,26 @@ def convert_model(
                         imp = np.ones(n_blocks, dtype=np.float32) * 0.5
                     all_importance.append(imp)
                     all_tensor_names_for_alloc.extend([tensor_name] * n_blocks)
+
+    tensor_source_aliases = _add_missing_minicpm_lm_head_alias(
+        arch_config.model_type,
+        all_tensors_info,
+        source_tensor_names,
+        tie_word_embeddings=_raw_config.get("tie_word_embeddings"),
+    )
+    if tensor_source_aliases:
+        print(
+            "  MiniCPM tied output head: materialized lm_head.weight from "
+            "model.embed_tokens.weight for independent adaptive quantization"
+        )
+        if not use_compact:
+            _append_alias_allocation_inputs(
+                tensor_source_aliases,
+                all_tensors_info,
+                importance_data,
+                all_importance,
+                all_tensor_names_for_alloc,
+            )
 
     # Run bit allocation → produces _tensor_bits dict (tensor_name → bits)
     if use_compact:
@@ -1106,6 +1206,7 @@ def convert_model(
     total_tensors = len(all_tensors_info)
     for i, (tensor_name, shape, n_blocks, sf_path) in enumerate(all_tensors_info):
         progress.tick(i, total_tensors, tensor_name)
+        source_tensor_name = tensor_source_aliases.get(tensor_name, tensor_name)
         # Skip vision conv weights — Conv3d/Conv2d needs float, not uint32.
         # These are passthrough tensors that get saved as float16.
         name_lower = tensor_name.lower()
@@ -1130,26 +1231,26 @@ def convert_model(
             if force_dtype == "fp8":
                 from .fp8 import load_fp8_tensor
                 from .calibrate import _load_bf16_tensor
-                scale_key = f"{tensor_name}_scale_inv"
+                scale_key = f"{source_tensor_name}_scale_inv"
                 try:
                     scale_inv = f.get_tensor(scale_key)
                 except Exception:
                     scale_inv = _load_bf16_from_header(str(sf_path), scale_key)
-                weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
+                weights = load_fp8_tensor(sf_path, source_tensor_name, shape, scale_inv)
             elif force_dtype == "bf16":
                 from .calibrate import _load_bf16_tensor
                 try:
-                    weights = f.get_tensor(tensor_name).astype(np.float32)
+                    weights = f.get_tensor(source_tensor_name).astype(np.float32)
                 except (TypeError, AttributeError):
-                    weights = _load_bf16_tensor(sf_path, tensor_name, shape)
+                    weights = _load_bf16_tensor(sf_path, source_tensor_name, shape)
             else:
                 # Auto-detect path (original behavior).
                 try:
-                    weights = f.get_tensor(tensor_name).astype(np.float32)
+                    weights = f.get_tensor(source_tensor_name).astype(np.float32)
                 except (TypeError, AttributeError):
                     from .fp8 import load_fp8_tensor
                     from .calibrate import _load_bf16_tensor
-                    scale_key = f"{tensor_name}_scale_inv"
+                    scale_key = f"{source_tensor_name}_scale_inv"
                     scale_inv = None
                     try:
                         scale_inv = f.get_tensor(scale_key)
@@ -1158,9 +1259,9 @@ def convert_model(
                         # read raw bytes from safetensors and convert manually
                         scale_inv = _load_bf16_from_header(str(sf_path), scale_key)
                     try:
-                        weights = load_fp8_tensor(sf_path, tensor_name, shape, scale_inv)
+                        weights = load_fp8_tensor(sf_path, source_tensor_name, shape, scale_inv)
                     except Exception:
-                        weights = _load_bf16_tensor(sf_path, tensor_name, shape)
+                        weights = _load_bf16_tensor(sf_path, source_tensor_name, shape)
 
         # AWQ scaling
         awq_scales = None
@@ -1472,7 +1573,10 @@ def convert_model(
             _metal_cache_clear_error = _e
 
         # --- Store with MLX-ready names and shapes ---
-        base_name = _sanitize_output_tensor_name(tensor_name)
+        base_name = _quantized_output_tensor_name(
+            tensor_name,
+            arch_config.model_type,
+        )
         if base_name.endswith(".weight"):
             base_name = base_name[:-7]
 
@@ -1604,7 +1708,7 @@ def convert_model(
             v2_tensors[f"{base_name}.biases"] = mlx_biases
             _record_quantized_tensor(
                 base_name,
-                tensor_name,
+                source_tensor_name,
                 bits,
                 tensor_gs,
                 mlx_weight,
@@ -1726,6 +1830,7 @@ def convert_model(
         print(f"  {_preflushed_idx} shards pre-flushed ({len(_preflushed_map)} tensors on disk)")
 
     model_config = json.loads((model_path / "config.json").read_text())
+    _normalize_minicpm_output_config(arch_config.model_type, model_config)
     # Strip source quantization_config (FP8 metadata) — leaving it causes mlx_lm
     # to misinterpret the model format. JANG uses "quantization" key instead.
     model_config.pop("quantization_config", None)

@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Any
 
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
-FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
+FAMILY_MAP: dict[
+    str,
+    tuple[str, str | None, str | None, bool, str],
+] = {
     # ZAYA / Zyphra — CCA attention + top-1 MoE. ZAYA and ZAYA1-VL are
     # reasoning-capable and use qwen3 parser metadata. think_in_template stays
     # False because default/no-thinking prompts must start generation in
@@ -39,6 +42,10 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "qwen3_5_moe_text": ("qwen3_5_moe", "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3_next":       ("qwen3_next",  "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3":            ("qwen3",       "qwen3",       "qwen",     True,  "kv"),
+    # MiniCPM 4 text models use ordinary attention KV and do not declare a
+    # native reasoning or tool-call format. Keep those capabilities disabled
+    # rather than assigning an optimistic generic parser.
+    "minicpm":          ("minicpm",      None,          None,       False, "kv"),
     # MiniMax M2.x
     "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
     "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
@@ -159,6 +166,11 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     # Substring fallback — match the longest known key contained in any candidate.
     joined = " ".join(c.lower() for c in unique)
     for key in sorted(FAMILY_MAP.keys(), key=len, reverse=True):
+        # MiniCPM-V and third-party wrappers share the ``minicpm`` substring
+        # but are not the supported MiniCPM 4 text family. Require the exact
+        # model_type/architecture match handled above.
+        if key == "minicpm":
+            continue
         if key in joined:
             return key, unique
 
@@ -230,6 +242,27 @@ def build_capabilities(
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
     modality = _resolve_modality(jang, config, model_path)
     modalities = _resolve_modalities(jang, config)
+    if family == "minicpm" and (
+        any(modalities[name] for name in ("vision", "audio", "video"))
+        or any(
+            key in config
+            for key in ("vision_config", "audio_config", "video_config")
+        )
+        or (
+            model_path is not None
+            and any(
+                (model_path / sidecar).exists()
+                for sidecar in (
+                    "preprocessor_config.json",
+                    "video_preprocessor_config.json",
+                )
+            )
+        )
+    ):
+        # Only the exact MiniCPM text family is supported. Do not let a
+        # MiniCPM-V/lookalike inherit text-runtime capability metadata merely
+        # because its wrapper exposes model_type="minicpm".
+        return None
     # supports_thinking advertises whether the model architecturally produces
     # chain-of-thought reasoning. ZAYA / ZAYA1-VL DO reason — measured live:
     # `enable_thinking=False` (default template) still produces chain-of-thought
@@ -243,7 +276,7 @@ def build_capabilities(
         "reasoning_parser": reasoning,
         "tool_parser": tool,
         "think_in_template": think_in_template,
-        "supports_tools": True,
+        "supports_tools": tool is not None,
         "supports_thinking": supports_thinking,
         "family": family,
         "modality": modality,
@@ -340,7 +373,10 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
 
     if caps["reasoning_parser"] not in valid_reasoning:
         return False, f"reasoning_parser={caps['reasoning_parser']!r} not in {sorted(valid_reasoning - {None})}"
-    if caps["tool_parser"] not in valid_tool:
+    if caps["tool_parser"] is None:
+        if caps["family"] != "minicpm":
+            return False, "tool_parser=None is only valid for family='minicpm'"
+    elif caps["tool_parser"] not in valid_tool:
         return False, f"tool_parser={caps['tool_parser']!r} not in {sorted(valid_tool)}"
     if caps["cache_type"] not in valid_cache:
         return False, f"cache_type={caps['cache_type']!r} not in {sorted(valid_cache)}"
@@ -348,6 +384,8 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
         return False, f"modality={caps['modality']!r} not in {sorted(valid_modality)}"
 
     expected = build_capabilities(jang, config, model_dir)
+    if expected is None and caps.get("family") == "minicpm":
+        return False, "unsupported multimodal MiniCPM capability stamp"
     if expected is not None and expected != caps:
         # Stamp drift: file says one family, build_capabilities computes another.
         # Most often happens when converter stamps a stale value before later

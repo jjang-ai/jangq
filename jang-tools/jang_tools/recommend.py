@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from .inspect_source import _sniff_dtype, _is_moe, _JANGTQ_V1_WHITELIST
+from .architectures import is_verified_minicpm4_05b_config
 
 
 # ─────────────────────────── Architecture classification ────────────────────
@@ -89,6 +90,7 @@ _MODEL_TYPE_TO_FAMILY_CLASS: dict[str, str] = {
     "gpt2": "dense_llm",
     "gpt_neox": "dense_llm",
     "olmo": "dense_llm",
+    "minicpm": "minicpm_text",
 
     # Standard MoE LLMs (< 512 experts)
     "qwen2_moe": "moe_standard",
@@ -183,6 +185,7 @@ def _estimate_params_billion(cfg: dict) -> float:
 # Default profile per family_class. Starting point; tuned further by signals.
 _DEFAULT_PROFILE_BY_CLASS: dict[str, str] = {
     "dense_llm": "JANG_4K",
+    "minicpm_text": "JANG_6M",
     "moe_standard": "JANG_4K",
     "moe_hybrid_ssm": "JANG_4K",
     "moe_mla": "JANG_4K",
@@ -197,6 +200,10 @@ _CLASS_PROSE: dict[str, str] = {
         "A standard dense language model. JANG compresses these to about a "
         "quarter of their FP16 size while keeping quality competitive with "
         "MLX's 4-bit quantization.",
+    "minicpm_text":
+        "MiniCPM text model whose tied output head needs independent "
+        "high-precision quantization. The validated quality floor is JANG_6M; "
+        "near-4-bit profiles are not advertised.",
     "moe_standard":
         "A mixture-of-experts model with a moderate number of experts. "
         "JANG handles MoE tensors per-expert so bits go where they matter "
@@ -284,6 +291,11 @@ def _recommend_profile(family_class: str, expert_count: int, param_b: float) -> 
     default = _DEFAULT_PROFILE_BY_CLASS.get(family_class, "JANG_4K")
     alts: list[dict] = []
 
+    if family_class == "minicpm_text":
+        # MiniCPM4-0.5B live validation supports JANG_6M. JANG_4M has a
+        # cache-independent multi-turn quality failure and immediate EOS near
+        # 32K, so lower profiles must not appear as beginner alternatives.
+        return "JANG_6M", []
     if family_class == "moe_large_expert":
         # Default JANG_2L; alts JANG_4M (more quality) and JANG_2S (tight RAM, risk)
         alts.append({"profile": "JANG_4M", "use_when": "You have enough RAM for a larger output and want higher quality."})
@@ -393,7 +405,13 @@ def detect(model_path: Path) -> dict[str, Any]:
             f"config.json at {cfg_path} has a top-level "
             f"{type(cfg).__name__}, expected a JSON object"
         )
-    model_type = cfg.get("model_type") or (cfg.get("text_config", {}) or {}).get("model_type", "unknown")
+    verified_minicpm = is_verified_minicpm4_05b_config(cfg, model_path)
+    model_type = cfg.get("model_type") or (cfg.get("text_config", {}) or {}).get("model_type")
+    if not model_type:
+        if verified_minicpm:
+            model_type = "minicpm"
+        else:
+            model_type = "unknown"
     expert_count = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
     is_vl = (model_path / "preprocessor_config.json").exists()
     is_video_vl = (model_path / "video_preprocessor_config.json").exists()
@@ -419,6 +437,7 @@ def detect(model_path: Path) -> dict[str, Any]:
         "has_reasoning_parser": has_reasoning_parser,
         "is_gated_model": is_gated,
         "name_or_path": name_or_path,
+        "verified_minicpm_profile": verified_minicpm,
     }
 
 
@@ -430,6 +449,12 @@ def recommend(model_path: Path) -> dict[str, Any]:
     expert_count = detected["expert_count"]
     param_b = detected["param_count_billions"]
     source_dtype = detected["source_dtype"]
+
+    if model_type == "minicpm" and not detected["verified_minicpm_profile"]:
+        raise ValueError(
+            "No validated JANG profile is registered for this MiniCPM variant; "
+            "the current JANG_6M recommendation is limited to MiniCPM4-0.5B"
+        )
 
     family, family_alts, family_reason = _recommend_family(model_type, source_dtype)
     profile, profile_alts = _recommend_profile(family_class, expert_count, param_b)

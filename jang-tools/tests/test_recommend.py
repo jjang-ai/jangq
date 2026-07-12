@@ -162,6 +162,97 @@ def test_recommend_llama_dense_recommends_jang_4k(tmp_path):
     assert not any(a.get("family") == "jangtq" for a in rec["recommended"]["alternatives"])
 
 
+def test_recommend_exact_minicpm_text_signature_uses_proven_jang6_only(tmp_path):
+    d = _make_model_dir(
+        tmp_path,
+        {
+            "architectures": ["MiniCPMForCausalLM"],
+            "hidden_size": 1024,
+            "num_hidden_layers": 24,
+            "vocab_size": 73448,
+            "intermediate_size": 4096,
+            "scale_emb": 12,
+            "scale_depth": 1.4,
+            "dim_model_base": 256,
+        },
+    )
+
+    rec = recommend(d)
+
+    assert rec["detected"]["model_type"] == "minicpm"
+    assert rec["detected"]["family_class"] == "minicpm_text"
+    assert rec["recommended"]["profile"] == "JANG_6M"
+    assert rec["recommended"]["alternatives"] == []
+    assert not any("Unknown model_type" in warning for warning in rec["warnings"])
+
+
+def test_recommend_does_not_treat_minicpm_v_as_text_family(tmp_path):
+    d = _make_model_dir(
+        tmp_path,
+        {
+            "architectures": ["MiniCPMVForCausalLM"],
+            "vision_config": {"hidden_size": 1024},
+            "hidden_size": 1024,
+            "num_hidden_layers": 24,
+            "vocab_size": 73448,
+        },
+    )
+
+    rec = recommend(d)
+
+    assert rec["detected"]["model_type"] == "unknown"
+    assert rec["recommended"]["profile"] == "JANG_4K"
+    assert any("Unknown model_type" in warning for warning in rec["warnings"])
+
+
+@pytest.mark.parametrize(
+    "config_extra,extra_files",
+    [
+        ({"vision_config": {"hidden_size": 1024}}, []),
+        ({}, ["preprocessor_config.json"]),
+        ({}, ["video_preprocessor_config.json"]),
+    ],
+)
+def test_recommend_rejects_exact_minicpm_signature_with_modality_signals(
+    tmp_path, config_extra, extra_files
+):
+    d = _make_model_dir(
+        tmp_path,
+        {
+            "model_type": "minicpm",
+            "architectures": ["MiniCPMForCausalLM"],
+            "hidden_size": 1024,
+            "num_hidden_layers": 24,
+            "vocab_size": 73448,
+            "intermediate_size": 4096,
+            "scale_emb": 12,
+            "scale_depth": 1.4,
+            "dim_model_base": 256,
+            **config_extra,
+        },
+        extra_files=extra_files,
+    )
+
+    with pytest.raises(ValueError, match="limited to MiniCPM4-0.5B"):
+        recommend(d)
+
+
+def test_recommend_rejects_unverified_explicit_minicpm_variant(tmp_path):
+    d = _make_model_dir(
+        tmp_path,
+        {
+            "model_type": "minicpm",
+            "architectures": ["MiniCPMForCausalLM"],
+            "hidden_size": 2048,
+            "num_hidden_layers": 40,
+            "vocab_size": 73448,
+        },
+    )
+
+    with pytest.raises(ValueError, match="limited to MiniCPM4-0.5B"):
+        recommend(d)
+
+
 def test_recommend_vl_model_flags_vl_class(tmp_path):
     d = _make_model_dir(tmp_path, {"model_type": "qwen2_vl", "hidden_size": 1536,
                                     "num_hidden_layers": 28, "vocab_size": 151936},
