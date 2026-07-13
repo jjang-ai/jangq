@@ -82,12 +82,29 @@ public struct JANGTQRoPEKernel {
     }
 
     /// Apply RoPE in place to `qk` of shape `(nHeads, headDim)` half.
-    public func run(qk: MTLBuffer, nHeads: Int, headDim: Int, position: Int, base: Float) throws {
+    /// `rotaryDim` is the number of dimensions rotated within each head; it
+    /// defaults to the full head width for models without partial RoPE.
+    public func run(
+        qk: MTLBuffer,
+        nHeads: Int,
+        headDim: Int,
+        rotaryDim: Int? = nil,
+        position: Int,
+        base: Float
+    ) throws {
         guard let cb = context.queue.makeCommandBuffer(),
               let enc = cb.makeComputeCommandEncoder() else {
             throw JANGCoreMetalError.libraryLoadFailed("rope encoder alloc failed")
         }
-        encode(into: enc, qk: qk, nHeads: nHeads, headDim: headDim, position: position, base: base)
+        encode(
+            into: enc,
+            qk: qk,
+            nHeads: nHeads,
+            headDim: headDim,
+            rotaryDim: rotaryDim,
+            position: position,
+            base: base
+        )
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -95,15 +112,30 @@ public struct JANGTQRoPEKernel {
 
     public func encode(
         into enc: MTLComputeCommandEncoder,
-        qk: MTLBuffer, nHeads: Int, headDim: Int, position: Int, base: Float
+        qk: MTLBuffer,
+        nHeads: Int,
+        headDim: Int,
+        rotaryDim: Int? = nil,
+        position: Int,
+        base: Float
     ) {
-        var params = (UInt32(nHeads), UInt32(headDim), UInt32(position), base)
+        let effectiveRotaryDim = rotaryDim ?? headDim
+        precondition(effectiveRotaryDim > 0)
+        precondition(effectiveRotaryDim <= headDim)
+        precondition(effectiveRotaryDim % 2 == 0)
+        var params = (
+            UInt32(nHeads),
+            UInt32(headDim),
+            UInt32(effectiveRotaryDim),
+            UInt32(position),
+            base
+        )
         enc.setComputePipelineState(pipeline)
         enc.setBuffer(qk, offset: 0, index: 0)
         withUnsafeBytes(of: &params) { raw in
             enc.setBytes(raw.baseAddress!, length: raw.count, index: 1)
         }
-        let totalPairs = nHeads * (headDim / 2)
+        let totalPairs = nHeads * (effectiveRotaryDim / 2)
         let tgWidth = min(256, totalPairs)
         enc.dispatchThreads(MTLSizeMake(totalPairs, 1, 1),
                             threadsPerThreadgroup: MTLSizeMake(max(1, tgWidth), 1, 1))
@@ -258,6 +290,96 @@ public struct JANGTQF32toF16Kernel {
     }
 }
 
+// MARK: - Qwen gated-attention helpers
+
+public struct JANGTQGatedQSplitKernel {
+    public let context: MetalContext
+    public let pipeline: MTLComputePipelineState
+
+    public init(context: MetalContext) throws {
+        self.context = context
+        self.pipeline = try context.pipeline(functionNamed: "jangtq_qwen_gated_q_split")
+    }
+
+    public func runInto(
+        qFull: MTLBuffer,
+        q: MTLBuffer,
+        gate: MTLBuffer,
+        nHeads: Int,
+        headDim: Int
+    ) throws {
+        guard let cb = context.queue.makeCommandBuffer(),
+              let enc = cb.makeComputeCommandEncoder() else {
+            throw JANGCoreMetalError.libraryLoadFailed("gated q split encoder alloc failed")
+        }
+        encode(into: enc, qFull: qFull, q: q, gate: gate, nHeads: nHeads, headDim: headDim)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+    }
+
+    public func encode(
+        into enc: MTLComputeCommandEncoder,
+        qFull: MTLBuffer,
+        q: MTLBuffer,
+        gate: MTLBuffer,
+        nHeads: Int,
+        headDim: Int
+    ) {
+        var params = (UInt32(nHeads), UInt32(headDim))
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(qFull, offset: 0, index: 0)
+        enc.setBuffer(q,     offset: 0, index: 1)
+        enc.setBuffer(gate,  offset: 0, index: 2)
+        withUnsafeBytes(of: &params) { raw in
+            enc.setBytes(raw.baseAddress!, length: raw.count, index: 3)
+        }
+        let total = nHeads * headDim
+        let tgWidth = min(256, total)
+        enc.dispatchThreads(MTLSizeMake(total, 1, 1),
+                            threadsPerThreadgroup: MTLSizeMake(max(1, tgWidth), 1, 1))
+    }
+}
+
+public struct JANGTQAttentionGateKernel {
+    public let context: MetalContext
+    public let pipeline: MTLComputePipelineState
+
+    public init(context: MetalContext) throws {
+        self.context = context
+        self.pipeline = try context.pipeline(functionNamed: "jangtq_apply_attention_gate")
+    }
+
+    public func runInto(attnOut: MTLBuffer, gate: MTLBuffer, count: Int) throws {
+        guard let cb = context.queue.makeCommandBuffer(),
+              let enc = cb.makeComputeCommandEncoder() else {
+            throw JANGCoreMetalError.libraryLoadFailed("attention gate encoder alloc failed")
+        }
+        encode(into: enc, attnOut: attnOut, gate: gate, count: count)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+    }
+
+    public func encode(
+        into enc: MTLComputeCommandEncoder,
+        attnOut: MTLBuffer,
+        gate: MTLBuffer,
+        count: Int
+    ) {
+        var params = UInt32(count)
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(attnOut, offset: 0, index: 0)
+        enc.setBuffer(gate,    offset: 0, index: 1)
+        withUnsafeBytes(of: &params) { raw in
+            enc.setBytes(raw.baseAddress!, length: raw.count, index: 2)
+        }
+        let tgWidth = min(256, count)
+        enc.dispatchThreads(MTLSizeMake(count, 1, 1),
+                            threadsPerThreadgroup: MTLSizeMake(max(1, tgWidth), 1, 1))
+    }
+}
+
 // MARK: - Per-head RMSNorm (q_norm / k_norm)
 
 public struct JANGTQHeadRMSNormKernel {
@@ -298,6 +420,8 @@ public struct JANGTQDecodeOps {
     public let sdpa: JANGTQSDPAKernel
     public let residual: JANGTQResidualKernel
     public let castF32ToF16: JANGTQF32toF16Kernel
+    public let gatedQSplit: JANGTQGatedQSplitKernel
+    public let attentionGate: JANGTQAttentionGateKernel
 
     public init(context: MetalContext) throws {
         self.context = context
@@ -307,5 +431,7 @@ public struct JANGTQDecodeOps {
         self.sdpa = try JANGTQSDPAKernel(context: context)
         self.residual = try JANGTQResidualKernel(context: context)
         self.castF32ToF16 = try JANGTQF32toF16Kernel(context: context)
+        self.gatedQSplit = try JANGTQGatedQSplitKernel(context: context)
+        self.attentionGate = try JANGTQAttentionGateKernel(context: context)
     }
 }

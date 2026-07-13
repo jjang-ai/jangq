@@ -324,6 +324,11 @@ struct JangTQ: ParsableCommand {
             print(result.text)
         }
 
+        if verbose, result.text.isEmpty {
+            print("  Raw decode: \(String(reflecting: result.rawText))")
+            print("  Token IDs: \(result.tokenIds)")
+        }
+
         print()
         print(String(format: "  %d prompt + %d output tokens in %.2fs (%.1f tok/s, stop: %@)",
                      result.promptTokens, result.outputTokens,

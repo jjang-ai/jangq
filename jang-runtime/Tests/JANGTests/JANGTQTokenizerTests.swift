@@ -61,6 +61,19 @@ final class JANGTQTokenizerTests: XCTestCase {
         return dir
     }
 
+    private func buildRoleNewlineTokenizerDir() throws -> URL {
+        let dir = try buildTinyTokenizerDir()
+        let tokConfig: [String: Any] = [
+            "tokenizer_class": "Qwen2Tokenizer",
+            "eos_token": "[e~[",
+            "pad_token": "[e~[",
+            "chat_template": "{% for message in messages %}{{ message['role'] }}\n{{ message['content'] }}[e~[\n{% endfor %}assistant\n",
+        ]
+        try JSONSerialization.data(withJSONObject: tokConfig)
+            .write(to: dir.appendingPathComponent("tokenizer_config.json"))
+        return dir
+    }
+
     func testWrapperFindsMiniMaxSpecialTokens() throws {
         let dir = try buildTinyTokenizerDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -94,6 +107,45 @@ final class JANGTQTokenizerTests: XCTestCase {
         // Must END with <think> + newline (start of thinking mode)
         XCTAssertTrue(ids.contains(tok.thinkStart!),
             "chat template should end with <think>")
+    }
+
+    func testRoleNewlineTemplateDoesNotInjectMiniMaxControlTokens() throws {
+        let dir = try buildRoleNewlineTokenizerDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tok = try JANGTQTokenizer(modelDir: dir)
+        let ids = tok.applyChatTemplate(
+            messages: [JANGTQChatMessage(role: "user", content: "hi")],
+            system: nil
+        )
+
+        XCTAssertEqual(tok.chatTemplateStyle, .roleNewline)
+        XCTAssertFalse(ids.contains(tok.bosBegin!))
+        XCTAssertFalse(ids.contains(tok.turnMarker!))
+        XCTAssertFalse(ids.contains(tok.thinkStart!))
+        XCTAssertTrue(ids.contains(tok.endOfTurn!))
+    }
+
+    func testDecodePreservingSpecialTokensKeepsThinkMarkers() throws {
+        let dir = try buildTinyTokenizerDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tok = try JANGTQTokenizer(modelDir: dir)
+        let raw = tok.decodePreservingSpecialTokens([tok.thinkStart!, 1, 2, tok.thinkEnd!])
+
+        XCTAssertEqual(raw, "<think>hi</think>")
+        XCTAssertEqual(tok.decode([tok.thinkStart!, 1, 2, tok.thinkEnd!]), "hi")
+    }
+
+    func testLeadingInvisibleTokensSkipWhitespaceButAllowStop() throws {
+        let dir = try buildTinyTokenizerDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tok = try JANGTQTokenizer(modelDir: dir)
+
+        XCTAssertTrue(tok.leadingInvisibleGenerationTokenIds.contains(7), "newline should be skipped before visible output")
+        XCTAssertFalse(tok.leadingInvisibleGenerationTokenIds.contains(1), "visible text tokens should remain available")
+        XCTAssertFalse(tok.leadingInvisibleGenerationTokenIds.contains(tok.endOfTurn!), "EOS must remain available to stop cleanly")
     }
 
     func testStripThinkingRemovesThinkBlocks() throws {

@@ -6,7 +6,36 @@ import sys
 from pathlib import Path
 
 # v1 JANGTQ whitelist — synced with JANG Studio spec §2.5
-_JANGTQ_V1_WHITELIST = {"qwen3_5_moe", "minimax_m2"}
+_JANGTQ_V1_WHITELIST = {"qwen3_5_moe", "qwen3_5_moe_text", "minimax_m2"}
+
+
+def _text_config(cfg: dict) -> dict:
+    text_cfg = cfg.get("text_config")
+    return text_cfg if isinstance(text_cfg, dict) else {}
+
+
+def _cfg_int(cfg: dict, *keys: str) -> int:
+    text_cfg = _text_config(cfg)
+    for key in keys:
+        value = cfg.get(key)
+        if value is None:
+            value = text_cfg.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _expert_count(cfg: dict) -> int:
+    return _cfg_int(
+        cfg,
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    )
 
 
 def _sniff_dtype(model_path: Path) -> str:
@@ -32,10 +61,7 @@ def _sniff_dtype(model_path: Path) -> str:
 
 
 def _is_moe(cfg: dict) -> bool:
-    for key in ("num_experts", "n_routed_experts", "num_local_experts"):
-        if cfg.get(key, 0) and int(cfg[key]) > 1:
-            return True
-    return False
+    return _expert_count(cfg) > 1
 
 
 def _total_bytes(model_path: Path) -> int:
@@ -103,17 +129,29 @@ def cmd_inspect_source(args) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    model_type = cfg.get("model_type") or cfg.get("text_config", {}).get("model_type", "unknown")
+    text_cfg = _text_config(cfg)
+    model_type = cfg.get("model_type") or text_cfg.get("model_type", "unknown")
+    text_model_type = text_cfg.get("model_type")
     summary = {
         "model_type": model_type,
+        "text_model_type": text_model_type,
         "is_moe": _is_moe(cfg),
-        "num_experts": int(cfg.get("num_experts") or cfg.get("n_routed_experts") or 0),
-        "num_hidden_layers": int(cfg.get("num_hidden_layers", 0)),
-        "hidden_size": int(cfg.get("hidden_size", 0)),
+        "num_experts": _expert_count(cfg),
+        "num_hidden_layers": _cfg_int(cfg, "num_hidden_layers"),
+        "num_experts_per_tok": _cfg_int(
+            cfg,
+            "num_experts_per_tok",
+            "top_k_experts",
+            "moe_router_topk",
+        ),
+        "hidden_size": _cfg_int(cfg, "hidden_size"),
         "dtype": _sniff_dtype(src),
         "total_bytes": _total_bytes(src),
         "shard_count": len(list(src.glob("*.safetensors"))),
-        "jangtq_compatible": model_type in _JANGTQ_V1_WHITELIST,
+        "jangtq_compatible": (
+            model_type in _JANGTQ_V1_WHITELIST
+            or text_model_type in _JANGTQ_V1_WHITELIST
+        ),
         "is_vl": bool((src / "preprocessor_config.json").exists()),
         "is_video_vl": bool((src / "video_preprocessor_config.json").exists()),
         "has_generation_config": bool((src / "generation_config.json").exists()),

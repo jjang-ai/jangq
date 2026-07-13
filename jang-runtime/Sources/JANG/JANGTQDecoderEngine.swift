@@ -233,9 +233,25 @@ public func jangtqRouterCPU(
     eScoreBias: [Float]?,
     k: Int,
     variant: JANGTQRouterVariant,
-    device: MTLDevice
+    device: MTLDevice,
+    disabledExperts: Set<Int> = []
 ) throws -> (indicesBuf: MTLBuffer, scoresBuf: MTLBuffer, indices: [Int], scores: [Float]) {
     let n = gates.count
+    guard k > 0 else {
+        throw JANGError.invalidFormat("router top-k must be positive, got \(k)")
+    }
+    let invalidDisabled = disabledExperts.filter { $0 < 0 || $0 >= n }
+    guard invalidDisabled.isEmpty else {
+        throw JANGError.invalidFormat(
+            "expert mask contains ids outside 0..<\(n): \(invalidDisabled.sorted())"
+        )
+    }
+    let eligible = (0..<n).filter { !disabledExperts.contains($0) }
+    guard eligible.count >= k else {
+        throw JANGError.invalidFormat(
+            "expert mask leaves \(eligible.count) active experts, fewer than top-k \(k)"
+        )
+    }
 
     let topIdx: [Int]
     var sel: [Float]
@@ -251,7 +267,7 @@ public func jangtqRouterCPU(
         for i in 0..<n { sigmoid[i] = 1.0 / (1.0 + Foundation.exp(-gates[i])) }
         var biased = [Float](repeating: 0, count: n)
         for i in 0..<n { biased[i] = sigmoid[i] + bias[i] }
-        let sortedIdx = biased.indices.sorted(by: { biased[$0] > biased[$1] })
+        let sortedIdx = eligible.sorted(by: { biased[$0] > biased[$1] })
         topIdx = Array(sortedIdx.prefix(k))
         sel = [Float](repeating: 0, count: k)
         for i in 0..<k { sel[i] = sigmoid[topIdx[i]] }
@@ -274,11 +290,11 @@ public func jangtqRouterCPU(
         let invSum = 1.0 / (sumExp + 1e-20)
         var scores = [Float](repeating: 0, count: n)
         for i in 0..<n { scores[i] = exps[i] * invSum }
-        let sortedIdx = scores.indices.sorted(by: { scores[$0] > scores[$1] })
+        let sortedIdx = eligible.sorted(by: { scores[$0] > scores[$1] })
         topIdx = Array(sortedIdx.prefix(k))
         sel = [Float](repeating: 0, count: k)
         for i in 0..<k { sel[i] = scores[topIdx[i]] }
-        if renormalize {
+        if renormalize || !disabledExperts.isEmpty {
             var s: Float = 0
             for v in sel { s += v }
             let denom = s + 1e-20
@@ -355,15 +371,30 @@ public final class JANGTQDecoderEngine {
     }
 
     /// Lazily build the MoE block for a given layer.
-    private func moeBlock(for layer: Int) throws -> JANGTQMoEBlock {
+    private func moeBlock(for layer: Int, topK: Int) throws -> JANGTQMoEBlock {
         if let b = moeBlocks[layer] { return b }
         let b = try JANGTQMoEBlock(
-            layerIndex: layer, moePrefix: moePrefix,
+            layerIndex: layer,
+            layerPrefix: resolvedMoEPrefix(for: layer),
             bundle: bundle, kernels: kernels,
+            topK: topK,
             swigluLimit: swigluLimit
         )
         moeBlocks[layer] = b
         return b
+    }
+
+    private func resolvedMoEPrefix(for layer: Int) -> String {
+        let candidates = [
+            "language_model.model.layers.\(layer).mlp",
+            "model.layers.\(layer).mlp",
+            "language_model.layers.\(layer).mlp",
+            "model.layers.\(layer).\(moePrefix)",
+        ]
+        return candidates.first { prefix in
+            bundle.halfTensors["\(prefix).gate.weight"] != nil
+                || bundle.weights["\(prefix).switch_mlp.gate_proj"] != nil
+        } ?? candidates.last!
     }
 
     /// CPU helper to convert an fp32 MTLBuffer to half MTLBuffer.
@@ -388,13 +419,33 @@ public final class JANGTQDecoderEngine {
     ///
     /// When the MoE block has a `shared_expert`, its output is added on top of
     /// the routed combine BEFORE the final return (gated by sigmoid(shared_expert_gate(x))).
-    public func runMoE(layer: Int, normedX: MTLBuffer, hidden: Int, k: Int) throws -> MTLBuffer {
-        // Layer prefix: fall back to the "model.layers.L.<moePrefix>" layout
-        // (MiniMax/GLM) if the Qwen-style path isn't present in the bundle.
-        let qwenPrefix = "language_model.model.layers.\(layer).mlp"
-        let legacyPrefix = "model.layers.\(layer).\(moePrefix)"
-        let prefix: String = bundle.halfTensors["\(qwenPrefix).gate.weight"] != nil
-            ? qwenPrefix : legacyPrefix
+    public func runMoE(
+        layer: Int,
+        normedX: MTLBuffer,
+        hidden: Int,
+        k: Int,
+        traceConfig: JANGExpertTraceConfig? = nil,
+        traceCollector: JANGExpertTraceCollector? = nil,
+        tokenIndex: Int? = nil
+    ) throws -> MTLBuffer {
+        let topKOverride = traceConfig?.mask?.topKOverride
+        if let topKOverride {
+            guard topKOverride > 0 else {
+                throw JANGError.invalidFormat("topKOverride must be positive, got \(topKOverride)")
+            }
+            guard topKOverride <= k else {
+                throw JANGError.invalidFormat(
+                    "topKOverride \(topKOverride) cannot exceed trained top-k \(k)"
+                )
+            }
+        }
+        let effectiveK = topKOverride ?? k
+        let disabledExperts = traceConfig?.mask?.disabledExperts(for: layer) ?? []
+
+        // Layer prefix: support VLM Qwen (`language_model.model.layers`),
+        // text-only Qwen (`model.layers`), rare `language_model.layers`, and
+        // the older MiniMax/GLM `block_sparse_moe` layout.
+        let prefix = resolvedMoEPrefix(for: layer)
 
         // Router gate weight (half, shape [n_experts, hidden])
         guard let gateWBuf = bundle.halfTensors["\(prefix).gate.weight"] else {
@@ -417,20 +468,39 @@ public final class JANGTQDecoderEngine {
             biasArr = ba
             variant = .sigmoidBias
         } else {
-            let renorm = bundle.config.model.normTopkProb ?? true
+            // Match mlx-lm/vMLX ModelArgs: missing norm_topk_prob defaults to false.
+            // Some Qwen checkpoints omit the key; renormalizing those top-k scores
+            // changes every MoE residual scale and breaks parity.
+            let renorm = bundle.config.model.normTopkProb ?? false
             variant = .softmaxTopK(renormalize: renorm)
         }
 
         let routed = try jangtqRouterCPU(
-            gates: gates, eScoreBias: biasArr, k: k,
-            variant: variant, device: context.device
+            gates: gates, eScoreBias: biasArr, k: effectiveK,
+            variant: variant, device: context.device,
+            disabledExperts: disabledExperts
         )
 
+        if let traceCollector, let tokenIndex {
+            traceCollector.record(
+                JANGExpertRouteRecord(
+                    tokenIndex: tokenIndex,
+                    layer: layer,
+                    selectedExperts: routed.indices,
+                    scores: routed.scores,
+                    disabledExperts: disabledExperts.sorted(),
+                    effectiveTopK: effectiveK,
+                    entropy: Self.routerEntropy(routed.scores)
+                ),
+                config: traceConfig
+            )
+        }
+
         // Run the MoE block via single-cb encode path.
-        let block = try moeBlock(for: layer)
+        let block = try moeBlock(for: layer, topK: k)
 
         // Get or create per-layer staging buffer (K * out_features * sizeof(half))
-        let stagingBytes = k * block.outFeatures * MemoryLayout<Float16>.stride
+        let stagingBytes = effectiveK * block.outFeatures * MemoryLayout<Float16>.stride
         let staging: MTLBuffer
         if let cached = stagingBuffers[layer], cached.length >= stagingBytes {
             staging = cached
@@ -452,7 +522,7 @@ public final class JANGTQDecoderEngine {
             into: enc,
             xHalfBuf: normedX,
             selectedExpertsBuf: routed.indicesBuf,
-            K: k,
+            K: effectiveK,
             ops: ops,
             xActHalfStaging: staging
         )
@@ -461,14 +531,14 @@ public final class JANGTQDecoderEngine {
         cb.waitUntilCompleted()
 
         // Combine routed experts: out[h] = sum_k scores[k] * y[k, h]   (CPU — small)
-        let yPtr = block.yOut.contents().bindMemory(to: Float.self, capacity: k * hidden)
+        let yPtr = block.yOut.contents().bindMemory(to: Float.self, capacity: effectiveK * hidden)
         let combined = context.device.makeBuffer(
             length: hidden * MemoryLayout<Float16>.stride, options: .storageModeShared
         )!
         let outPtr = combined.contents().bindMemory(to: Float16.self, capacity: hidden)
         for h in 0..<hidden {
             var acc: Float = 0
-            for ki in 0..<k {
+            for ki in 0..<effectiveK {
                 acc += routed.scores[ki] * yPtr[ki * hidden + h]
             }
             outPtr[h] = Float16(acc)
@@ -485,6 +555,7 @@ public final class JANGTQDecoderEngine {
                 xHalfBuf: normedX,
                 gate: shG, up: shU, down: shD,
                 gateScalar: block.sharedGateScalar,
+                gateScalarHalf: block.sharedGateScalarHalf,
                 hidden: hidden,
                 swigluLimit: block.swigluLimit
             )
@@ -495,6 +566,14 @@ public final class JANGTQDecoderEngine {
         }
 
         return combined
+    }
+
+    private static func routerEntropy(_ scores: [Float]) -> Float {
+        var entropy: Float = 0
+        for score in scores where score > 0 {
+            entropy -= score * Foundation.log(score)
+        }
+        return entropy
     }
 
     /// Run the dense shared-expert MLP: `sigmoid(gate_scalar(x)) * down(SiLU(gate(x)) * up(x))`.
@@ -509,6 +588,7 @@ public final class JANGTQDecoderEngine {
         up: JANGTQAffineWeight,
         down: JANGTQAffineWeight,
         gateScalar: JANGTQAffineWeight?,
+        gateScalarHalf: MTLBuffer?,
         hidden: Int,
         swigluLimit: Float = 0
     ) throws -> MTLBuffer {
@@ -558,6 +638,14 @@ public final class JANGTQDecoderEngine {
             let gateOutF32 = try affineRun(gs, xHalfBuf)   // (1,) fp32
             let gp = gateOutF32.contents().bindMemory(to: Float.self, capacity: 1)
             gateVal = 1.0 / (1.0 + Foundation.exp(-gp[0]))
+        } else if let gs = gateScalarHalf {
+            let gateOut = jangtqHalfMatmul(
+                x: xHalfBuf,
+                weight: gs,
+                inFeatures: hidden,
+                outFeatures: 1
+            )
+            gateVal = 1.0 / (1.0 + Foundation.exp(-gateOut[0]))
         }
 
         // 5. Write final half buffer, applying scalar gate.

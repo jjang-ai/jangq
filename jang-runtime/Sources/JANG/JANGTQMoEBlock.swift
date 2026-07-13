@@ -66,6 +66,7 @@ public final class JANGTQMoEBlock {
     public let sharedUpProj:   JANGTQAffineWeight?
     public let sharedDownProj: JANGTQAffineWeight?
     public let sharedGateScalar: JANGTQAffineWeight?  // shared_expert_gate, shape (1, hidden)
+    public let sharedGateScalarHalf: MTLBuffer?       // shared_expert_gate.weight, shape (1, hidden)
 
     public var hasSharedExpert: Bool { sharedGateProj != nil }
 
@@ -176,6 +177,7 @@ public final class JANGTQMoEBlock {
         self.sharedUpProj     = bundle.affineWeights[shUpPath]
         self.sharedDownProj   = bundle.affineWeights[shDownPath]
         self.sharedGateScalar = bundle.affineWeights[shGateScalarPath]
+        self.sharedGateScalarHalf = bundle.halfTensors["\(shGateScalarPath).weight"]
 
         // Pre-allocate scratch buffers
         let dev = kernels.context.device

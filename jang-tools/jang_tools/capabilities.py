@@ -25,13 +25,12 @@ from pathlib import Path
 from typing import Any
 
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
-FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
-    # ZAYA / Zyphra — CCA attention + top-1 MoE. ZAYA and ZAYA1-VL are
-    # reasoning-capable and use qwen3 parser metadata. think_in_template stays
-    # False because default/no-thinking prompts must start generation in
-    # visible content, not in an auto-opened reasoning prefix.
+FAMILY_MAP: dict[str, tuple[str, str | None, str | None, bool, str]] = {
+    # ZAYA / Zyphra — CCA attention + top-1 MoE. ZAYA text exposes qwen3
+    # reasoning metadata; current vMLX keeps ZAYA1-VL reasoning disabled until
+    # its VLM thinking contract is proven.
     "zaya":              ("zaya",        "qwen3",       "zaya_xml", False, "hybrid"),
-    "zaya1_vl":          ("zaya1_vl",    "qwen3",       "zaya_xml", False, "hybrid"),
+    "zaya1_vl":          ("zaya1_vl",    None,          "zaya_xml", False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
     "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3_5_text":     ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
@@ -39,28 +38,50 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "qwen3_5_moe_text": ("qwen3_5_moe", "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3_next":       ("qwen3_next",  "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3":            ("qwen3",       "qwen3",       "qwen",     True,  "kv"),
+    "qwen3_moe":        ("qwen3_moe",   "qwen3",       "qwen",     True,  "kv"),
+    "qwen3_vl":         ("qwen3_vl",    "qwen3",       "qwen",     True,  "kv"),
+    "qwen3_vl_moe":     ("qwen3_vl",    "qwen3",       "qwen",     True,  "kv"),
+    "qwen2":            ("qwen2",       None,          "qwen",     False, "kv"),
+    "qwen2_moe":        ("qwen2",       None,          "qwen",     False, "kv"),
+    "qwen":             ("qwen2",       None,          "qwen",     False, "kv"),
+    "qwen2_vl":         ("qwen2_vl",    None,          "qwen",     False, "kv"),
+    "qwen2_5_vl":       ("qwen2_vl",    None,          "qwen",     False, "kv"),
+    "qwen_mamba":       ("qwen_mamba",  None,          "qwen",     False, "mamba"),
+    "laguna":           ("laguna",      "qwen3",       "qwen",     True,  "kv"),
+    "mimo_v2":          ("mimo_v2",     "think_xml",   "xml_function", False, "kv"),
+    "mimo_v2_flash":    ("mimo_v2",     "think_xml",   "xml_function", False, "kv"),
     # MiniMax M2.x
-    "minimax_m2":       ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
-    "minimax_m2_5":     ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
-    "minimax":          ("minimax_m2",  "qwen3",       "minimax",  True,  "kv"),
+    "minimax_m2":       ("minimax_m2",  "minimax_m2",  "minimax",  True,  "kv"),
+    "minimax_m2_5":     ("minimax_m2",  "minimax_m2",  "minimax",  True,  "kv"),
+    "minimax":          ("minimax_m2",  "minimax_m2",  "minimax",  True,  "kv"),
+    "minimax_m3":       ("minimax_m3",  None,          "minimax_m3", False, "kv"),
+    "minimax_m3_vl":    ("minimax_m3",  None,          "minimax_m3", False, "kv"),
+    # Kimi
+    "kimi_k2":          ("kimi",        "deepseek_r1", "kimi",     True,  "kv"),
+    "kimi_k25":         ("kimi_k25",    "deepseek_r1", "kimi",     True,  "kv"),
     # GLM 5.x (MLA + DSA)
-    "glm_moe_dsa":      ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
-    "glm5":             ("glm5",        "deepseek_r1", "deepseek", True,  "mla"),
+    "glm_moe_dsa":      ("glm5",        "deepseek_r1", "deepseek", True,  "kv"),
+    "glm5":             ("glm5",        "deepseek_r1", "deepseek", True,  "kv"),
     # DeepSeek V4 (MLA + CSA/HCA + mHC + hash routing).
     # DSV4 emits its own DSML tool-call format (`<｜DSML｜invoke ...`),
     # NOT the plain DeepSeek-R1 format. The dsml_tool_parser registers
     # both "dsml" and "deepseek_v4" as aliases. Stamping "deepseek" here
     # routed freshly-converted DSV4 bundles through the wrong parser.
-    "deepseek_v4":      ("deepseek_v4", "deepseek_r1", "dsml",     True,  "mla"),
+    "deepseek_v4":      ("deepseek_v4", "deepseek_r1", "dsml",     True,  "kv"),
     # GLM 4 (dense + MoE, no MLA)
-    "glm4":             ("glm4",        "deepseek_r1", "glm47",    False, "kv"),
-    "glm4_moe":         ("glm4_moe",    "deepseek_r1", "glm47",    False, "kv"),
+    "glm4":             ("chatglm",     None,          "glm47",    False, "kv"),
+    "glm":              ("chatglm",     None,          "glm47",    False, "kv"),
+    "chatglm":          ("chatglm",     None,          "glm47",    False, "kv"),
+    "glm4_moe":         ("glm4_moe",    "openai_gptoss", "glm47",  False, "kv"),
+    "glm4_moe_lite":    ("glm4_moe",    "openai_gptoss", "glm47",  False, "kv"),
+    "gpt_oss":          ("gpt_oss",     "openai_gptoss", "glm47",  False, "kv"),
     # Nemotron (hybrid SSM)
     "nemotron_h":       ("nemotron_h",  "deepseek_r1", "nemotron", True,  "hybrid"),
     "nemotron_h_v2":    ("nemotron_h",  "deepseek_r1", "nemotron", True,  "hybrid"),
     # Mistral 4 (MLA)
-    "mistral3":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
-    "mistral4":         ("mistral4",    "mistral",     "mistral",  False, "mla"),
+    "mistral3":         ("mistral3",    None,          "mistral",  False, "kv"),
+    "ministral3":       ("ministral3",  None,          "mistral",  False, "kv"),
+    "mistral4":         ("mistral4",    "mistral",     "mistral",  False, "kv"),
     # Gemma 4 / 3
     # gemma4_unified* is the official 2026-06 release naming for the
     # omni-modal (text+image+audio+video) line; the preview shipped as
@@ -70,9 +91,10 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "gemma4_text":      ("gemma4",      "gemma4",      "gemma4",   False, "kv"),
     "gemma4_unified":      ("gemma4",   "gemma4",      "gemma4",   False, "kv"),
     "gemma4_unified_text": ("gemma4",   "gemma4",      "gemma4",   False, "kv"),
-    "gemma3":           ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
-    "gemma3_text":      ("gemma4",      "deepseek_r1", "gemma4",   False, "kv"),
-    "gemma3n":          ("gemma4",      "gemma4",      "gemma4",   False, "hybrid"),
+    "gemma3":           ("gemma3",      None,          "gemma3",   False, "kv"),
+    "gemma3_text":      ("gemma3_text", None,          "gemma3",   False, "kv"),
+    "gemma3n":          ("gemma3n",     None,          "gemma3",   False, "kv"),
+    "gemma3n_text":     ("gemma3n_text", None,         "gemma3",   False, "kv"),
     # Bailing v2.5 (Ling) — hybrid MLA + Lightning Linear Attention + MoE + MTP.
     # think_in_template=False because Ling's chat template defaults to
     # `detailed thinking off` and only opens `<think>` when the user supplies
@@ -80,8 +102,8 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # the deepseek_r1 reasoning parser assumes the assistant turn opens INSIDE
     # a think block and routes ALL output to `reasoning_content`, leaving
     # `content` null — visible as empty UI bubbles on thinking-off prompts.
-    "bailing_hybrid":   ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
-    "bailing_moe_v2_5": ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
+    "bailing_hybrid":   ("bailing_hybrid", None,       "deepseek", False, "hybrid"),
+    "bailing_moe_v2_5": ("bailing_hybrid", None,       "deepseek", False, "hybrid"),
     # Tencent Hy3-preview (HYV3ForCausalLM) — text-only MoE, 295B/21B active.
     # GQA + qk_norm, sigmoid router with expert_bias (DSV3-style aux-free balancing),
     # 1 shared expert, first_k_dense_replace=1, native MTP layer, 256K context.
@@ -92,11 +114,43 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # Tool format: <tool_call><tool_sep><arg_key>/<arg_value> — Tencent-specific
     # ("hunyuan" parser; vLLM names it "hy_v3", SGLang "hunyuan").
     "hy_v3":            ("hy_v3",       "qwen3",       "hunyuan",  False, "kv"),
+    # Step-family VLM/text runtimes.
+    "step1v":           ("step_vl",     "qwen3",       "step3p5",  True,  "kv"),
+    "step3p5":          ("step",        "qwen3",       "step3p5",  True,  "kv"),
+    "step":             ("step",        "qwen3",       "step3p5",  True,  "kv"),
+    "step3p7":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
+    # Other vMLX model families with dedicated parser/cache routing.
+    "nemotron":         ("nemotron",    "deepseek_r1", "nemotron", True,  "kv"),
+    "lfm2":             ("lfm2",        "qwen3",       "lfm2",     False, "hybrid"),
+    "lfm2_moe":         ("lfm2",        "qwen3",       "lfm2",     False, "hybrid"),
     # Llama 3.x (dense) — base + instruct
     "llama":            ("llama",       None,          "llama",    False, "kv"),
     "llama3":           ("llama",       None,          "llama",    False, "kv"),
+    "llama4":           ("llama4",      None,          "llama",    False, "kv"),
     # idefics3 (SmolVLM) — llama text decoder + SigLIP vision encoder
     "idefics3":         ("idefics3",    None,          "llama",    False, "kv"),
+}
+
+SUPPORTS_THINKING_OVERRIDES = {
+    # Current vMLX keeps these parser rails separate from the user-facing
+    # "thinking supported" flag until the corresponding visible-final contract
+    # is live-proven for the shipped bundle.
+    "mimo_v2": False,
+    "bailing_hybrid": False,
+    # MiniMax-M3 has a thinking-capable template but no dedicated reasoning
+    # parser in vMLX yet.
+    "minimax_m3": True,
+}
+
+_KNOWN_VISION_MODEL_TYPES = {
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "qwen3_vl",
+    "qwen3_vl_moe",
+    "zaya1_vl",
+    "minimax_m3_vl",
+    "step1v",
+    "step3p7",
 }
 
 
@@ -165,6 +219,12 @@ def _resolve_modality(jang: dict, config: dict, model_path: Path | None = None) 
     arch_dict = jang.get("architecture")
     if isinstance(arch_dict, dict) and "has_vision" in arch_dict:
         return "vision" if arch_dict["has_vision"] else "text"
+    for value in (
+        config.get("model_type"),
+        (config.get("text_config") or {}).get("model_type"),
+    ):
+        if isinstance(value, str) and value.lower() in _KNOWN_VISION_MODEL_TYPES:
+            return "vision"
     if "vision_config" in config:
         return "vision"
     return "text"
@@ -191,25 +251,34 @@ def build_capabilities(
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
     modality = _resolve_modality(jang, config, model_path)
-    # supports_thinking advertises whether the model architecturally produces
-    # chain-of-thought reasoning. ZAYA / ZAYA1-VL DO reason — measured live:
-    # `enable_thinking=False` (default template) still produces chain-of-thought
-    # output ("Okay, I need to calculate... step by step..."). The earlier
-    # exclusion of zaya/zaya1_vl conflated parser-routing concerns
-    # (think_in_template=False is correct because the default template emits
-    # a closed </think> block) with model-capability claims. Keep
-    # think_in_template=False, but mark supports_thinking=True.
-    supports_thinking = reasoning is not None
-    return {
+    # supports_thinking is a user-facing contract, not just "has a parser".
+    # Some vMLX rows intentionally install a parser while keeping thinking
+    # hidden until a visible-final contract is live-proven; others have a
+    # thinking-capable template before a parser exists.
+    supports_thinking = SUPPORTS_THINKING_OVERRIDES.get(family, reasoning is not None)
+    caps = {
         "reasoning_parser": reasoning,
         "tool_parser": tool,
         "think_in_template": think_in_template,
-        "supports_tools": True,
+        "supports_tools": tool is not None,
         "supports_thinking": supports_thinking,
         "family": family,
         "modality": modality,
         "cache_type": cache_type,
     }
+    if family == "mimo_v2":
+        caps.update({
+            "modalities": {
+                "text": True,
+                "vision": False,
+                "audio": False,
+                "video": False,
+            },
+            "has_vision": False,
+            "has_audio": False,
+            "has_video": False,
+        })
+    return caps
 
 
 # M152 (iter 75): migrated from local M150 implementation to the shared
@@ -278,10 +347,11 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
         return False, f"capabilities missing keys: {sorted(missing)}"
 
     valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4",
-                       "openai_gptoss", None}
+                       "minimax_m2", "think_xml", "openai_gptoss", None}
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
                   "functionary", "glm47", "minimax", "gemma4", "native",
+                  "gemma3", "lfm2", "xml_function", "minimax_m3",
                   # DSV4 native DSML format + Zaya XML tool format. Both
                   # have dedicated parsers in vmlx_engine.tool_parsers.
                   # Without these, verify_directory rejected legitimate
@@ -290,14 +360,14 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # Tencent Hy3-preview emits its own XML-like tool tags
                   # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
                   # registers this parser as "hy_v3", SGLang as "hunyuan".
-                  "hunyuan"}
+                  "hunyuan", None}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
     valid_modality = {"text", "vision", "embedding", "rerank", "image"}
 
     if caps["reasoning_parser"] not in valid_reasoning:
         return False, f"reasoning_parser={caps['reasoning_parser']!r} not in {sorted(valid_reasoning - {None})}"
     if caps["tool_parser"] not in valid_tool:
-        return False, f"tool_parser={caps['tool_parser']!r} not in {sorted(valid_tool)}"
+        return False, f"tool_parser={caps['tool_parser']!r} not in {sorted(valid_tool - {None})}"
     if caps["cache_type"] not in valid_cache:
         return False, f"cache_type={caps['cache_type']!r} not in {sorted(valid_cache)}"
     if caps["modality"] not in valid_modality:

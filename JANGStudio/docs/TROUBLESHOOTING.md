@@ -3,7 +3,10 @@
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Step 1 says "Not a HuggingFace model" | Folder is missing `config.json` | Point at the actual model directory, not its parent |
-| JANGTQ tab greyed out | Your model type is not `qwen3_5_moe` or `minimax_m2` | Use a JANG profile instead. JANGTQ for GLM lands in v1.1 |
+| Expert Lab steps missing from sidebar | Convert mode (default) or dense model | On MoE sources, set Source → **Expert Lab** segment; dense models never show Expert Lab |
+| JANGTQ tab greyed out | Architecture not on whitelist | Use a JANG profile instead. JANGTQ for GLM lands in v1.1 |
+| Pre-flight: "JANGTQ arch supported" red — no module mapping | Whitelist entry without a Studio converter module | Use a JANG profile, or upgrade Studio when that arch ships a module |
+| Run fails: "no module mapping for model types" | JANGTQ forced past preflight / unmapped arch | Same as above — never silently routes to the Qwen converter |
 | Pre-flight: "Disk free" red | Output volume is too small for the estimated size | Pick a different output folder (external drive is fine) |
 | Pre-flight: "RAM adequate" yellow warn | RAM < 1.5x source size | Conversion may swap or OOM. Close other apps, or pick a higher-bit profile |
 | Run fails with "Killed: 9" or "MemoryError" | Out of RAM. 397B at JANG_1L needs 128 GB+ | Close other apps, or pick a higher-bit profile |

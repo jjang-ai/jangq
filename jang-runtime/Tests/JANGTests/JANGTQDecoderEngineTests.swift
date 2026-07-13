@@ -70,7 +70,10 @@ final class JANGTQDecoderEngineTests: XCTestCase {
         ]
     }
 
-    private func buildModel() throws -> (URL, hidden: Int, inter: Int, K: Int, nExperts: Int) {
+    private func buildModel(
+        moePrefix: String = "block_sparse_moe",
+        qwenProjectionNames: Bool = false
+    ) throws -> (URL, hidden: Int, inter: Int, K: Int, nExperts: Int) {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent(
             "jangtq_engine_test_\(UUID().uuidString)"
@@ -113,17 +116,21 @@ final class JANGTQDecoderEngineTests: XCTestCase {
         var tensors: [(String, String, [Int], Data)] = []
         let pcGate = hidden / 16  // 4
         let pcDown = inter / 16   // 2
+        let layerPrefix = "model.layers.0.\(moePrefix)"
+        let gateProjection = qwenProjectionNames ? "gate_proj" : "w1"
+        let downProjection = qwenProjectionNames ? "down_proj" : "w2"
+        let upProjection = qwenProjectionNames ? "up_proj" : "w3"
         for e in 0..<nExperts {
             tensors.append(contentsOf: tqTriplet(
-                base: "model.layers.0.block_sparse_moe.experts.\(e).w1",
+                base: "\(layerPrefix).experts.\(e).\(gateProjection)",
                 outFeatures: inter, packedIn: pcGate
             ))
             tensors.append(contentsOf: tqTriplet(
-                base: "model.layers.0.block_sparse_moe.experts.\(e).w2",
+                base: "\(layerPrefix).experts.\(e).\(downProjection)",
                 outFeatures: hidden, packedIn: pcDown
             ))
             tensors.append(contentsOf: tqTriplet(
-                base: "model.layers.0.block_sparse_moe.experts.\(e).w3",
+                base: "\(layerPrefix).experts.\(e).\(upProjection)",
                 outFeatures: inter, packedIn: pcGate
             ))
         }
@@ -135,14 +142,15 @@ final class JANGTQDecoderEngineTests: XCTestCase {
         for h in 0..<hidden { gateW[0 * hidden + h] = 1.0 }
         for h in 0..<hidden { gateW[1 * hidden + h] = 0.5 }
         tensors.append((
-            "model.layers.0.block_sparse_moe.gate.weight",
+            "\(layerPrefix).gate.weight",
             "F16", [nExperts, hidden], halvesToData(gateW)
         ))
-        // No e_score_correction_bias for this test (default 0)
-        tensors.append((
-            "model.layers.0.block_sparse_moe.e_score_correction_bias",
-            "F16", [nExperts], halvesToData([Float](repeating: 0, count: nExperts))
-        ))
+        if !qwenProjectionNames {
+            tensors.append((
+                "\(layerPrefix).e_score_correction_bias",
+                "F16", [nExperts], halvesToData([Float](repeating: 0, count: nExperts))
+            ))
+        }
 
         try writeShard(
             url: dir.appendingPathComponent("model-00001-of-00001.safetensors"),
@@ -205,6 +213,32 @@ final class JANGTQDecoderEngineTests: XCTestCase {
         XCTAssertGreaterThan(rawSum, 0.5, "top-3 of 8 should capture most of the mass")
     }
 
+    func testRouterCPUMaskExcludesDisabledExpertsAndRenormalizes() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let gates: [Float] = [0.1, 0.2, 0.5, -0.1, 0.0, 0.9, 0.3, 0.7]
+
+        let result = try jangtqRouterCPU(
+            gates: gates, eScoreBias: nil, k: 3,
+            variant: .softmaxTopK(renormalize: false), device: device,
+            disabledExperts: [5, 7]
+        )
+
+        XCTAssertFalse(result.indices.contains(5))
+        XCTAssertFalse(result.indices.contains(7))
+        XCTAssertEqual(Set(result.indices), Set([2, 6, 1]))
+        XCTAssertEqual(result.scores.reduce(0, +), 1.0, accuracy: 1e-5,
+            "masked router scores must renormalize even when the base router does not")
+    }
+
+    func testRouterCPUMaskRejectsTooFewActiveExperts() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        XCTAssertThrowsError(try jangtqRouterCPU(
+            gates: [0.1, 0.2, 0.3], eScoreBias: nil, k: 2,
+            variant: .softmaxTopK(renormalize: true), device: device,
+            disabledExperts: [0, 1]
+        ))
+    }
+
     func testFullMoEForwardEndToEnd() throws {
         let (dir, hidden, inter, K, _) = try buildModel()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -254,6 +288,121 @@ final class JANGTQDecoderEngineTests: XCTestCase {
         }
         XCTAssertLessThan(maxDiff, 1.0,
             "decoder engine MoE forward max diff = \(maxDiff), expected ≈ \(expected)")
+    }
+
+    func testRunMoEAcceptsTextQwenMLPPrefix() throws {
+        let (dir, hidden, _, K, _) = try buildModel(moePrefix: "mlp", qwenProjectionNames: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let bundle = try JANGTQLoader(device: device).load(from: dir)
+        let ctx = try MetalContext()
+        let engine = JANGTQDecoderEngine(
+            bundle: bundle,
+            context: ctx,
+            kernels: try JANGTQKernels(context: ctx),
+            affine8: try JANGTQAffine8Matmul(context: ctx),
+            ops: try JANGTQDecodeOps(context: ctx),
+            cache: try JANGTQKVCache(device: device, nLayers: 1, kvHeads: 2, headDim: 16, maxSeqLen: 16)
+        )
+        let x = device.makeBuffer(length: hidden * MemoryLayout<Float16>.stride,
+                                  options: .storageModeShared)!
+        let xPtr = x.contents().bindMemory(to: Float16.self, capacity: hidden)
+        for i in 0..<hidden { xPtr[i] = 1.0 }
+
+        let combined = try engine.runMoE(layer: 0, normedX: x, hidden: hidden, k: K)
+        XCTAssertEqual(combined.length, hidden * MemoryLayout<Float16>.stride)
+    }
+
+    func testRunMoEDefaultsMissingNormTopKProbToRawSoftmaxScores() throws {
+        let (dir, hidden, _, K, nExperts) = try buildModel(moePrefix: "mlp", qwenProjectionNames: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let bundle = try JANGTQLoader(device: device).load(from: dir)
+        let gateKey = "model.layers.0.mlp.gate.weight"
+        let gate = try XCTUnwrap(bundle.halfTensors[gateKey])
+        let gatePtr = gate.contents().bindMemory(to: Float16.self, capacity: nExperts * hidden)
+        for expert in 0..<nExperts {
+            for h in 0..<hidden {
+                gatePtr[expert * hidden + h] = Float16(Float(expert + 1) * 0.001)
+            }
+        }
+
+        let ctx = try MetalContext()
+        let engine = JANGTQDecoderEngine(
+            bundle: bundle,
+            context: ctx,
+            kernels: try JANGTQKernels(context: ctx),
+            affine8: try JANGTQAffine8Matmul(context: ctx),
+            ops: try JANGTQDecodeOps(context: ctx),
+            cache: try JANGTQKVCache(device: device, nLayers: 1, kvHeads: 2, headDim: 16, maxSeqLen: 16)
+        )
+        let x = device.makeBuffer(length: hidden * MemoryLayout<Float16>.stride,
+                                  options: .storageModeShared)!
+        let xPtr = x.contents().bindMemory(to: Float16.self, capacity: hidden)
+        for i in 0..<hidden { xPtr[i] = 1.0 }
+
+        let collector = JANGExpertTraceCollector()
+        _ = try engine.runMoE(
+            layer: 0,
+            normedX: x,
+            hidden: hidden,
+            k: K,
+            traceConfig: JANGExpertTraceConfig(emitTokenTrace: true, maxTraceTokens: 8),
+            traceCollector: collector,
+            tokenIndex: 0
+        )
+
+        let record = try XCTUnwrap(collector.snapshot().first)
+        XCTAssertEqual(Set(record.selectedExperts), Set([2, 3]))
+        XCTAssertLessThan(record.scores.reduce(0, +), 1.0)
+        XCTAssertGreaterThan(record.scores.reduce(0, +), 0.45)
+    }
+
+    func testRunMoERecordsTraceAndAppliesMask() throws {
+        let (dir, hidden, _, K, _) = try buildModel()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let bundle = try JANGTQLoader(device: device).load(from: dir)
+        let ctx = try MetalContext()
+        let engine = JANGTQDecoderEngine(
+            bundle: bundle,
+            context: ctx,
+            kernels: try JANGTQKernels(context: ctx),
+            affine8: try JANGTQAffine8Matmul(context: ctx),
+            ops: try JANGTQDecodeOps(context: ctx),
+            cache: try JANGTQKVCache(device: device, nLayers: 1, kvHeads: 2, headDim: 16, maxSeqLen: 16)
+        )
+        let x = device.makeBuffer(length: hidden * MemoryLayout<Float16>.stride,
+                                  options: .storageModeShared)!
+        let xPtr = x.contents().bindMemory(to: Float16.self, capacity: hidden)
+        for i in 0..<hidden { xPtr[i] = 1.0 }
+
+        let collector = JANGExpertTraceCollector()
+        let traceConfig = JANGExpertTraceConfig(
+            mask: JANGExpertMask(layers: [0: [0]], topKOverride: 1),
+            emitTokenTrace: true,
+            maxTraceTokens: 8
+        )
+        _ = try engine.runMoE(
+            layer: 0,
+            normedX: x,
+            hidden: hidden,
+            k: K,
+            traceConfig: traceConfig,
+            traceCollector: collector,
+            tokenIndex: 12
+        )
+
+        let records = collector.snapshot()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].tokenIndex, 12)
+        XCTAssertEqual(records[0].layer, 0)
+        XCTAssertEqual(records[0].effectiveTopK, 1)
+        XCTAssertEqual(records[0].disabledExperts, [0])
+        XCTAssertFalse(records[0].selectedExperts.contains(0))
     }
 
     func testRMSNormCPUMatchesAnalyticalForOnes() throws {

@@ -49,19 +49,116 @@ def cmd_inspect(args):
         print("  Quality metrics:")
         for key, val in metrics.items():
             print(f"    {key}: {val}")
-        print()
+    print()
+
+
+def _read_json_dict(path):
+    from pathlib import Path
+
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"{path.name} is missing or invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path.name} must contain a JSON object")
+    return data
+
+
+def _validate_jangtq_directory(path, jang_config):
+    """Lightweight structural validation for MLX-native JANGTQ bundles.
+
+    Legacy `load_jang_model` validates `format: jang` companion tensors by
+    loading them through the old reader. JANGTQ uses standard safetensors names
+    plus `weight_format=mxtq`, so validation must stay file-structural and must
+    not load a 20GB+ model into memory.
+    """
+    from pathlib import Path
+    from .capabilities import verify_directory
+
+    path = Path(path)
+    config = _read_json_dict(path / "config.json")
+    index = _read_json_dict(path / "model.safetensors.index.json")
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise RuntimeError("model.safetensors.index.json missing non-empty weight_map")
+
+    config_weight_format = str(config.get("weight_format") or "")
+    jang_weight_format = str(jang_config.get("weight_format") or "")
+    profile = str(jang_config.get("profile") or config.get("jang_profile") or "")
+    metadata = index.get("metadata") if isinstance(index.get("metadata"), dict) else {}
+    index_format = str(metadata.get("format") or "")
+    if jang_weight_format != "mxtq" and config_weight_format != "mxtq":
+        raise RuntimeError(
+            f"JANGTQ bundle must declare weight_format=mxtq, got "
+            f"jang_config={jang_weight_format!r} config={config_weight_format!r}"
+        )
+    if not profile.upper().startswith("JANGTQ"):
+        raise RuntimeError(f"JANGTQ bundle has invalid profile={profile!r}")
+    if index_format and index_format != "jangtq":
+        raise RuntimeError(f"JANGTQ index metadata.format must be 'jangtq', got {index_format!r}")
+
+    shards = set()
+    for tensor_name, shard_name in weight_map.items():
+        if not isinstance(tensor_name, str) or not isinstance(shard_name, str):
+            raise RuntimeError("weight_map keys and shard names must be strings")
+        if ".." in shard_name or shard_name.startswith("/"):
+            raise RuntimeError(f"invalid shard path in index: {shard_name}")
+        shards.add(shard_name)
+    missing = sorted(s for s in shards if not (path / s).is_file())
+    if missing:
+        raise RuntimeError(f"index references missing shard files: {missing[:8]}")
+
+    tok_cfg = path / "tokenizer_config.json"
+    if not tok_cfg.exists():
+        raise RuntimeError("missing tokenizer_config.json")
+    if not ((path / "tokenizer.json").exists() or (path / "tokenizer.model").exists()):
+        raise RuntimeError("missing tokenizer.json or tokenizer.model")
+
+    ok, msg = verify_directory(path)
+    if not ok:
+        raise RuntimeError(msg)
+
+    total_size = metadata.get("total_size")
+    if not isinstance(total_size, int):
+        total_size = sum((path / shard).stat().st_size for shard in shards)
+    return {
+        "profile": profile,
+        "source": (jang_config.get("source_model") or {}).get("name", "unknown"),
+        "tensors": len(weight_map),
+        "shards": len(shards),
+        "size_gb": round(float(total_size) / (1024 ** 3), 2),
+        "capabilities": msg,
+    }
 
 
 def cmd_validate(args):
     """Validate a JANG model directory."""
     from .format.reader import is_jang_model, load_jang_model
+    from pathlib import Path
 
-    path = args.model
+    path = Path(args.model)
     if not is_jang_model(path):
         print(f"  ERROR: {path} is not a valid JANG model directory")
         sys.exit(1)
 
     try:
+        jang_config = _read_json_dict(path / "jang_config.json")
+        looks_jangtq = (
+            str(jang_config.get("weight_format") or "") == "mxtq"
+            or str(jang_config.get("profile") or "").upper().startswith("JANGTQ")
+        )
+        if jang_config.get("format") != "jang" and looks_jangtq:
+            summary = _validate_jangtq_directory(path, jang_config)
+            print(f"  VALID JANGTQ: {path}")
+            print(f"  Source: {summary['source']}")
+            print(f"  Profile: {summary['profile']}")
+            print(f"  Tensors: {summary['tensors']:,}")
+            print(f"  Shards: {summary['shards']:,}")
+            print(f"  Size: {summary['size_gb']} GB")
+            print(f"  {summary['capabilities']}")
+            return
+
         model = load_jang_model(path)
         summary = model.summary()
         print(f"  VALID: {path}")
@@ -278,14 +375,23 @@ def main():
     from .inspect_source import register as _register_inspect_source
     _register_inspect_source(subparsers)
 
-    from .examples import register as _register_examples
-    _register_examples(subparsers)
+    try:
+        from .examples import register as _register_examples
+        _register_examples(subparsers)
+    except ImportError:
+        pass
 
-    from .modelcard import register as _register_modelcard
-    _register_modelcard(subparsers)
+    try:
+        from .modelcard import register as _register_modelcard
+        _register_modelcard(subparsers)
+    except ImportError:
+        pass
 
-    from .inference import register as _register_inference
-    _register_inference(subparsers)
+    try:
+        from .inference import register as _register_inference
+        _register_inference(subparsers)
+    except ImportError:
+        pass
 
     from .profiles_cli import register as _register_profiles
     _register_profiles(subparsers)
@@ -296,11 +402,23 @@ def main():
     from .estimate_model import register as _register_estimate_model
     _register_estimate_model(subparsers)
 
-    from .publish import register as _register_publish
-    _register_publish(subparsers)
+    try:
+        from .publish import register as _register_publish
+        _register_publish(subparsers)
+    except ImportError:
+        pass
 
-    from .recommend import register as _register_recommend
-    _register_recommend(subparsers)
+    try:
+        from .recommend import register as _register_recommend
+        _register_recommend(subparsers)
+    except ImportError:
+        pass
+
+    from .prequant_prune_qwen_moe import register as _register_prequant_prune_qwen_moe
+    _register_prequant_prune_qwen_moe(subparsers)
+
+    from .expert_lab_vmlx import register as _register_expert_lab_vmlx
+    _register_expert_lab_vmlx(subparsers)
 
     args = parser.parse_args()
 
@@ -315,7 +433,9 @@ def main():
 
     suppress_banner = args.quiet_text or (
         args.command in ("inspect-source", "examples", "modelcard", "inference",
-                         "profiles", "capabilities", "estimate-model", "publish", "recommend")
+                         "profiles", "capabilities", "estimate-model", "publish", "recommend",
+                         "prequant-prune-qwen-moe", "expert-lab-vmlx",
+                         "expert-lab-vmlx-build-eval")
         and getattr(args, "json", False)
     )
     if not suppress_banner:

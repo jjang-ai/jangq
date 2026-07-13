@@ -21,6 +21,21 @@ struct Recommendation: Codable, Equatable {
         let hasReasoningParser: Bool
         let isGatedModel: Bool
         let nameOrPath: String
+
+        enum CodingKeys: String, CodingKey {
+            case modelType = "model_type"
+            case familyClass = "family_class"
+            case paramCountBillions = "param_count_billions"
+            case expertCount = "expert_count"
+            case isMoE = "is_moe"
+            case isVL = "is_vl"
+            case isVideoVL = "is_video_vl"
+            case sourceDtype = "source_dtype"
+            case hasToolParser = "has_tool_parser"
+            case hasReasoningParser = "has_reasoning_parser"
+            case isGatedModel = "is_gated_model"
+            case nameOrPath = "name_or_path"
+        }
     }
 
     struct Alternative: Codable, Equatable, Identifiable {
@@ -29,6 +44,12 @@ struct Recommendation: Codable, Equatable {
         let useWhen: String
 
         var id: String { "\(family ?? "jang")-\(profile)" }
+
+        enum CodingKeys: String, CodingKey {
+            case family
+            case profile
+            case useWhen = "use_when"
+        }
     }
 
     struct Recommended: Codable, Equatable {
@@ -39,6 +60,16 @@ struct Recommendation: Codable, Equatable {
         let blockSize: Int
         let forceDtype: String?
         let alternatives: [Alternative]
+
+        enum CodingKeys: String, CodingKey {
+            case family
+            case profile
+            case method
+            case hadamard
+            case blockSize = "block_size"
+            case forceDtype = "force_dtype"
+            case alternatives
+        }
     }
 
     struct WhyEachChoice: Codable, Equatable {
@@ -48,6 +79,15 @@ struct Recommendation: Codable, Equatable {
         let hadamard: String
         let blockSize: String
         let forceDtype: String
+
+        enum CodingKeys: String, CodingKey {
+            case family
+            case profile
+            case method
+            case hadamard
+            case blockSize = "block_size"
+            case forceDtype = "force_dtype"
+        }
     }
 
     let detected: Detected
@@ -55,6 +95,14 @@ struct Recommendation: Codable, Equatable {
     let beginnerSummary: String
     let warnings: [String]
     let whyEachChoice: WhyEachChoice
+
+    enum CodingKeys: String, CodingKey {
+        case detected
+        case recommended
+        case beginnerSummary = "beginner_summary"
+        case warnings
+        case whyEachChoice = "why_each_choice"
+    }
 }
 
 enum RecommendationServiceError: Error, LocalizedError {
@@ -80,9 +128,7 @@ enum RecommendationService {
             "--json",
         ])
         do {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(Recommendation.self, from: data)
+            return try JSONDecoder().decode(Recommendation.self, from: data)
         } catch {
             throw RecommendationServiceError.decodeError("\(error)")
         }

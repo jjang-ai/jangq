@@ -94,6 +94,65 @@ final class JANGTQDecodeOpsTests: XCTestCase {
         XCTAssertLessThan(maxDiff, 5e-3, "RoPE GPU max diff = \(maxDiff)")
     }
 
+    func testPartialRoPERotatesOnlyRotaryDimensions() throws {
+        let ctx = try MetalContext()
+        let kernel = try JANGTQRoPEKernel(context: ctx)
+
+        let nHeads = 2
+        let headDim = 16
+        let rotaryDim = 4
+        let pos = 5
+        let base: Float = 10000.0
+
+        var x = [Float](repeating: 0, count: nHeads * headDim)
+        for i in 0..<x.count { x[i] = Float(i + 1) * 0.03125 }
+        let xBuf = makeHalf(x, ctx.device)
+
+        try kernel.run(
+            qk: xBuf,
+            nHeads: nHeads,
+            headDim: headDim,
+            rotaryDim: rotaryDim,
+            position: pos,
+            base: base
+        )
+        let actual = readHalf(xBuf, x.count)
+
+        let half = rotaryDim / 2
+        var ref = x.map { Float(Float16($0)) }
+        for h in 0..<nHeads {
+            let rowOff = h * headDim
+            for i in 0..<half {
+                let freq = Foundation.pow(base, -2.0 * Float(i) / Float(rotaryDim))
+                let angle = Float(pos) * freq
+                let c = Foundation.cos(angle)
+                let s = Foundation.sin(angle)
+                let realIdx = rowOff + i
+                let imagIdx = rowOff + i + half
+                let r = ref[realIdx]
+                let im = ref[imagIdx]
+                ref[realIdx] = r * c - im * s
+                ref[imagIdx] = r * s + im * c
+            }
+        }
+
+        var maxDiff: Float = 0
+        for i in 0..<x.count { maxDiff = max(maxDiff, abs(actual[i] - ref[i])) }
+        XCTAssertLessThan(maxDiff, 5e-3, "partial RoPE GPU max diff = \(maxDiff)")
+
+        for h in 0..<nHeads {
+            let rowOff = h * headDim
+            for i in rotaryDim..<headDim {
+                XCTAssertEqual(
+                    actual[rowOff + i],
+                    Float(Float16(x[rowOff + i])),
+                    accuracy: 1e-4,
+                    "partial RoPE should not alter head \(h) dim \(i)"
+                )
+            }
+        }
+    }
+
     func testResidualAdd() throws {
         let ctx = try MetalContext()
         let kernel = try JANGTQResidualKernel(context: ctx)
@@ -126,6 +185,60 @@ final class JANGTQDecodeOpsTests: XCTestCase {
         let actual = readHalf(outBuf, count)
         for i in 0..<count {
             XCTAssertEqual(actual[i], Float(Float16(floats[i])), accuracy: 1e-3)
+        }
+    }
+
+    func testQwenGatedQSplitMatchesPerHeadLayout() throws {
+        let ctx = try MetalContext()
+        let kernel = try JANGTQGatedQSplitKernel(context: ctx)
+
+        let nHeads = 3
+        let headDim = 4
+        var packed = [Float]()
+        for h in 0..<nHeads {
+            for d in 0..<headDim {
+                packed.append(Float(100 * h + d))
+            }
+            for d in 0..<headDim {
+                packed.append(Float(1000 + 100 * h + d))
+            }
+        }
+
+        let qFull = makeHalf(packed, ctx.device)
+        let q = ctx.device.makeBuffer(length: nHeads * headDim * 2, options: .storageModeShared)!
+        let gate = ctx.device.makeBuffer(length: nHeads * headDim * 2, options: .storageModeShared)!
+
+        try kernel.runInto(qFull: qFull, q: q, gate: gate, nHeads: nHeads, headDim: headDim)
+
+        let qActual = readHalf(q, nHeads * headDim)
+        let gateActual = readHalf(gate, nHeads * headDim)
+        var qExpected: [Float] = []
+        var gateExpected: [Float] = []
+        for h in 0..<nHeads {
+            for d in 0..<headDim { qExpected.append(Float(100 * h + d)) }
+            for d in 0..<headDim { gateExpected.append(Float(1000 + 100 * h + d)) }
+        }
+        XCTAssertEqual(qActual, qExpected)
+        XCTAssertEqual(gateActual, gateExpected)
+    }
+
+    func testAttentionGateAppliesSigmoidElementwise() throws {
+        let ctx = try MetalContext()
+        let kernel = try JANGTQAttentionGateKernel(context: ctx)
+
+        let attn = [-2.0, -0.5, 0.25, 1.5, 3.0].map(Float.init)
+        let gate = [-4.0, -1.0, 0.0, 1.0, 4.0].map(Float.init)
+        let attnBuf = makeHalf(attn, ctx.device)
+        let gateBuf = makeHalf(gate, ctx.device)
+
+        try kernel.runInto(attnOut: attnBuf, gate: gateBuf, count: attn.count)
+
+        let actual = readHalf(attnBuf, attn.count)
+        for i in 0..<attn.count {
+            let a = Float(Float16(attn[i]))
+            let g = Float(Float16(gate[i]))
+            let expected = a * (1.0 / (1.0 + Foundation.exp(-g)))
+            XCTAssertEqual(actual[i], expected, accuracy: 2e-3)
         }
     }
 

@@ -100,7 +100,7 @@ The goal: every item reaches `[x]` with production-ready behavior. "Production" 
 - [ ] **F01** — Bundle size ≤ 450 MB (current: 305 MB).
 - [ ] **F02** — All 15 jang-tools subcommands present: inspect, validate, estimate, convert, profile, upgrade, spec, inspect-source, examples, modelcard, inference, profiles, capabilities, estimate-model, publish. Verified this iteration.
 - [ ] **F03** — Python version 3.11.x in bundle.
-- [ ] **F04** — MLX version pinned (mlx>=0.22, mlx-lm>=0.20 per pyproject.toml extras).
+- [ ] **F04** — MLX version pinned (mlx>=0.31.2, mlx-lm>=0.31.3, mlx-vlm>=0.6.3 per pyproject.toml extras).
 - [ ] **F05** — transformers, tokenizers, sentencepiece present (for VL processors).
 - [ ] **F06** — huggingface_hub present (for publish subcommand).
 - [ ] **F07** — Jinja2 present (for templates in examples/modelcard).

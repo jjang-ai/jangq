@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JANG Studio — Expert Atlas (Condensed Cards)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --bg: #06090d;
+      --panel: #0e1316;
+      --panel-raised: #131a1d;
+      --line: rgba(255,255,255,0.08);
+      --text: #e7eef1;
+      --text-dim: #6a787d;
+      --text-faint: #3a4548;
+      --accent: #33e0e8;
+      --good: #70db9f;
+      --warm: #ebb85e;
+      --danger: #ff5964;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    .expert-card {
+      width: 52px;
+      height: 52px;
+      border-radius: 6px;
+      cursor: pointer;
+      position: relative;
+      transition: transform .08s ease, box-shadow .12s ease;
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    .expert-card:hover {
+      transform: translateY(-2px) scale(1.06);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.45);
+      border-color: rgba(255,255,255,0.25);
+      z-index: 10;
+    }
+    .expert-card.selected { border-color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,0.55); }
+    .expert-card.masked { background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.35) 4px, rgba(0,0,0,0.35) 7px); }
+    .expert-card.locked::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      border: 1.5px solid rgba(255,255,255,0.6);
+      border-radius: 4px;
+    }
+    .card-id {
+      position: absolute;
+      top: 3px;
+      left: 4px;
+      font-size: 8px;
+      font-weight: 700;
+      color: rgba(255,255,255,0.85);
+      text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+    }
+    .card-mini {
+      position: absolute;
+      bottom: 3px;
+      right: 4px;
+      font-size: 7px;
+      color: rgba(255,255,255,0.75);
+      text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+    }
+    .card-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: rgba(0,0,0,0.25);
+    }
+    .card-bar > div { height: 100%; }
+    .tooltip {
+      position: fixed;
+      pointer-events: none;
+      background: rgba(14,19,22,0.96);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text);
+      z-index: 100;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+      min-width: 180px;
+      opacity: 0;
+      transition: opacity .08s ease;
+    }
+    .tooltip.visible { opacity: 1; }
+    .legend-dot { width: 9px; height: 9px; border-radius: 2px; }
+    .filter-pill {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: all .12s ease;
+    }
+    .filter-pill.active {
+      background: rgba(51,224,232,0.12);
+      border-color: rgba(51,224,232,0.45);
+      color: var(--accent);
+    }
+    .layer-header {
+      width: 28px;
+      text-align: right;
+      font-size: 9px;
+      color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }
+    .scroller::-webkit-scrollbar { width: 6px; height: 6px; }
+    .scroller::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+    .range-input {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.1);
+      outline: none;
+    }
+    .range-input::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+  <header class="h-12 flex items-center justify-between px-4 border-b" style="background:var(--panel); border-color:var(--line);">
+    <div class="flex items-center gap-3">
+      <span class="font-semibold text-sm">Expert Atlas</span>
+      <span class="text-xs px-2 py-0.5 rounded border" style="border-color:var(--line); color:var(--text-dim);">qwen3_5_moe · BF16/vMLX</span>
+      <span class="text-xs px-2 py-0.5 rounded" style="background:rgba(112,219,160,0.12); color:var(--good);">Trace supported</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-xs" style="color:var(--text-faint);">40 layers · 256 experts</span>
+      <button class="text-xs px-3 py-1 rounded border hover:bg-white/5" style="border-color:var(--line); color:var(--text-dim);">Export Plan</button>
+    </div>
+  </header>
+
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- Top filter bar -->
+    <aside class="w-64 flex flex-col border-r p-4 gap-5" style="background:var(--panel); border-color:var(--line);">
+      <div>
+        <div class="text-[10px] uppercase tracking-wider font-semibold mb-2" style="color:var(--text-dim);">Search</div>
+        <input id="search" type="text" placeholder="Safety, L12E44, 47 hits..." class="w-full text-xs px-2.5 py-1.5 rounded border bg-transparent outline-none focus:border-[var(--accent)]" style="border-color:var(--line); color:var(--text);">
+      </div>
+
+      <div>
+        <div class="text-[10px] uppercase tracking-wider font-semibold mb-2" style="color:var(--text-dim);">Quick filter</div>
+        <div class="flex flex-wrap gap-1.5" id="filter-pills">
+          <button class="filter-pill active" data-filter="all">All</button>
+          <button class="filter-pill" data-filter="safety">⚠ Safety</button>
+          <button class="filter-pill" data-filter="coding">Code</button>
+          <button class="filter-pill" data-filter="math">Math</button>
+          <button class="filter-pill" data-filter="reasoning">Reason</button>
+          <button class="filter-pill" data-filter="hot">Hot</button>
+          <button class="filter-pill" data-filter="dead">Dead</button>
+          <button class="filter-pill" data-filter="masked">Masked</button>
+          <button class="filter-pill" data-filter="safeDrop">Safe drop</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="text-[10px] uppercase tracking-wider font-semibold mb-2" style="color:var(--text-dim);">Color by</div>
+        <div class="flex flex-col gap-1.5">
+          <label class="flex items-center gap-2 text-xs cursor-pointer"><input type="radio" name="color" value="domain" checked class="accent-[var(--accent)]"> Domain</label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer"><input type="radio" name="color" value="frequency" class="accent-[var(--accent)]"> Frequency</label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer"><input type="radio" name="color" value="risk" class="accent-[var(--accent)]"> Drop risk</label>
+        </div>
+      </div>
+
+      <div>
+        <div class="text-[10px] uppercase tracking-wider font-semibold mb-2" style="color:var(--text-dim);">Minimum hits</div>
+        <input type="range" min="0" max="80" value="0" class="range-input" id="threshold">
+        <div class="flex justify-between text-[10px] mt-1" style="color:var(--text-faint);"><span>0</span><span id="threshold-val">80</span></div>
+      </div>
+
+      <div class="mt-auto">
+        <div class="text-[10px] uppercase tracking-wider font-semibold mb-2" style="color:var(--text-dim);">Legend</div>
+        <div class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]" id="legend"></div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="flex-1 flex flex-col min-w-0">
+      <div class="flex items-center justify-between px-4 py-2 border-b" style="border-color:var(--line);">
+        <div id="selection-summary" class="text-xs" style="color:var(--text-dim);">Hover a card for details. Click to select, double-click to mask.</div>
+        <div class="flex items-center gap-2">
+          <button id="mask-btn" class="text-xs px-3 py-1.5 rounded bg-[var(--danger)] text-white opacity-50 cursor-not-allowed" disabled>Mask selected</button>
+          <button class="text-xs px-3 py-1.5 rounded border hover:bg-white/5" style="border-color:var(--line); color:var(--text-dim);">Retest</button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-auto p-4 scroller" id="scroller">
+        <div id="atlas" class="space-y-3"></div>
+      </div>
+    </main>
+
+    <!-- Right detail -->
+    <aside class="w-72 border-l p-4 flex flex-col gap-4" style="background:var(--panel); border-color:var(--line);">
+      <div class="text-[10px] uppercase tracking-wider font-semibold" style="color:var(--text-dim);">Expert detail</div>
+      <div id="detail-empty" class="text-xs" style="color:var(--text-faint);">Select or hover a card to see its label, hit count, and drop risk.</div>
+      <div id="detail-content" class="hidden flex flex-col gap-3">
+        <div class="flex items-baseline gap-2">
+          <span id="d-layer" class="text-2xl font-bold tabular-nums">L0</span>
+          <span id="d-expert" class="text-lg tabular-nums" style="color:var(--text-dim);">E193</span>
+        </div>
+        <div id="d-domain-pill" class="self-start text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded">Safety</div>
+        <div class="space-y-2 text-xs">
+          <div class="flex justify-between"><span style="color:var(--text-dim);">Hits</span><span id="d-hits" class="tabular-nums">47</span></div>
+          <div class="flex justify-between"><span style="color:var(--text-dim);">Tokens</span><span id="d-tokens" class="tabular-nums">128</span></div>
+          <div class="flex justify-between"><span style="color:var(--text-dim);">Router mass</span><span id="d-mass" class="tabular-nums">0.024</span></div>
+          <div class="flex justify-between"><span style="color:var(--text-dim);">Drop risk</span><span id="d-risk" class="tabular-nums">High</span></div>
+        </div>
+        <div>
+          <div class="text-[10px] uppercase tracking-wider font-semibold mb-1" style="color:var(--text-dim);">Top prompts</div>
+          <div id="d-prompts" class="space-y-1"></div>
+        </div>
+        <div class="pt-2 border-t" style="border-color:var(--line);">
+          <button class="w-full text-xs py-1.5 rounded border hover:bg-white/5" style="border-color:var(--line); color:var(--text-dim);">View comparison evidence</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="tooltip" class="tooltip"></div>
+
+<script>
+  const DOMAINS = {
+    safety: { label: "Safety", color: "#ff5964" },
+    coding: { label: "Coding", color: "#5b8def" },
+    math: { label: "Math", color: "#a78bfa" },
+    reasoning: { label: "Reasoning", color: "#70db9f" },
+    multilingual: { label: "Multilingual", color: "#ebb85e" },
+    general: { label: "General", color: "#6a787d" },
+    dead: { label: "Dead", color: "#2a3336" }
+  };
+
+  const LAYERS = 40;
+  const EXPERTS = 32;
+  let selected = new Set();
+  let masked = new Set();
+  let locked = new Set();
+  let activeFilter = 'all';
+  let activeSearch = '';
+  let colorMode = 'domain';
+  let threshold = 0;
+
+  function rand(seed) {
+    let x = Math.sin(seed) * 10000;
+    return x - Math.floor(x);
+  }
+
+  function expertData(layer, expert) {
+    const seed = layer * 997 + expert;
+    const r = rand(seed);
+    const isDead = r < 0.18;
+    const domainKeys = Object.keys(DOMAINS).filter(k => k !== 'dead');
+    let domain = domainKeys[Math.floor(r * domainKeys.length)];
+    if (isDead) domain = 'dead';
+    const hits = isDead ? 0 : Math.floor(r * 80);
+    const tokens = isDead ? 0 : Math.floor(hits * (1.5 + rand(seed + 1) * 3));
+    const mass = isDead ? 0 : parseFloat((r * 0.06).toFixed(3));
+    const risk = isDead ? 'None' : (r > 0.85 ? 'High' : r > 0.6 ? 'Medium' : 'Low');
+    return { layer, expert, domain, hits, tokens, mass, risk };
+  }
+
+  function opacityFor(entry) {
+    if (entry.domain === 'dead') return 0.45;
+    return 0.55 + (entry.hits / 80) * 0.45;
+  }
+
+  function cellColor(entry) {
+    if (colorMode === 'domain') return DOMAINS[entry.domain].color;
+    if (colorMode === 'frequency') {
+      const t = entry.hits / 80;
+      return `rgb(${Math.round(30 + t * 80)}, ${Math.round(180 + t * 60)}, ${Math.round(200 + t * 55)})`;
+    }
+    if (entry.risk === 'High') return '#ff5964';
+    if (entry.risk === 'Medium') return '#ebb85e';
+    return '#70db9f';
+  }
+
+  function matchesFilter(entry) {
+    if (entry.hits < threshold) return false;
+    if (activeFilter === 'all') return true;
+    if (activeFilter === 'hot') return entry.hits > 50;
+    if (activeFilter === 'dead') return entry.domain === 'dead';
+    if (activeFilter === 'masked') return masked.has(key(entry));
+    if (activeFilter === 'safeDrop') return entry.risk === 'Low' && entry.hits > 0;
+    if (entry.domain === activeFilter) return true;
+    return false;
+  }
+
+  function matchesSearch(entry) {
+    if (!activeSearch) return true;
+    const q = activeSearch.toLowerCase();
+    return DOMAINS[entry.domain].label.toLowerCase().includes(q)
+      || `L${entry.layer}E${entry.expert}`.toLowerCase().includes(q)
+      || `${entry.hits}`.includes(q);
+  }
+
+  function key(e) { return `${e.layer}:${e.expert}`; }
+
+  function renderAtlas() {
+    const atlas = document.getElementById('atlas');
+    atlas.innerHTML = '';
+
+    for (let layer = 0; layer < LAYERS; layer++) {
+      const row = document.createElement('div');
+      row.className = 'flex items-start gap-2';
+
+      const label = document.createElement('div');
+      label.className = 'layer-header pt-2';
+      label.textContent = `L${layer}`;
+      row.appendChild(label);
+
+      const grid = document.createElement('div');
+      grid.className = 'flex flex-wrap gap-1.5 pb-3';
+
+      for (let expert = 0; expert < EXPERTS; expert++) {
+        const entry = expertData(layer, expert);
+        const k = key(entry);
+        const passes = matchesFilter(entry) && matchesSearch(entry);
+
+        const card = document.createElement('div');
+        card.className = 'expert-card' +
+          (selected.has(k) ? ' selected' : '') +
+          (masked.has(k) ? ' masked' : '') +
+          (locked.has(k) ? ' locked' : '');
+        card.style.backgroundColor = cellColor(entry);
+        card.style.opacity = passes ? opacityFor(entry) : 0.08;
+        card.dataset.entry = JSON.stringify(entry);
+        if (!passes) card.style.pointerEvents = 'none';
+
+        card.innerHTML = `
+          <div class="card-id">E${entry.expert}</div>
+          <div class="card-mini">${entry.hits}</div>
+          <div class="card-bar"><div style="width:${(entry.hits/80)*100}%; background:rgba(255,255,255,0.55)"></div></div>
+        `;
+
+        card.addEventListener('mouseenter', (e) => showTooltip(e, entry));
+        card.addEventListener('mouseleave', hideTooltip);
+        card.addEventListener('click', (e) => { toggleSelect(entry); showDetail(entry); });
+        card.addEventListener('dblclick', () => toggleMask(entry));
+
+        grid.appendChild(card);
+      }
+      row.appendChild(grid);
+      atlas.appendChild(row);
+    }
+    updateSelectionSummary();
+  }
+
+  function showTooltip(e, entry) {
+    const tt = document.getElementById('tooltip');
+    const domain = DOMAINS[entry.domain];
+    tt.innerHTML = `
+      <div class="flex items-center gap-2 mb-1">
+        <div class="legend-dot" style="background:${domain.color}"></div>
+        <span class="font-semibold">${domain.label}</span>
+        <span class="ml-auto text-[10px]" style="color:var(--text-dim)">L${entry.layer} · E${entry.expert}</span>
+      </div>
+      <div class="space-y-0.5" style="color:var(--text-dim)">
+        <div>Hits: <span class="text-white tabular-nums">${entry.hits}</span></div>
+        <div>Tokens: <span class="text-white tabular-nums">${entry.tokens}</span></div>
+        <div>Router mass: <span class="text-white tabular-nums">${entry.mass}</span></div>
+        <div>Drop risk: <span class="${entry.risk === 'High' ? 'text-[var(--danger)]' : entry.risk === 'Medium' ? 'text-[var(--warm)]' : 'text-[var(--good)]'}">${entry.risk}</span></div>
+      </div>
+    `;
+    tt.classList.add('visible');
+    positionTooltip(e);
+  }
+
+  function positionTooltip(e) {
+    const tt = document.getElementById('tooltip');
+    const x = e.clientX + 14;
+    const y = e.clientY + 14;
+    tt.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+    tt.style.top = Math.min(y, window.innerHeight - 120) + 'px';
+  }
+
+  function hideTooltip() { document.getElementById('tooltip').classList.remove('visible'); }
+
+  function toggleSelect(entry) {
+    const k = key(entry);
+    selected.has(k) ? selected.delete(k) : selected.add(k);
+    renderAtlas();
+  }
+
+  function toggleMask(entry) {
+    const k = key(entry);
+    masked.has(k) ? masked.delete(k) : masked.add(k);
+    renderAtlas();
+  }
+
+  function showDetail(entry) {
+    document.getElementById('detail-empty').classList.add('hidden');
+    document.getElementById('detail-content').classList.remove('hidden');
+    const domain = DOMAINS[entry.domain];
+    document.getElementById('d-layer').textContent = `L${entry.layer}`;
+    document.getElementById('d-expert').textContent = `E${entry.expert}`;
+    const pill = document.getElementById('d-domain-pill');
+    pill.textContent = domain.label;
+    pill.style.background = domain.color + '22';
+    pill.style.color = domain.color;
+    document.getElementById('d-hits').textContent = entry.hits;
+    document.getElementById('d-tokens').textContent = entry.tokens;
+    document.getElementById('d-mass').textContent = entry.mass;
+    const riskEl = document.getElementById('d-risk');
+    riskEl.textContent = entry.risk;
+    riskEl.style.color = entry.risk === 'High' ? 'var(--danger)' : entry.risk === 'Medium' ? 'var(--warm)' : 'var(--good)';
+    const prompts = ["safety_medical_01", "safety_legal_03"].slice(0, entry.domain === 'safety' ? 2 : 1);
+    document.getElementById('d-prompts').innerHTML = prompts.map(p =>
+      `<div class="text-[10px] px-2 py-1 rounded border" style="border-color:var(--line); color:var(--text-dim)">${p}</div>`
+    ).join('');
+  }
+
+  function updateSelectionSummary() {
+    const el = document.getElementById('selection-summary');
+    const btn = document.getElementById('mask-btn');
+    if (selected.size === 0) {
+      el.textContent = 'Hover a card for details. Click to select, double-click to mask.';
+      el.style.color = 'var(--text-dim)';
+      btn.disabled = true;
+      btn.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+      el.innerHTML = `<span style="color:var(--accent)">${selected.size} selected</span> · double-click any to mask, or use the button`;
+      btn.disabled = false;
+      btn.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+  }
+
+  function renderLegend() {
+    document.getElementById('legend').innerHTML = Object.entries(DOMAINS).map(([k, v]) => `
+      <div class="flex items-center gap-1.5">
+        <div class="legend-dot" style="background:${v.color}"></div>
+        <span style="color:var(--text-dim)">${v.label}</span>
+      </div>
+    `).join('');
+  }
+
+  document.getElementById('filter-pills').addEventListener('click', (e) => {
+    if (!e.target.classList.contains('filter-pill')) return;
+    document.querySelectorAll('.filter-pill').forEach(b => b.classList.remove('active'));
+    e.target.classList.add('active');
+    activeFilter = e.target.dataset.filter;
+    renderAtlas();
+  });
+
+  document.getElementById('search').addEventListener('input', (e) => {
+    activeSearch = e.target.value;
+    renderAtlas();
+  });
+
+  document.querySelectorAll('input[name="color"]').forEach(r => {
+    r.addEventListener('change', (e) => { colorMode = e.target.value; renderAtlas(); });
+  });
+
+  document.getElementById('threshold').addEventListener('input', (e) => {
+    threshold = parseInt(e.target.value);
+    document.getElementById('threshold-val').textContent = threshold;
+    renderAtlas();
+  });
+
+  document.getElementById('mask-btn').addEventListener('click', () => {
+    selected.forEach(k => masked.add(k));
+    selected.clear();
+    renderAtlas();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (document.getElementById('tooltip').classList.contains('visible')) positionTooltip(e);
+  });
+
+  renderLegend();
+  renderAtlas();
+</script>
+</body>
+</html>

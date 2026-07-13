@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Design B v2 — Clean Atlas</title>
+<style>
+  :root {
+    --canvas: #07090e;
+    --panel: #0e1316;
+    --panel-raised: #131a1e;
+    --line: rgba(255,255,255,0.06);
+    --line-strong: rgba(255,255,255,0.12);
+    --accent: #33e0e8;
+    --warm: #ebb85e;
+    --good: #70dba0;
+    --danger: #ff5964;
+
+    /* Expert type colors — semantic, plain-English */
+    --t-code: #4fc3f7;       /* Blue — coding */
+    --t-math: #ab47bc;       /* Purple — math */
+    --t-reason: #66bb6a;     /* Green — reasoning */
+    --t-lang: #ff8a65;        /* Orange — multilingual */
+    --t-safety: #ef5350;     /* Red — safety/refusal */
+    --t-creative: #ce93d8;   /* Magenta — creative writing */
+    --t-knowledge: #8d6e63;  /* Brown — factual knowledge */
+    --t-tools: #26c6da;      /* Teal — agentic/tools */
+    --t-dead: #363c40;       /* Dark gray — dead/unused */
+    --t-general: #78909c;    /* Blue-gray — general/fallback */
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--canvas);
+    color: #e8edf0;
+    font-family: -apple-system, system-ui, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  .app {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    height: 100vh;
+  }
+
+  /* ══ Top bar ══ */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 7px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar h1 { font-size: 13px; font-weight: 600; }
+  .kicker { font-size: 8px; font-weight: 700; letter-spacing: 1.2px; color: var(--accent); text-transform: uppercase; font-family: monospace; }
+  .badges { display: flex; gap: 5px; }
+  .badge { font-size: 9px; padding: 2px 6px; border-radius: 3px; border: 1px solid; font-family: monospace; }
+  .badge.blue { color: #6ab; border-color: #3af8; background: rgba(68,170,238,0.1); }
+  .badge.amber { color: var(--warm); border-color: rgba(235,184,94,0.3); background: rgba(235,184,94,0.1); }
+  .badge.cyan { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.1); }
+
+  /* ══ Workflow pills ══ */
+  .workflow-pills { display: flex; gap: 4px; flex: 1; }
+  .wfp {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 12px; font-size: 10px;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+    color: #4a5558;
+  }
+  .wfp .num { font-family: monospace; font-size: 8px; font-weight: 700; }
+  .wfp.active { color: #e8edf0; background: rgba(51,224,232,0.08); border-color: var(--accent); }
+  .wfp.active .num { color: var(--accent); }
+  .wfp.done { color: var(--good); background: rgba(112,219,160,0.06); border-color: rgba(112,219,160,0.2); }
+  .wfp.done .num { color: var(--good); }
+
+  /* ══ Main layout ══ */
+  .main {
+    display: grid;
+    grid-template-columns: 52px 280px 1fr 300px;
+    overflow: hidden;
+  }
+
+  /* ══ Dock ══ */
+  .dock {
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    padding: 6px 0;
+    gap: 1px;
+  }
+  .dock-item {
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    padding: 9px 0; cursor: pointer; color: #4a5558; font-size: 7px;
+    border-left: 2px solid transparent;
+    text-align: center;
+  }
+  .dock-item .di { font-size: 17px; line-height: 1; }
+  .dock-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(51,224,232,0.04); }
+  .dock-item:hover:not(.active) { color: #7a888d; }
+  .dock-spacer { flex: 1; }
+
+  /* ══ Left drawer ══ */
+  .drawer {
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 10px;
+  }
+  .card {
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 8px;
+  }
+  .card-title {
+    font-size: 10px; font-weight: 600; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 5px;
+    text-transform: uppercase; letter-spacing: 0.5px; color: #7a888d;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 9px; border-radius: 5px; font-size: 10px;
+    border: 1px solid var(--line-strong); background: rgba(255,255,255,0.02);
+    color: #e8edf0; cursor: pointer;
+  }
+  .btn-primary {
+    background: rgba(51,224,232,0.12); border-color: var(--accent); color: var(--accent);
+    justify-content: center; width: 100%; font-weight: 600;
+  }
+  .btn-warm { background: rgba(235,184,94,0.1); border-color: var(--warm); color: var(--warm); }
+  .btn-row { display: flex; gap: 3px; flex-wrap: wrap; }
+  .btn-sm { padding: 3px 7px; font-size: 9px; }
+  .field-row { display: flex; justify-content: space-between; font-size: 10px; color: #7a888d; padding: 2px 0; }
+  .field-row .val { color: #e8edf0; font-family: monospace; }
+  select.styled { width: 100%; background: var(--panel-raised); border: 1px solid var(--line); color: #e8edf0; padding: 3px 6px; border-radius: 4px; font-size: 10px; margin-bottom: 5px; }
+  textarea.styled { width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--line); color: #e8edf0; padding: 5px; border-radius: 4px; font-size: 10px; height: 44px; resize: none; }
+
+  /* ══ Center: Atlas ══ */
+  .center {
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .atlas-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 14px; border-bottom: 1px solid var(--line);
+  }
+  .atlas-toolbar .title { font-size: 12px; font-weight: 600; }
+  .atlas-toolbar .summary { font-size: 10px; color: #7a888d; margin-top: 1px; }
+  .toolbar-controls { display: flex; gap: 6px; align-items: center; }
+  .toolbar-controls select { background: var(--panel-raised); border: 1px solid var(--line); color: #e8edf0; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+  .seg { display: flex; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .seg button { background: none; border: none; color: #4a5558; padding: 2px 7px; font-size: 9px; cursor: pointer; border-right: 1px solid var(--line); }
+  .seg button:last-child { border-right: none; }
+  .seg button.active { color: var(--accent); background: rgba(51,224,232,0.08); }
+
+  /* ══ Atlas legend (above grid, slim) ══ */
+  .legend {
+    display: flex; gap: 10px; padding: 4px 14px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    font-size: 9px; color: #7a888d; align-items: center;
+  }
+  .legend-item { display: flex; align-items: center; gap: 3px; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+  .legend-sep { color: var(--line-strong); margin: 0 2px; }
+  .legend-intensity {
+    margin-left: auto; display: flex; align-items: center; gap: 4px;
+  }
+  .intensity-bar {
+    width: 60px; height: 6px; border-radius: 3px;
+    background: linear-gradient(to right, rgba(255,255,255,0.1), var(--accent));
+  }
+
+  /* ══ Atlas grid ══ */
+  .atlas-scroll { flex: 1; overflow: auto; padding: 10px; }
+  .atlas-row { display: flex; align-items: center; gap: 3px; margin-bottom: 4px; }
+  .atlas-label { width: 26px; text-align: right; font-size: 9px; color: #4a5558; font-family: monospace; }
+  .cell { width: 22px; height: 22px; border-radius: 3px; cursor: pointer; border: 1px solid rgba(0,0,0,0.3); }
+  .cell.selected { border-color: white; border-width: 2px; box-shadow: 0 0 5px rgba(255,255,255,0.3); }
+  .cell.masked { position: relative; }
+  .cell.masked::after {
+    content: ""; position: absolute; inset: 2px; border-radius: 2px;
+    background: repeating-linear-gradient(45deg, transparent 0 2px, rgba(0,0,0,0.4) 2px 4px);
+  }
+  .cell.locked { border-color: var(--good); border-width: 2px; }
+  .cell.drop { border-color: var(--danger); border-style: dashed; border-width: 2px; }
+
+  /* ══ Bottom: Compare (only when comparison exists) ══ */
+  .compare-tray {
+    border-top: 1px solid var(--line); background: var(--panel);
+    height: 140px; display: flex; overflow: hidden;
+  }
+  .compare-info { width: 180px; padding: 8px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .compare-info .label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #7a888d; }
+  .compare-info .summary { font-size: 9px; color: #7a888d; line-height: 1.3; flex: 1; }
+  .pill { font-size: 9px; font-family: monospace; padding: 2px 6px; border-radius: 8px; border: 1px solid; display: inline-block; }
+  .pill.cyan { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.08); }
+  .pill.amber { color: var(--warm); border-color: rgba(235,184,94,0.3); background: rgba(235,184,94,0.08); }
+  .compare-cols { display: flex; gap: 6px; flex: 1; padding: 6px; overflow: hidden; }
+  .compare-col { flex: 1; border-radius: 5px; background: rgba(0,0,0,0.2); border: 1px solid var(--line); padding: 6px 8px; overflow: auto; }
+  .compare-col-title { font-size: 9px; font-weight: 600; color: #7a888d; margin-bottom: 3px; display: flex; align-items: center; gap: 4px; }
+  .compare-col-title .dot { width: 5px; height: 5px; border-radius: 50%; }
+  .compare-col-title.cyan .dot { background: var(--accent); }
+  .compare-col-title.amber .dot { background: var(--warm); }
+  .compare-col-body { font-size: 10px; color: #7a888d; line-height: 1.4; }
+
+  /* ══ Right drawer ══ */
+  .right-drawer {
+    background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 10px;
+  }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 14px; }
+  .stat-row { display: flex; justify-content: space-between; font-size: 10px; color: #7a888d; }
+  .stat-row .val { color: var(--accent); font-family: monospace; }
+  .toggle-row { display: flex; gap: 10px; margin-top: 5px; }
+  .toggle { display: flex; align-items: center; gap: 4px; font-size: 9px; color: #4a5558; }
+  .toggle-box { width: 13px; height: 13px; border-radius: 3px; border: 1px solid var(--line-strong); background: rgba(255,255,255,0.02); }
+  .toggle.on .toggle-box { background: var(--accent); border-color: var(--accent); }
+  .toggle.on { color: #e8edf0; }
+  input.styled { width: 100%; background: var(--panel-raised); border: 1px solid var(--line); color: #e8edf0; padding: 4px 6px; border-radius: 4px; font-size: 10px; }
+
+  /* ══ Expert type label ══ */
+  .type-label {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 9px; font-weight: 600; padding: 2px 7px;
+    border-radius: 3px; border: 1px solid; font-family: monospace;
+  }
+
+  /* ══ Domain list ══ */
+  .domain-list { font-size: 10px; }
+  .domain-item {
+    display: flex; justify-content: space-between; padding: 2px 0;
+    color: #7a888d;
+  }
+  .domain-item .val { font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Top bar -->
+  <div class="topbar">
+    <div>
+      <div class="kicker">Expert Lab</div>
+      <h1>Expert Review</h1>
+    </div>
+    <div class="badges">
+      <span class="badge cyan">qwen3_5_moe · 128e</span>
+      <span class="badge amber">JANGTQ3</span>
+      <span class="badge blue">14.2 GB</span>
+    </div>
+    <div class="workflow-pills">
+      <div class="wfp done"><span class="num">01</span> Trace</div>
+      <div class="wfp done"><span class="num">02</span> Atlas</div>
+      <div class="wfp active"><span class="num">03</span> Mask · Compare</div>
+      <div class="wfp"><span class="num">04</span> Prune Plan</div>
+      <div class="wfp"><span class="num">05</span> BF16/F16 Prune</div>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- Dock -->
+    <div class="dock">
+      <div class="dock-item active"><div class="di">∿</div>Trace</div>
+      <div class="dock-item"><div class="di">⊙</div>Expert</div>
+      <div class="dock-item"><div class="di">⊘</div>Mask</div>
+      <div class="dock-item"><div class="di">✂</div>Prune</div>
+      <div class="dock-spacer"></div>
+      <div class="dock-item"><div class="di">⟳</div>Runs</div>
+    </div>
+
+    <!-- Left drawer: Trace tab (the only one that needs its own panel) -->
+    <div class="drawer" id="drawer">
+      <!-- Trace card — the only thing that belongs here -->
+      <div class="card">
+        <div class="card-title">Run Trace</div>
+        <select class="styled">
+          <option>Balanced 150 (150 prompts)</option>
+          <option>Fast 50 (50 prompts)</option>
+          <option>Deep 500 (500 prompts)</option>
+          <option>Smoke 21 (21 prompts)</option>
+        </select>
+        <div class="btn-row" style="margin-bottom:6px;">
+          <button class="btn btn-sm">⬇ Import JSONL</button>
+          <button class="btn btn-sm">⬆ Export</button>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <div class="field-row" style="flex:1;">Max tokens <span class="val">64</span></div>
+          <div class="field-row" style="flex:1;">Trace cap <span class="val">2048</span></div>
+        </div>
+        <div class="toggle" style="font-size:10px; margin:4px 0;">
+          <div class="toggle-box" style="background:var(--accent); border-color:var(--accent);"></div>
+          Token trace
+        </div>
+        <button class="btn btn-primary" style="margin-top:4px;">∿ Run Expert Review</button>
+      </div>
+
+      <!-- Live prompt (optional, only if you want quick single-prompt probing) -->
+      <div class="card">
+        <div class="card-title">Quick Probe</div>
+        <textarea class="styled" placeholder="Type a prompt to see which experts light up…"></textarea>
+        <button class="btn btn-primary" style="margin-top:4px;">⚡ Light Experts</button>
+      </div>
+    </div>
+
+    <!-- Center: legend + atlas + compare -->
+    <div class="center">
+      <div class="atlas-toolbar">
+        <div>
+          <div class="title">Atlas</div>
+          <div class="summary">150 prompts · 768 experts · 12 hot · 8 dead · 4 masked</div>
+        </div>
+        <div class="toolbar-controls">
+          <select><option>Color: Type</option><option>Color: Intensity</option><option>Color: Hits</option><option>Color: Router Mass</option></select>
+          <div class="seg">
+            <button class="active">All</button>
+            <button>Hot</button>
+            <button>Dead</button>
+            <button>Masked</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-code);"></div>Coding</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-math);"></div>Math</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-reason);"></div>Reasoning</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-lang);"></div>Language</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-safety);"></div>Safety</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-creative);"></div>Creative</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-knowledge);"></div>Knowledge</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-tools);"></div>Tools</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--t-dead);"></div>Dead</div>
+        <div class="legend-intensity">
+          <span style="color:#4a5558;">lo</span>
+          <div class="intensity-bar"></div>
+          <span style="color:#4a5558;">hi</span>
+        </div>
+      </div>
+
+      <!-- Atlas grid -->
+      <div class="atlas-scroll" id="atlasGrid"></div>
+
+      <!-- Compare tray -->
+      <div class="compare-tray">
+        <div class="compare-info">
+          <div class="label">Compare</div>
+          <div class="summary" id="compareSummary">Suite eval: 150 prompts · baseline 88% · masked 84% · mean delta 0.032</div>
+          <div>
+            <span class="pill cyan">● base 42.1 t/s</span>
+            <span class="pill amber">● mask 48.3 t/s</span>
+          </div>
+        </div>
+        <div class="compare-cols">
+          <div class="compare-col">
+            <div class="compare-col-title cyan"><div class="dot"></div> Baseline</div>
+            <div class="compare-col-body">The sky appears blue due to Rayleigh scattering, which disperses shorter blue wavelengths more than longer red wavelengths throughout the atmosphere…</div>
+          </div>
+          <div class="compare-col">
+            <div class="compare-col-title amber"><div class="dot"></div> Masked</div>
+            <div class="compare-col-body">The sky appears blue due to Rayleigh scattering of sunlight in the atmosphere. Shorter wavelengths scatter more than longer ones…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right drawer: Expert detail -->
+    <div class="right-drawer">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span style="font-family:monospace; font-size:13px; font-weight:600;">L04 / E47</span>
+          <span class="type-label" style="color:var(--t-code); border-color:rgba(79,195,247,0.4); background:rgba(79,195,247,0.1);">
+            <div class="legend-dot" style="background:var(--t-code); width:7px; height:7px;"></div>
+            Coding
+          </span>
+        </div>
+        <div class="stat-grid">
+          <div class="stat-row">Hits <span class="val">847</span></div>
+          <div class="stat-row">Frequency <span class="val">0.342</span></div>
+          <div class="stat-row">Mass <span class="val">0.093</span></div>
+          <div class="stat-row">Rank <span class="val">2.41</span></div>
+          <div class="stat-row">Tokens <span class="val">12.4k</span></div>
+          <div class="stat-row">Confidence <span class="val">0.78</span></div>
+        </div>
+        <input class="styled" style="margin-top:6px;" value="code-runner" placeholder="Your label">
+      </div>
+
+      <div class="card">
+        <div class="card-title">Actions</div>
+        <div class="toggle-row" style="flex-wrap:wrap; gap:6px;">
+          <div class="toggle on" style="background:rgba(255,89,100,0.08); padding:3px 8px; border-radius:5px; border:1px solid rgba(255,89,100,0.2);">
+            <div class="toggle-box" style="background:var(--danger); border-color:var(--danger);"></div>
+            Disable
+          </div>
+          <div class="toggle" style="background:rgba(255,255,255,0.02); padding:3px 8px; border-radius:5px; border:1px solid var(--line-strong);">
+            <div class="toggle-box"></div>
+            Drop
+          </div>
+          <div class="toggle" style="background:rgba(255,255,255,0.02); padding:3px 8px; border-radius:5px; border:1px solid var(--line-strong);">
+            <div class="toggle-box"></div>
+            Lock Keep
+          </div>
+        </div>
+        <div class="field-row" style="margin-top:5px;">Top-K override <span class="val">trained</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Domains</div>
+        <div class="domain-list">
+          <div class="domain-item" style="color:var(--t-code);"><span>Coding</span><span class="val">12 · 3.2×</span></div>
+          <div class="domain-item" style="color:var(--t-reason);"><span>Reasoning</span><span class="val">4 · 1.8×</span></div>
+          <div class="domain-item" style="color:var(--t-tools);"><span>Agentic</span><span class="val">2 · 1.4×</span></div>
+        </div>
+      </div>
+
+      <!-- Prune actions — only one card, consolidated -->
+      <div class="card" style="border-color:rgba(235,184,94,0.15);">
+        <div class="card-title" style="color:var(--warm);">Prune</div>
+        <div style="font-size:9px; color:#7a888d; margin-bottom:5px;">2 drop · 4 locked · A/B required</div>
+        <div class="field-row" style="margin-bottom:4px;">Keep per layer <span class="val">96 / 128</span></div>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-warm" style="flex:1;">✂ Use Plan for Prune</button>
+        </div>
+        <button class="btn btn-sm" style="width:100%; margin-top:3px;">⬆ Export Plan</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Expert type assignments (simplified, deterministic)
+const types = ['coding','math','reasoning','lang','safety','creative','knowledge','tools','general','dead'];
+const typeColors = {
+  coding: '#4fc3f7', math: '#ab47bc', reasoning: '#66bb6a', lang: '#ff8a65',
+  safety: '#ef5350', creative: '#ce93d8', knowledge: '#8d6e63', tools: '#26c6da',
+  general: '#78909c', dead: '#363c40'
+};
+
+const grid = document.getElementById('atlasGrid');
+const layers = 28, experts = 128;
+
+for (let l = 0; l < layers; l++) {
+  const row = document.createElement('div');
+  row.className = 'atlas-row';
+  const label = document.createElement('div');
+  label.className = 'atlas-label';
+  label.textContent = 'L' + String(l).padStart(2,'0');
+  row.appendChild(label);
+  for (let e = 0; e < experts; e++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.layer = l;
+    cell.dataset.expert = e;
+
+    // Intensity: random 0-1
+    const intensity = Math.random();
+
+    // Dead?
+    if (intensity < 0.06) {
+      cell.style.background = typeColors.dead;
+      cell.dataset.type = 'dead';
+      cell.dataset.intensity = '0';
+    } else {
+      // Type assignment: mostly distributed, some experts are specialists
+      let typeIdx;
+      if (intensity > 0.88) typeIdx = Math.floor(Math.random() * 8); // hot → real type
+      else typeIdx = 8; // general
+
+      // Some experts are specialists regardless of intensity
+      if (e < 12) typeIdx = e % 8;
+      if (l === 4 && e === 47) typeIdx = 0; // coding
+      if (l === 10 && e === 22) typeIdx = 2; // reasoning
+      if (l === 7 && e === 3) typeIdx = 9; // dead
+
+      const type = types[typeIdx];
+      const baseColor = typeColors[type] || typeColors.general;
+      cell.dataset.type = type;
+      cell.dataset.intensity = intensity.toFixed(2);
+
+      // Color = type, opacity = intensity
+      const alpha = 0.15 + intensity * 0.75;
+      cell.style.background = hexToRgba(baseColor, alpha);
+      cell.style.borderColor = hexToRgba(baseColor, 0.3 + intensity * 0.3);
+
+      // Tooltip
+      cell.title = `L${l} E${e} · ${type} · intensity ${intensity.toFixed(2)}`;
+    }
+
+    // States
+    if (l === 4 && e === 47) cell.classList.add('selected');
+    if (l === 4 && (e === 47 || e === 12)) cell.classList.add('masked');
+    if (l === 7 && e === 3) cell.classList.add('drop');
+    if (l === 10 && e === 22) cell.classList.add('locked');
+
+    // Click → show info in right rail (simulated)
+    cell.addEventListener('click', function() {
+      document.querySelectorAll('.cell.selected').forEach(c => c.classList.remove('selected'));
+      cell.classList.add('selected');
+    });
+
+    row.appendChild(cell);
+  }
+  grid.appendChild(row);
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// Dock switching (visual only)
+document.querySelectorAll('.dock-item').forEach(item => {
+  item.addEventListener('click', function() {
+    document.querySelectorAll('.dock-item').forEach(i => i.classList.remove('active'));
+    this.classList.add('active');
+  });
+});
+</script>
+</body>
+</html>

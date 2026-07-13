@@ -428,17 +428,32 @@ final class AppSettingsTests: XCTestCase {
     @MainActor
     func test_wizardCoordinator_canActivate_gates_unreached_steps() {
         // Functional test for the canActivate logic the sidebar defers to
-        // post-M176. Fresh plan → only .source reachable. iter-81 flagged
-        // that the sidebar wasn't respecting this gate; iter-109 M176 fixed
-        // that AND this test pins the canActivate contract so a future
-        // refactor of the gate logic can't silently let locked steps through.
+        // post-M176. Fresh plan → only .source reachable. PR3: expert steps
+        // also require workflowMode == .expertLab.
         let coord = WizardCoordinator()
         XCTAssertTrue(coord.canActivate(.source))
-        XCTAssertFalse(coord.canActivate(.architecture),
-            "Architecture must be unreachable until step-1-complete")
+        XCTAssertEqual(coord.visibleSteps(), [.source, .profile, .run, .verify])
+        XCTAssertFalse(coord.canActivate(.expertReview),
+            "Expert Review must be unreachable in Convert mode / without MoE")
+        XCTAssertFalse(coord.canActivate(.pruneReview),
+            "Prune Review must be unreachable until Expert Review exports a plan")
         XCTAssertFalse(coord.canActivate(.profile))
         XCTAssertFalse(coord.canActivate(.run))
         XCTAssertFalse(coord.canActivate(.verify))
+
+        // MoE + Convert: still no expert activation.
+        coord.plan.sourceURL = URL(fileURLWithPath: "/tmp/moe")
+        coord.plan.detected = .init(
+            modelType: "qwen3_5_moe", isMoE: true, numExperts: 64, isVL: false,
+            dtype: .bf16, totalBytes: 0, shardCount: 1
+        )
+        coord.plan.workflowMode = .convert
+        XCTAssertFalse(coord.canActivate(.expertReview))
+
+        // MoE + Expert Lab: expert review opens.
+        coord.plan.workflowMode = .expertLab
+        XCTAssertTrue(coord.canActivate(.expertReview))
+        XCTAssertTrue(coord.canActivate(.profile))
     }
 
     // MARK: - Iter 108 M62: remaining inert settings labeled "not yet implemented"

@@ -231,6 +231,184 @@ final class JANGTQModelEndToEndTests: XCTestCase {
         return dir
     }
 
+    private func buildHybridTraceModel() throws -> URL {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(
+            "jangtq_hybrid_trace_\(UUID().uuidString)"
+        )
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let hidden = 64
+        let inter = 32
+        let nHeads = 4
+        let nKVHeads = 2
+        let headDim = 16
+        let linearKeyHeads = 4
+        let linearValueHeads = 4
+        let linearHeadDim = 16
+        let linearValueDim = linearValueHeads * linearHeadDim
+        let linearConvDim = (2 * linearKeyHeads * linearHeadDim) + linearValueDim
+        let linearKernel = 4
+        let nExperts = 4
+        let K = 2
+        let vocab = 32
+        let gs = 16
+
+        let cfg: [String: Any] = [
+            "model_type": "qwen3_5_moe",
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "tie_word_embeddings": false,
+            "text_config": [
+                "model_type": "qwen3_5_moe_text",
+                "hidden_size": hidden,
+                "intermediate_size": 128,
+                "moe_intermediate_size": inter,
+                "num_hidden_layers": 2,
+                "num_attention_heads": nHeads,
+                "num_key_value_heads": nKVHeads,
+                "head_dim": headDim,
+                "vocab_size": vocab,
+                "num_experts": nExperts,
+                "num_experts_per_tok": K,
+                "first_k_dense_replace": 0,
+                "layer_types": ["linear_attention", "full_attention"],
+                "linear_num_key_heads": linearKeyHeads,
+                "linear_num_value_heads": linearValueHeads,
+                "linear_key_head_dim": linearHeadDim,
+                "linear_value_head_dim": linearHeadDim,
+                "linear_conv_kernel_dim": linearKernel,
+                "norm_topk_prob": true,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 0.25,
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: cfg)
+            .write(to: dir.appendingPathComponent("config.json"))
+
+        let jangCfg: [String: Any] = [
+            "version": 2, "weight_format": "mxtq", "profile": "JANGTQ_2L",
+            "source_model": ["name": "QwenHybrid", "architecture": "qwen3_5_moe_text"],
+            "mxtq_seed": 42,
+            "mxtq_bits": ["routed_expert": 2, "attention": 8],
+            "quantization": ["group_size": gs, "bits_default": 2, "method": "affine+mxtq"],
+        ]
+        try JSONSerialization.data(withJSONObject: jangCfg)
+            .write(to: dir.appendingPathComponent("jang_config.json"))
+
+        var tensors: [(String, String, [Int], Data)] = []
+        tensors.append(contentsOf: affine8Triplet(
+            base: "language_model.model.embed_tokens",
+            outFeatures: vocab, inFeatures: hidden,
+            groupSize: gs, fillQ: 1, fillScale: 0.01
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "language_model.lm_head",
+            outFeatures: vocab, inFeatures: hidden,
+            groupSize: gs, fillQ: 1, fillScale: 0.01
+        ))
+        tensors.append(makeNorm("language_model.model.norm.weight", dim: hidden))
+
+        for layer in 0..<2 {
+            let root = "language_model.model.layers.\(layer)"
+            tensors.append(makeNorm("\(root).input_layernorm.weight", dim: hidden))
+            tensors.append(makeNorm("\(root).post_attention_layernorm.weight", dim: hidden))
+
+            let moePrefix = "\(root).mlp"
+            for e in 0..<nExperts {
+                tensors.append(contentsOf: tqTriplet(
+                    base: "\(moePrefix).experts.\(e).gate_proj",
+                    outFeatures: inter, packedIn: hidden / 16
+                ))
+                tensors.append(contentsOf: tqTriplet(
+                    base: "\(moePrefix).experts.\(e).up_proj",
+                    outFeatures: inter, packedIn: hidden / 16
+                ))
+                tensors.append(contentsOf: tqTriplet(
+                    base: "\(moePrefix).experts.\(e).down_proj",
+                    outFeatures: hidden, packedIn: inter / 16
+                ))
+            }
+            tensors.append((
+                "\(moePrefix).gate.weight", "F16", [nExperts, hidden],
+                halvesToData([Float](repeating: 0.0, count: nExperts * hidden))
+            ))
+        }
+
+        let linearPrefix = "language_model.model.layers.0.linear_attn"
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(linearPrefix).in_proj_qkv",
+            outFeatures: linearConvDim, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(linearPrefix).in_proj_z",
+            outFeatures: linearValueDim, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(linearPrefix).in_proj_a",
+            outFeatures: linearValueHeads, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(linearPrefix).in_proj_b",
+            outFeatures: linearValueHeads, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(linearPrefix).out_proj",
+            outFeatures: hidden, inFeatures: linearValueDim, groupSize: gs
+        ))
+        tensors.append((
+            "\(linearPrefix).conv1d.weight", "F16", [linearConvDim, 1, linearKernel],
+            halvesToData([Float](repeating: 0.0, count: linearConvDim * linearKernel))
+        ))
+        tensors.append((
+            "\(linearPrefix).dt_bias", "F16", [linearValueHeads],
+            halvesToData([Float](repeating: 0.0, count: linearValueHeads))
+        ))
+        tensors.append((
+            "\(linearPrefix).A_log", "F16", [linearValueHeads],
+            halvesToData([Float](repeating: 0.0, count: linearValueHeads))
+        ))
+        tensors.append(makeNorm("\(linearPrefix).norm.weight", dim: linearHeadDim))
+
+        let fullPrefix = "language_model.model.layers.1.self_attn"
+        tensors.append(makeNorm("\(fullPrefix).q_norm.weight", dim: nHeads * headDim))
+        tensors.append(makeNorm("\(fullPrefix).k_norm.weight", dim: nKVHeads * headDim))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(fullPrefix).q_proj",
+            outFeatures: nHeads * headDim, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(fullPrefix).k_proj",
+            outFeatures: nKVHeads * headDim, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(fullPrefix).v_proj",
+            outFeatures: nKVHeads * headDim, inFeatures: hidden, groupSize: gs
+        ))
+        tensors.append(contentsOf: affine8Triplet(
+            base: "\(fullPrefix).o_proj",
+            outFeatures: hidden, inFeatures: nHeads * headDim, groupSize: gs
+        ))
+
+        try writeShard(
+            url: dir.appendingPathComponent("model-00001-of-00001.safetensors"),
+            tensors: tensors
+        )
+
+        let sidecar: [(String, String, [Int], Data)] = [
+            ("signs.\(hidden).42", "F32", [hidden], floatsToData([Float](repeating: 1.0, count: hidden))),
+            ("signs.\(inter).42", "F32", [inter], floatsToData([Float](repeating: 1.0, count: inter))),
+            ("codebook.\(hidden).2", "F32", [4], floatsToData([0, 0, 0, 0])),
+            ("codebook.\(inter).2", "F32", [4], floatsToData([0, 0, 0, 0])),
+        ]
+        try writeShard(
+            url: dir.appendingPathComponent("jangtq_runtime.safetensors"),
+            tensors: sidecar
+        )
+
+        return dir
+    }
+
     func testFullModelForwardPass() throws {
         let dir = try buildModel()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -287,5 +465,182 @@ final class JANGTQModelEndToEndTests: XCTestCase {
 
         model.reset()
         XCTAssertEqual(model.cache.currentLength, 0)
+    }
+
+    func testHybridModelRecordsTraceForLinearAndFullAttentionLayers() throws {
+        let dir = try buildHybridTraceModel()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let bundle = try JANGTQLoader(device: device).load(from: dir)
+        let ctx = try MetalContext()
+        let model = try JANGTQModel(bundle: bundle, context: ctx, maxSeqLen: 8, moePrefix: "mlp")
+
+        XCTAssertEqual(model.modelPrefix, "language_model.model")
+        XCTAssertEqual(model.layers.map { $0.attention.kind }, ["linear_attention", "full_attention"])
+        if case .full(let fullAttention) = model.layers[1].attention {
+            XCTAssertEqual(fullAttention.ropeDim, 4)
+        } else {
+            XCTFail("expected full_attention dispatch")
+        }
+
+        let collector = JANGExpertTraceCollector()
+        _ = try model.forward(
+            tokenId: 0,
+            position: 0,
+            traceConfig: JANGExpertTraceConfig(emitTokenTrace: true, maxTraceTokens: 8),
+            traceCollector: collector,
+            traceTokenIndex: 0
+        )
+
+        let records = collector.snapshot()
+        XCTAssertEqual(records.map(\.layer), [0, 1])
+        XCTAssertTrue(records.allSatisfy { $0.selectedExperts.count == 2 })
+        XCTAssertEqual(model.cache.currentLength, 1)
+    }
+
+    func testVLMQwenHybridResolvesPrefixAndDispatchesLinearAttention() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(
+            "jangtq_vlm_prefix_\(UUID().uuidString)"
+        )
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+
+        let hidden = 64
+        let linearKeyHeads = 4
+        let linearValueHeads = 4
+        let linearHeadDim = 16
+        let linearValueDim = linearValueHeads * linearHeadDim
+        let linearConvDim = (2 * linearKeyHeads * linearHeadDim) + linearValueDim
+        let linearKernel = 4
+        let vocab = 16
+        let cfg: [String: Any] = [
+            "model_type": "qwen3_5_moe",
+            "text_config": [
+                "model_type": "qwen3_5_moe_text",
+                "hidden_size": hidden,
+                "intermediate_size": 128,
+                "moe_intermediate_size": 32,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "head_dim": 16,
+                "vocab_size": vocab,
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "first_k_dense_replace": 0,
+                "layer_types": ["linear_attention"],
+                "linear_num_key_heads": linearKeyHeads,
+                "linear_num_value_heads": linearValueHeads,
+                "linear_key_head_dim": linearHeadDim,
+                "linear_value_head_dim": linearHeadDim,
+                "linear_conv_kernel_dim": linearKernel,
+                "rms_norm_eps": 1e-5,
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: cfg)
+            .write(to: dir.appendingPathComponent("config.json"))
+
+        let jangCfg: [String: Any] = [
+            "version": 2,
+            "weight_format": "mxtq",
+            "source_model": ["name": "QwenVLM", "architecture": "qwen3_5_moe_text"],
+            "mxtq_seed": 42,
+            "mxtq_bits": ["routed_expert": 4, "attention": 8],
+            "quantization": ["group_size": 16, "bits_default": 4],
+        ]
+        try JSONSerialization.data(withJSONObject: jangCfg)
+            .write(to: dir.appendingPathComponent("jang_config.json"))
+
+        let config = try JANGModelConfig.load(from: dir)
+        func buffer(_ byteCount: Int) throws -> MTLBuffer {
+            guard let b = device.makeBuffer(length: byteCount, options: .storageModeShared) else {
+                throw JANGError.bufferAllocationFailed(byteCount)
+            }
+            return b
+        }
+        func affine(_ base: String, outFeatures: Int, inFeatures: Int) throws -> JANGTQAffineWeight {
+            let groupSize = 16
+            return JANGTQAffineWeight(
+                basePath: base,
+                bits: 8,
+                groupSize: groupSize,
+                inFeatures: inFeatures,
+                outFeatures: outFeatures,
+                qweight: try buffer(outFeatures * (inFeatures / 4) * MemoryLayout<UInt32>.stride),
+                scales: try buffer(outFeatures * (inFeatures / groupSize) * MemoryLayout<Float16>.stride),
+                biases: try buffer(outFeatures * (inFeatures / groupSize) * MemoryLayout<Float16>.stride)
+            )
+        }
+
+        let embed = try affine(
+            "language_model.model.embed_tokens",
+            outFeatures: vocab,
+            inFeatures: hidden
+        )
+        let head = try affine(
+            "language_model.lm_head",
+            outFeatures: vocab,
+            inFeatures: hidden
+        )
+        let linearPrefix = "language_model.model.layers.0.linear_attn"
+        let bundle = JANGTQModelBundle(
+            config: config,
+            weights: [:],
+            affineWeights: [
+                "language_model.model.embed_tokens": embed,
+                "language_model.lm_head": head,
+                "\(linearPrefix).in_proj_qkv": try affine(
+                    "\(linearPrefix).in_proj_qkv",
+                    outFeatures: linearConvDim,
+                    inFeatures: hidden
+                ),
+                "\(linearPrefix).in_proj_z": try affine(
+                    "\(linearPrefix).in_proj_z",
+                    outFeatures: linearValueDim,
+                    inFeatures: hidden
+                ),
+                "\(linearPrefix).in_proj_a": try affine(
+                    "\(linearPrefix).in_proj_a",
+                    outFeatures: linearValueHeads,
+                    inFeatures: hidden
+                ),
+                "\(linearPrefix).in_proj_b": try affine(
+                    "\(linearPrefix).in_proj_b",
+                    outFeatures: linearValueHeads,
+                    inFeatures: hidden
+                ),
+                "\(linearPrefix).out_proj": try affine(
+                    "\(linearPrefix).out_proj",
+                    outFeatures: hidden,
+                    inFeatures: linearValueDim
+                ),
+            ],
+            halfTensors: [
+                "language_model.model.norm.weight": try buffer(hidden * MemoryLayout<Float16>.stride),
+                "language_model.model.layers.0.input_layernorm.weight": try buffer(hidden * MemoryLayout<Float16>.stride),
+                "language_model.model.layers.0.post_attention_layernorm.weight": try buffer(hidden * MemoryLayout<Float16>.stride),
+                "\(linearPrefix).conv1d.weight": try buffer(linearConvDim * linearKernel * MemoryLayout<Float16>.stride),
+                "\(linearPrefix).dt_bias": try buffer(linearValueHeads * MemoryLayout<Float16>.stride),
+                "\(linearPrefix).A_log": try buffer(linearValueHeads * MemoryLayout<Float16>.stride),
+                "\(linearPrefix).norm.weight": try buffer(linearHeadDim * MemoryLayout<Float16>.stride),
+            ],
+            sidecar: JANGTQRuntimeSidecar(signs: [:], codebooks: [:]),
+            nStackedGroups: 0
+        )
+
+        let ctx = try MetalContext()
+        let model = try JANGTQModel(bundle: bundle, context: ctx, maxSeqLen: 8)
+        XCTAssertEqual(model.modelPrefix, "language_model.model")
+        XCTAssertEqual(model.layers[0].attention.kind, "linear_attention")
+        if case .linear(let block) = model.layers[0].attention {
+            XCTAssertEqual(block.convDim, linearConvDim)
+            XCTAssertEqual(block.valueDim, linearValueDim)
+        } else {
+            XCTFail("expected linear_attention dispatch")
+        }
     }
 }

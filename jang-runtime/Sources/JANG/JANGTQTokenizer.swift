@@ -49,6 +49,12 @@ public struct JANGTQChatMessage {
 }
 
 public final class JANGTQTokenizer {
+    public enum ChatTemplateStyle: Sendable, Equatable {
+        case minimax
+        case qwenIM
+        case roleNewline
+    }
+
     public let inner: JANGTokenizer
 
     /// All token IDs that should terminate generation. For MiniMax M2.7
@@ -62,6 +68,8 @@ public final class JANGTQTokenizer {
     public let endOfTurn: Int?      // [e~[ — eos / end-of-turn
     public let thinkStart: Int?     // <think>
     public let thinkEnd: Int?       // </think>
+    public let chatTemplateStyle: ChatTemplateStyle
+    public let startsWithThinking: Bool
 
     /// Default system message from the MiniMax chat template.
     public let defaultSystemPrompt: String
@@ -69,6 +77,9 @@ public final class JANGTQTokenizer {
     public init(modelDir: URL) throws {
         let tokPath = modelDir.appendingPathComponent("tokenizer.json")
         let tk = try JANGTokenizer(tokenizerPath: tokPath)
+        let tokCfgPath = modelDir.appendingPathComponent("tokenizer_config.json")
+        let tokCfg = (try? Data(contentsOf: tokCfgPath))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
 
         // Look up MiniMax special tokens by name. The base JANGTokenizer
         // segments added tokens before BPE so `encode("[e~[")` returns a
@@ -107,6 +118,15 @@ public final class JANGTQTokenizer {
         self.thinkStart = thinkStartID
         self.thinkEnd = thinkEndID
         self.stopTokenIds = stops
+        let chatTemplate = tokCfg["chat_template"] as? String ?? ""
+        if chatTemplate.contains("]~!b[") || chatTemplate.contains("]~b]") || chatTemplate.isEmpty && bosBeginID != nil && turnMarkerID != nil {
+            self.chatTemplateStyle = .minimax
+        } else if chatTemplate.contains("<|im_start|>") {
+            self.chatTemplateStyle = .qwenIM
+        } else {
+            self.chatTemplateStyle = .roleNewline
+        }
+        self.startsWithThinking = chatTemplate.contains("<think>")
         self.defaultSystemPrompt =
             "You are a helpful assistant. Your name is MiniMax-M2.7 and is built by MiniMax."
     }
@@ -121,7 +141,38 @@ public final class JANGTQTokenizer {
         messages: [JANGTQChatMessage],
         system: String? = nil,
         addGenerationPrompt: Bool = true,
-        startWithThink: Bool = true
+        startWithThink: Bool? = nil
+    ) -> [Int] {
+        switch chatTemplateStyle {
+        case .minimax:
+            return applyMiniMaxChatTemplate(
+                messages: messages,
+                system: system,
+                addGenerationPrompt: addGenerationPrompt,
+                startWithThink: startWithThink ?? true
+            )
+        case .qwenIM:
+            return applyQwenIMChatTemplate(
+                messages: messages,
+                system: system,
+                addGenerationPrompt: addGenerationPrompt,
+                startWithThink: startWithThink ?? startsWithThinking
+            )
+        case .roleNewline:
+            return applyRoleNewlineChatTemplate(
+                messages: messages,
+                system: system,
+                addGenerationPrompt: addGenerationPrompt,
+                startWithThink: startWithThink ?? startsWithThinking
+            )
+        }
+    }
+
+    private func applyMiniMaxChatTemplate(
+        messages: [JANGTQChatMessage],
+        system: String?,
+        addGenerationPrompt: Bool,
+        startWithThink: Bool
     ) -> [Int] {
         var tokens: [Int] = []
 
@@ -174,9 +225,101 @@ public final class JANGTQTokenizer {
         return tokens
     }
 
+    private func applyQwenIMChatTemplate(
+        messages: [JANGTQChatMessage],
+        system: String?,
+        addGenerationPrompt: Bool,
+        startWithThink: Bool
+    ) -> [Int] {
+        var tokens: [Int] = []
+
+        if let system, !system.isEmpty {
+            if let imStart = inner.imStartId { tokens.append(imStart) }
+            tokens.append(contentsOf: inner.encode("system\n\(system)"))
+            if let imEnd = inner.imEndId { tokens.append(imEnd) }
+            tokens.append(contentsOf: inner.encode("\n"))
+        }
+
+        for msg in messages {
+            if let imStart = inner.imStartId { tokens.append(imStart) }
+            tokens.append(contentsOf: inner.encode("\(msg.role)\n\(msg.content)"))
+            if let imEnd = inner.imEndId { tokens.append(imEnd) }
+            tokens.append(contentsOf: inner.encode("\n"))
+        }
+
+        if addGenerationPrompt {
+            if let imStart = inner.imStartId { tokens.append(imStart) }
+            tokens.append(contentsOf: inner.encode("assistant\n"))
+            if startWithThink, let think = thinkStart {
+                tokens.append(think)
+                tokens.append(contentsOf: inner.encode("\n"))
+            }
+        }
+
+        return tokens
+    }
+
+    private func applyRoleNewlineChatTemplate(
+        messages: [JANGTQChatMessage],
+        system: String?,
+        addGenerationPrompt: Bool,
+        startWithThink: Bool
+    ) -> [Int] {
+        var tokens: [Int] = []
+
+        if let system, !system.isEmpty {
+            tokens.append(contentsOf: inner.encode("system\n\(system)"))
+            if let eot = endOfTurn { tokens.append(eot) }
+            tokens.append(contentsOf: inner.encode("\n"))
+        }
+
+        for msg in messages {
+            tokens.append(contentsOf: inner.encode("\(msg.role)\n\(msg.content)"))
+            if let eot = endOfTurn { tokens.append(eot) }
+            tokens.append(contentsOf: inner.encode("\n"))
+        }
+
+        if addGenerationPrompt {
+            tokens.append(contentsOf: inner.encode("assistant\n"))
+            if startWithThink, let think = thinkStart {
+                tokens.append(think)
+                tokens.append(contentsOf: inner.encode("\n"))
+            }
+        }
+
+        return tokens
+    }
+
     public func encode(_ text: String) -> [Int] { inner.encode(text) }
     public func decode(_ ids: [Int]) -> String { inner.decode(ids) }
+    public func decodePreservingSpecialTokens(_ ids: [Int]) -> String {
+        inner.decodePreservingSpecialTokens(ids)
+    }
     public func decodeToken(_ id: Int) -> String { inner.decodeToken(id) }
+
+    public func tokenHasVisibleText(_ id: Int) -> Bool {
+        inner.decodeToken(id).unicodeScalars.contains { scalar in
+            !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                && !CharacterSet.controlCharacters.contains(scalar)
+        }
+    }
+
+    public var suppressedGenerationTokenIds: Set<Int> {
+        var suppressed = inner.specialTokenIdSet
+        stopTokenIds.forEach { suppressed.remove($0) }
+        if let thinkEnd { suppressed.remove(thinkEnd) }
+        return suppressed
+    }
+
+    public var leadingInvisibleGenerationTokenIds: Set<Int> {
+        var invisible: Set<Int> = []
+        for id in 0..<vocabSize where !tokenHasVisibleText(id) {
+            invisible.insert(id)
+        }
+        stopTokenIds.forEach { invisible.remove($0) }
+        if let thinkEnd { invisible.remove(thinkEnd) }
+        return invisible
+    }
 
     /// Strip `<think>...</think>` content from a decoded answer string.
     /// Used after generation to extract just the user-visible answer.

@@ -127,9 +127,41 @@ actor PythonRunner {
             Task.detached { await self.cancel() }
         }
 
-        // Drain stdout (logs, not yielded as ProgressEvents).
+        // M221: surface stdout as ProgressEvents instead of silently draining.
+        // Non-JSON lines (raw Python prints, jang-tools log lines that aren't
+        // JSONL progress events) are yielded as `info`-level messages so the
+        // UI can show them in the log pane or as status text even when the
+        // JSONL tick stream stalls. JSONL lines are parsed and yielded as
+        // structured events (phase/tick/message/done) so they work the same
+        // as stderr JSONL for tools that emit to either fd.
         let stdoutTask = Task.detached {
-            for try await _ in outPipe.fileHandleForReading.bytes.lines {}
+            let parser = JSONLProgressParser()
+            for try await line in outPipe.fileHandleForReading.bytes.lines {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                if let ev = parser.parse(line: line) {
+                    continuation.yield(ev)
+                } else {
+                    // Non-JSON line — figure the severity from prefix heuristics
+                    // so the UI renders it at the right level.
+                    let lower = trimmed.lowercased()
+                    let level: String
+                    if lower.hasPrefix("error") || lower.hasPrefix("[error")
+                        || lower.contains("traceback") {
+                        level = "error"
+                    } else if lower.hasPrefix("warn") || lower.hasPrefix("[warn")
+                        || lower.contains("warning") {
+                        level = "warn"
+                    } else {
+                        level = "info"
+                    }
+                    continuation.yield(ProgressEvent(
+                        ts: Date().timeIntervalSince1970,
+                        type: level == "error" ? .error : (level == "warn" ? .warn : .info),
+                        payload: .message(level: level, text: trimmed)
+                    ))
+                }
+            }
         }
 
         // Drain stderr — parser + lastErrTail are owned exclusively by this task

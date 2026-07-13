@@ -223,6 +223,39 @@ public final class JANGTokenizer {
 
     public var vocabSize: Int { return vocab.count + specialTokens.count }
 
+    public var specialTokenIdSet: Set<Int> { specialTokenIds }
+
+    /// Decode token IDs while preserving special-token text. This is useful for
+    /// runtime post-processing such as stripping generated `<think>...</think>`
+    /// blocks; regular `decode` intentionally hides those control tokens.
+    public func decodePreservingSpecialTokens(_ ids: [Int]) -> String {
+        var out = ""
+        var bytes: [UInt8] = []
+
+        func flushBytes() {
+            guard !bytes.isEmpty else { return }
+            out += String(bytes: bytes, encoding: .utf8)
+                ?? bytes.map({ String(UnicodeScalar($0)) }).joined()
+            bytes.removeAll(keepingCapacity: true)
+        }
+
+        for id in ids {
+            guard let token = reverseVocab[id] else { continue }
+            if specialTokenIds.contains(id) {
+                flushBytes()
+                out += token
+                continue
+            }
+            for char in token {
+                if let byte = byteDecoder[String(char)] {
+                    bytes.append(byte)
+                }
+            }
+        }
+        flushBytes()
+        return out
+    }
+
     // MARK: - BPE Implementation
 
     private func bpeEncode(_ text: String) -> [Int] {

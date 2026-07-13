@@ -51,17 +51,6 @@
                ReferencedContainer = "container:JANGStudio.xcodeproj">
             </BuildableReference>
          </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "FD45E52E59DA496351CA4E27"
-               BuildableName = "JANGStudioUITests.xctest"
-               BlueprintName = "JANGStudioUITests"
-               ReferencedContainer = "container:JANGStudio.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

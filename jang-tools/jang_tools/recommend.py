@@ -12,6 +12,7 @@ Output schema (JSON from `jang-tools recommend --model <dir> --json`):
     "family_class": "moe_hybrid_ssm",
     "param_count_billions": 35.0,
     "expert_count": 256,
+    "is_moe": true,
     "is_vl": false,
     "is_video_vl": false,
     "source_dtype": "bfloat16",
@@ -61,7 +62,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .inspect_source import _sniff_dtype, _is_moe, _JANGTQ_V1_WHITELIST
+from .inspect_source import (
+    _sniff_dtype,
+    _is_moe,
+    _JANGTQ_V1_WHITELIST,
+    _cfg_int,
+    _expert_count,
+)
 
 
 # ─────────────────────────── Architecture classification ────────────────────
@@ -157,8 +164,14 @@ def _estimate_params_billion(cfg: dict) -> float:
     hidden = int(cfg.get("hidden_size", 0) or text_cfg.get("hidden_size", 0) or 0)
     layers = int(cfg.get("num_hidden_layers", 0) or text_cfg.get("num_hidden_layers", 0) or 0)
     vocab = int(cfg.get("vocab_size", 0) or text_cfg.get("vocab_size", 0) or 0)
-    intermediate = int(cfg.get("intermediate_size", 0) or text_cfg.get("intermediate_size", 0) or 4 * hidden)
-    num_experts = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
+    num_experts = _expert_count(cfg)
+    moe_intermediate = _cfg_int(cfg, "moe_intermediate_size", "moe_ffn_hidden_size")
+    intermediate = int(
+        (moe_intermediate if num_experts > 1 else 0)
+        or cfg.get("intermediate_size", 0)
+        or text_cfg.get("intermediate_size", 0)
+        or 4 * hidden
+    )
 
     if hidden == 0 or layers == 0:
         return 0.0
@@ -255,12 +268,12 @@ _PROFILE_PROSE: dict[str, str] = {
 def _recommend_family(model_type: str, source_dtype: str) -> tuple[str, list[dict], str]:
     """Pick family (jang vs jangtq) + alternatives + reason."""
     is_whitelisted = model_type in _JANGTQ_V1_WHITELIST
-    is_dtype_ok = source_dtype in ("bfloat16", "float8_e4m3fn", "float8_e5m2")
+    is_dtype_ok = source_dtype in ("bfloat16", "float16", "float8_e4m3fn", "float8_e5m2")
     is_dtype_unknown = source_dtype == "unknown"
     if is_whitelisted and (is_dtype_ok or is_dtype_unknown):
         use_when = "You want 30% smaller output at similar quality — works because your architecture is whitelisted."
         if is_dtype_unknown:
-            use_when += " (Source dtype wasn't detected; JANGTQ needs BF16 or FP8.)"
+            use_when += " (Source dtype wasn't detected; JANGTQ needs BF16, FP16, or FP8.)"
         return (
             "jang",  # keep JANG as default to stay safe for beginners
             [{
@@ -274,7 +287,7 @@ def _recommend_family(model_type: str, source_dtype: str) -> tuple[str, list[dic
         "JANG is the only supported family for your architecture. "
         "JANGTQ currently supports Qwen 3.6 and MiniMax only."
     ) if not is_whitelisted else (
-        "JANGTQ requires a BF16 or FP8 source. Your source dtype isn't supported for JANGTQ yet."
+        "JANGTQ requires a BF16, FP16, or FP8 source. Your source dtype isn't supported for JANGTQ yet."
     )
     return ("jang", [], reason)
 
@@ -300,6 +313,21 @@ def _recommend_profile(family_class: str, expert_count: int, param_b: float) -> 
     elif family_class in ("vl_image", "vl_video"):
         alts.append({"profile": "JANG_4M", "use_when": "VL models benefit from the extra 8-bit attention JANG_4M provides."})
     return default, alts
+
+
+def _first_sentence(prose: str) -> str:
+    return prose.split(". ", 1)[0].strip().rstrip(".")
+
+
+def _summary_subject(class_prose: str) -> str:
+    first_sentence = _first_sentence(class_prose)
+    if not first_sentence:
+        return "a model"
+    if first_sentence[:2].lower() == "a ":
+        return "a " + first_sentence[2:]
+    if first_sentence[:3].lower() == "an ":
+        return "an " + first_sentence[3:]
+    return first_sentence[:1].lower() + first_sentence[1:]
 
 
 def _recommend_hadamard(profile: str) -> tuple[bool, str]:
@@ -394,7 +422,7 @@ def detect(model_path: Path) -> dict[str, Any]:
             f"{type(cfg).__name__}, expected a JSON object"
         )
     model_type = cfg.get("model_type") or (cfg.get("text_config", {}) or {}).get("model_type", "unknown")
-    expert_count = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
+    expert_count = _expert_count(cfg)
     is_vl = (model_path / "preprocessor_config.json").exists()
     is_video_vl = (model_path / "video_preprocessor_config.json").exists()
     source_dtype = _sniff_dtype(model_path)
@@ -465,8 +493,8 @@ def recommend(model_path: Path) -> dict[str, Any]:
     profile_desc = _PROFILE_PROSE.get(profile, "")
 
     beginner_summary = (
-        f"This is a {class_prose.split('.')[0].lower()}. "
-        f"We recommend profile {profile} — {profile_desc.split('.')[0].lower()}. "
+        f"This is {_summary_subject(class_prose)}. "
+        f"We recommend profile {profile} — {_first_sentence(profile_desc).lower()}. "
         f"{'You can switch to JANGTQ for extra compression; see alternatives below.' if family_alts else ''}"
     ).strip()
 

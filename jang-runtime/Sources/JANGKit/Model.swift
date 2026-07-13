@@ -72,6 +72,118 @@ extension JANGKit {
         }
     }
 
+    public typealias ExpertMask = JANGExpertMask
+    public typealias ExpertTraceConfig = JANGExpertTraceConfig
+    public typealias ExpertRouteRecord = JANGExpertRouteRecord
+
+    public struct ModelRuntimeInfo: Codable, Equatable, Sendable {
+        public let backend: String
+        public let runtimeMode: String
+        public let deviceName: String
+        public let deviceRecommendedMaxWorkingSetGB: Double?
+        public let metalEnabled: Bool
+        public let jangToolsVersion: String?
+        public let mlxVersion: String?
+        public let mlxLMVersion: String?
+        public let mlxVLMVersion: String?
+        public let sourceModelPath: String?
+        public let hookedMOELayers: Int?
+        public let expectedMOELayers: Int?
+        public let hookCoverageComplete: Bool?
+        public let maskApplied: Bool?
+        public let disabledExpertCount: Int?
+        public let topKOverride: Int?
+        public let notes: [String]
+
+        public init(
+            backend: String,
+            runtimeMode: String,
+            deviceName: String,
+            deviceRecommendedMaxWorkingSetGB: Double? = nil,
+            metalEnabled: Bool,
+            jangToolsVersion: String? = nil,
+            mlxVersion: String? = nil,
+            mlxLMVersion: String? = nil,
+            mlxVLMVersion: String? = nil,
+            sourceModelPath: String? = nil,
+            hookedMOELayers: Int? = nil,
+            expectedMOELayers: Int? = nil,
+            hookCoverageComplete: Bool? = nil,
+            maskApplied: Bool? = nil,
+            disabledExpertCount: Int? = nil,
+            topKOverride: Int? = nil,
+            notes: [String] = []
+        ) {
+            self.backend = backend
+            self.runtimeMode = runtimeMode
+            self.deviceName = deviceName
+            self.deviceRecommendedMaxWorkingSetGB = deviceRecommendedMaxWorkingSetGB
+            self.metalEnabled = metalEnabled
+            self.jangToolsVersion = jangToolsVersion
+            self.mlxVersion = mlxVersion
+            self.mlxLMVersion = mlxLMVersion
+            self.mlxVLMVersion = mlxVLMVersion
+            self.sourceModelPath = sourceModelPath
+            self.hookedMOELayers = hookedMOELayers
+            self.expectedMOELayers = expectedMOELayers
+            self.hookCoverageComplete = hookCoverageComplete
+            self.maskApplied = maskApplied
+            self.disabledExpertCount = disabledExpertCount
+            self.topKOverride = topKOverride
+            self.notes = notes
+        }
+    }
+
+    public struct ExpertLayerStats: Codable, Equatable, Sendable {
+        public let layer: Int
+        public let tokenCount: Int
+        public let hitCounts: [Int: Int]
+        public let probabilityMass: [Int: Float]
+
+        public init(
+            layer: Int,
+            tokenCount: Int,
+            hitCounts: [Int: Int],
+            probabilityMass: [Int: Float]
+        ) {
+            self.layer = layer
+            self.tokenCount = tokenCount
+            self.hitCounts = hitCounts
+            self.probabilityMass = probabilityMass
+        }
+    }
+
+    public struct ExpertRunResult: Sendable {
+        public let text: String
+        public let tokens: Int
+        public let elapsedSeconds: Double
+        public let tokensPerSecond: Double
+        public let finishReason: GenerationResult.FinishReason
+        public let layerStats: [ExpertLayerStats]
+        public let tokenTrace: [ExpertRouteRecord]?
+        public let runtimeInfo: ModelRuntimeInfo?
+
+        public init(
+            text: String,
+            tokens: Int,
+            elapsedSeconds: Double,
+            tokensPerSecond: Double,
+            finishReason: GenerationResult.FinishReason,
+            layerStats: [ExpertLayerStats],
+            tokenTrace: [ExpertRouteRecord]?,
+            runtimeInfo: ModelRuntimeInfo? = nil
+        ) {
+            self.text = text
+            self.tokens = tokens
+            self.elapsedSeconds = elapsedSeconds
+            self.tokensPerSecond = tokensPerSecond
+            self.finishReason = finishReason
+            self.layerStats = layerStats
+            self.tokenTrace = tokenTrace
+            self.runtimeInfo = runtimeInfo
+        }
+    }
+
     // MARK: - ModelError
 
     /// Errors surfaced by the high-level JANGKit API.
@@ -126,10 +238,14 @@ extension JANGKit {
         /// Model family: "jang" for standard models, "jangtq" for JANGTQ models.
         public nonisolated let family: String
 
-        private init(backend: Backend, modelURL: URL, family: String) {
+        /// Runtime/device identity for artifacts and UI diagnostics.
+        public nonisolated let runtimeInfo: ModelRuntimeInfo
+
+        private init(backend: Backend, modelURL: URL, family: String, runtimeInfo: ModelRuntimeInfo) {
             self.backend = backend
             self.modelURL = modelURL
             self.family = family
+            self.runtimeInfo = runtimeInfo
         }
 
         // MARK: - load
@@ -215,7 +331,15 @@ extension JANGKit {
             return Model(
                 backend: .jang(mxqModel: mxqModel, engine: engine, tokenizer: tokenizer),
                 modelURL: url,
-                family: "jang"
+                family: "jang",
+                runtimeInfo: ModelRuntimeInfo(
+                    backend: "jang",
+                    runtimeMode: "native_jang_metal",
+                    deviceName: metalDevice.device.name,
+                    deviceRecommendedMaxWorkingSetGB: Double(metalDevice.device.recommendedMaxWorkingSetSize) / (1024 * 1024 * 1024),
+                    metalEnabled: true,
+                    notes: ["Standard JANG tensors execute through native Metal kernels."]
+                )
             )
         }
 
@@ -262,7 +386,15 @@ extension JANGKit {
             return Model(
                 backend: .jangtq(generator: generator),
                 modelURL: url,
-                family: "jangtq"
+                family: "jangtq",
+                runtimeInfo: ModelRuntimeInfo(
+                    backend: "jangtq",
+                    runtimeMode: "native_jangtq_review_bundle",
+                    deviceName: context.device.name,
+                    deviceRecommendedMaxWorkingSetGB: Double(context.device.recommendedMaxWorkingSetSize) / (1024 * 1024 * 1024),
+                    metalEnabled: true,
+                    notes: ["JANGTQ matmul/decode kernels run on Metal; router selection and tracing use CPU bookkeeping."]
+                )
             )
         }
 
@@ -290,6 +422,30 @@ extension JANGKit {
                 )
             case .jangtq(let generator):
                 return try generateJANGTQ(generator: generator, userMessage: prompt, config: config)
+            }
+        }
+
+        /// Generate text while collecting native MoE router traces.
+        ///
+        /// V1 supports traced execution for JANGTQ MoE models loaded by the
+        /// Swift/Metal runtime. Standard JANG models keep using `generate`.
+        public func generateWithTrace(
+            prompt: String,
+            config: SamplingConfig = SamplingConfig(),
+            traceConfig: ExpertTraceConfig = ExpertTraceConfig()
+        ) async throws -> ExpertRunResult {
+            switch backend {
+            case .jang:
+                throw ModelError.generationFailed(
+                    "Expert tracing is available for JANGTQ MoE models only."
+                )
+            case .jangtq(let generator):
+                return try generateJANGTQWithTrace(
+                    generator: generator,
+                    userMessage: prompt,
+                    config: config,
+                    traceConfig: traceConfig
+                )
             }
         }
 
@@ -474,6 +630,31 @@ extension JANGKit {
             )
         }
 
+        private func generateJANGTQWithTrace(
+            generator: JANGTQGenerator,
+            userMessage: String,
+            config: SamplingConfig,
+            traceConfig: ExpertTraceConfig
+        ) throws -> ExpertRunResult {
+            let result = try generator.generateWithTrace(
+                userMessage: userMessage,
+                maxTokens: config.maxTokens,
+                traceConfig: traceConfig
+            )
+            let generation = result.generation
+            let trace = result.trace
+            return ExpertRunResult(
+                text: generation.text,
+                tokens: generation.outputTokens,
+                elapsedSeconds: generation.elapsedSec,
+                tokensPerSecond: generation.tokensPerSec,
+                finishReason: mapJANGTQStopReason(generation.stopReason),
+                layerStats: Self.buildLayerStats(from: trace),
+                tokenTrace: traceConfig.emitTokenTrace ? trace : nil,
+                runtimeInfo: runtimeInfo
+            )
+        }
+
         // MARK: - Helpers
 
         private func mapJANGTQStopReason(
@@ -483,6 +664,32 @@ extension JANGKit {
             case .stopToken: return .stop
             case .maxTokens: return .maxTokens
             case .error:     return .error
+            }
+        }
+
+        private static func buildLayerStats(
+            from trace: [ExpertRouteRecord]
+        ) -> [ExpertLayerStats] {
+            var tokenSets: [Int: Set<Int>] = [:]
+            var hits: [Int: [Int: Int]] = [:]
+            var mass: [Int: [Int: Float]] = [:]
+
+            for record in trace {
+                tokenSets[record.layer, default: []].insert(record.tokenIndex)
+                for (slot, expert) in record.selectedExperts.enumerated() {
+                    hits[record.layer, default: [:]][expert, default: 0] += 1
+                    let score = slot < record.scores.count ? record.scores[slot] : 1.0
+                    mass[record.layer, default: [:]][expert, default: 0] += score
+                }
+            }
+
+            return tokenSets.keys.sorted().map { layer in
+                ExpertLayerStats(
+                    layer: layer,
+                    tokenCount: tokenSets[layer]?.count ?? 0,
+                    hitCounts: hits[layer] ?? [:],
+                    probabilityMass: mass[layer] ?? [:]
+                )
             }
         }
     }

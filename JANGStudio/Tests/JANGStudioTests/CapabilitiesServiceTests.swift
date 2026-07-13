@@ -5,6 +5,7 @@ final class CapabilitiesServiceTests: XCTestCase {
     func test_frozen_has_known_content() {
         let f = Capabilities.frozen
         XCTAssertTrue(f.jangtqWhitelist.contains("qwen3_5_moe"))
+        XCTAssertTrue(f.jangtqWhitelist.contains("qwen3_5_moe_text"))
         XCTAssertTrue(f.jangtqWhitelist.contains("minimax_m2"))
         XCTAssertEqual(f.defaultBlockSize, 64)
         XCTAssertEqual(f.defaultMethod, "mse")

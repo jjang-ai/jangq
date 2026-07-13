@@ -43,6 +43,7 @@ def zaya1_vl_capabilities() -> dict:
     caps = CAPABILITIES.copy()
     caps["family"] = "zaya1_vl"
     caps["modality"] = "vision"
+    caps["reasoning_parser"] = None
     caps["supports_thinking"] = False
     return caps
 

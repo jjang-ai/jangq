@@ -22,8 +22,13 @@ __version__ = "2.5.31"
 __author__ = "Jinho Jang"
 __email__ = "eric@jangq.ai"
 
-# Core conversion
-from .convert import convert_model
+# Core conversion. Keep this optional so lightweight CLI commands such as
+# `inspect-source`, `validate`, and `prequant-prune-qwen-moe` do not require
+# converter-only extras until the user actually invokes conversion.
+try:
+    from .convert import convert_model
+except ImportError:
+    convert_model = None
 
 # Profiles and allocation
 from .allocate import (

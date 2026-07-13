@@ -26,8 +26,8 @@ classifiers = [
 dependencies = ["safetensors>=0.4", "numpy>=1.24", "tqdm>=4.60", "huggingface_hub>=0.20", "jinja2>=3.1"]
 
 [project.optional-dependencies]
-mlx = ["mlx>=0.31.2", "mlx-lm>=0.31.0"]
-vlm = ["mlx>=0.31.2", "mlx-lm>=0.31.0", "mlx-vlm>=0.1"]
+mlx = ["mlx>=0.31.2", "mlx-lm>=0.31.3"]
+vlm = ["mlx>=0.31.2", "mlx-lm>=0.31.3", "mlx-vlm>=0.6.3"]
 torch = ["torch>=2.0", "transformers>=4.40"]
 all = ["jang[mlx]", "jang[vlm]", "jang[torch]"]
 

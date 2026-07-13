@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Design C — Dashboard Grid</title>
+<style>
+  :root {
+    --canvas: #07090e;
+    --panel: #0e1316;
+    --panel-raised: #131a1e;
+    --line: rgba(255,255,255,0.08);
+    --line-strong: rgba(255,255,255,0.14);
+    --accent: #33e0e8;
+    --warm: #ebb85e;
+    --good: #70dba0;
+    --danger: #ff5964;
+    --text: #e8edf0;
+    --text-dim: #7a888d;
+    --text-faint: #4a5558;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--canvas);
+    color: var(--text);
+    font-family: -apple-system, system-ui, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+  }
+  .mono { font-family: 'SF Mono', monospace; }
+
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+
+  /* ── Slim header */
+  .header {
+    display: flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    gap: 12px;
+  }
+  .header h1 { font-size: 13px; font-weight: 600; }
+  .header .kicker { font-size: 8px; font-weight: 700; letter-spacing: 1.2px; color: var(--accent); text-transform: uppercase; font-family: monospace; }
+  .badges { display: flex; gap: 5px; }
+  .badge { font-size: 9px; padding: 2px 6px; border-radius: 4px; border: 1px solid; font-family: monospace; }
+  .badge.blue { color: #6ab; border-color: #3af8; background: rgba(68,170,238,0.12); }
+  .badge.amber { color: var(--warm); border-color: rgba(235,184,94,0.3); background: rgba(235,184,94,0.12); }
+  .badge.cyan { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.12); }
+
+  /* ── Workflow tab strip */
+  .workflow-tabs {
+    display: flex;
+    padding: 0 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .workflow-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: 11px;
+    color: var(--text-faint);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .workflow-tab .num { font-family: monospace; font-size: 9px; font-weight: 700; }
+  .workflow-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .workflow-tab.active .num { color: var(--accent); }
+  .workflow-tab.done { color: var(--good); }
+  .workflow-tab.done .num { color: var(--good); }
+  .workflow-tab.done::before { content: "✓"; font-size: 9px; color: var(--good); }
+
+  /* ── Main area: AT+right split */
+  .main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    overflow: hidden;
+  }
+  .at-area {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Toolbar */
+  .at-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .at-toolbar .title { font-size: 12px; font-weight: 600; }
+  .at-toolbar .summary { font-size: 10px; color: var(--text-dim); margin-top: 1px; }
+  .toolbar-controls { display: flex; gap: 6px; }
+  .toolbar-controls select { background: var(--panel-raised); border: 1px solid var(--line); color: var(--text); padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+  .seg { display: flex; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .seg button { background: none; border: none; color: var(--text-faint); padding: 2px 7px; font-size: 9px; cursor: pointer; border-right: 1px solid var(--line); }
+  .seg button:last-child { border-right: none; }
+  .seg button.active { color: var(--accent); background: rgba(51,224,232,0.1); }
+
+  /* ── AT content: atlas on top, horizontal control bar, compare on bottom */
+  .at-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .atlas-area {
+    flex: 1;
+    overflow: auto;
+    padding: 10px;
+  }
+  .atlas-row { display: flex; align-items: center; gap: 3px; margin-bottom: 4px; }
+  .atlas-label { width: 26px; text-align: right; font-size: 9px; color: var(--text-faint); font-family: monospace; }
+  .cell { width: 20px; height: 20px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.08); cursor: pointer; }
+  .cell.hot { background: rgba(235,184,94,0.35); }
+  .cell.hot-2 { background: rgba(235,184,94,0.65); }
+  .cell.normal { background: rgba(51,224,232,0.2); }
+  .cell.normal-2 { background: rgba(51,224,232,0.45); }
+  .cell.dead { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.04); }
+  .cell.masked { background: rgba(255,89,100,0.7); border-color: var(--danger); }
+  .cell.drop { background: rgba(160,100,220,0.6); }
+  .cell.locked { background: rgba(112,219,160,0.5); border-color: var(--good); }
+  .cell.selected { box-shadow: 0 0 5px rgba(255,255,255,0.3); border-color: white; }
+
+  /* ── Horizontal control bar (separates atlas from compare) */
+  .control-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 5px 14px;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-right: 10px;
+    border-right: 1px solid var(--line);
+  }
+  .control-group:last-child { border-right: none; }
+  .control-group label {
+    font-size: 9px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: monospace;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 3px 7px; border-radius: 4px; font-size: 10px;
+    border: 1px solid var(--line-strong); background: rgba(255,255,255,0.03);
+    color: var(--text); cursor: pointer;
+  }
+  .btn-primary { background: rgba(51,224,232,0.15); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .btn-warm { background: rgba(235,184,94,0.12); border-color: var(--warm); color: var(--warm); }
+  .btn-sm { padding: 2px 6px; font-size: 9px; }
+
+  /* ── Compare area (bottom of AT side) */
+  .compare-area {
+    height: 140px;
+    display: flex;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .compare-summary {
+    width: 200px;
+    padding: 8px;
+    border-right: 1px solid var(--line);
+  }
+  .compare-summary .label { font-size: 11px; font-weight: 600; margin-bottom: 3px; }
+  .compare-summary .summary-text { font-size: 9px; color: var(--text-dim); line-height: 1.3; margin-bottom: 5px; }
+  .pill { font-size: 9px; font-family: monospace; padding: 2px 6px; border-radius: 8px; border: 1px solid; display: inline-block; margin-bottom: 3px; }
+  .pill.cyan { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.1); }
+  .pill.amber { color: var(--warm); border-color: rgba(235,184,94,0.3); background: rgba(235,184,94,0.1); }
+  .compare-cols { display: flex; gap: 6px; flex: 1; padding: 6px; overflow: hidden; }
+  .compare-col { flex: 1; border-radius: 5px; background: rgba(0,0,0,0.2); border: 1px solid var(--line); padding: 6px; overflow: auto; }
+  .compare-col-title { font-size: 9px; font-weight: 600; color: var(--text-dim); margin-bottom: 3px; display: flex; align-items: center; gap: 3px; }
+  .compare-col-title .dot { width: 5px; height: 5px; border-radius: 50%; }
+  .compare-col-title.cyan .dot { background: var(--accent); }
+  .compare-col-title.amber .dot { background: var(--warm); }
+  .compare-col-body { font-size: 10px; color: var(--text-dim); line-height: 1.4; }
+
+  /* ── Right rail (experts + actions in tabs) */
+  .right-rail {
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .rail-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--line);
+  }
+  .rail-tab {
+    padding: 6px 12px;
+    font-size: 10px;
+    color: var(--text-faint);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .rail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .rail-content { flex: 1; overflow-y: auto; padding: 10px; }
+
+  /* ── Cards */
+  .card {
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 8px;
+  }
+  .card-title { font-size: 11px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 5px; }
+  .card-title .icon { color: var(--accent); }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 12px; }
+  .stat-row { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); }
+  .stat-row .val { color: var(--accent); font-family: monospace; }
+  .toggle-row { display: flex; gap: 10px; margin-top: 5px; }
+  .toggle { display: flex; align-items: center; gap: 4px; font-size: 9px; color: var(--text-faint); }
+  .toggle-box { width: 13px; height: 13px; border-radius: 3px; border: 1px solid var(--line-strong); background: rgba(255,255,255,0.03); }
+  .toggle.on .toggle-box { background: var(--accent); border-color: var(--accent); }
+  .toggle.on { color: var(--text); }
+  .field-row { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); padding: 2px 0; }
+  .field-row .val { color: var(--text); font-family: monospace; }
+  .btn-row { display: flex; gap: 3px; flex-wrap: wrap; }
+  input.styled { width: 100%; background: var(--panel-raised); border: 1px solid var(--line); color: var(--text); padding: 4px; border-radius: 4px; font-size: 10px; }
+  select.styled { width: 100%; background: var(--panel-raised); border: 1px solid var(--line); color: var(--text); padding: 3px; border-radius: 4px; font-size: 10px; margin-bottom: 5px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Slim header -->
+  <div class="header">
+    <div>
+      <div class="kicker">Expert Lab</div>
+      <h1>Expert Review</h1>
+    </div>
+    <div class="badges">
+      <span class="badge cyan">qwen3_5_moe</span>
+      <span class="badge amber">JANGTQ3</span>
+      <span class="badge blue">14.20 GB</span>
+    </div>
+    <div style="margin-left:auto; font-size:9px; color:var(--text-faint); font-family:monospace;">~/models/Qwen3-JANGTQ3-review</div>
+  </div>
+
+  <!-- Workflow tabs -->
+  <div class="workflow-tabs">
+    <div class="workflow-tab done"><span class="num">01</span> Trace</div>
+    <div class="workflow-tab done"><span class="num">02</span> Atlas</div>
+    <div class="workflow-tab active"><span class="num">03</span> Mask / Compare</div>
+    <div class="workflow-tab"><span class="num">04</span> Prune Plan</div>
+    <div class="workflow-tab"><span class="num">05</span> BF16 / F16 Prune</div>
+  </div>
+
+  <!-- Main: Atlas+Controls+Compare on left, Right rail on right -->
+  <div class="main">
+    <!-- AT side -->
+    <div class="at-area">
+      <!-- Atlas toolbar -->
+      <div class="at-toolbar">
+        <div>
+          <div class="title">Atlas</div>
+          <div class="summary">150 prompts · 768 experts · 12 hot · 8 dead</div>
+        </div>
+        <div class="toolbar-controls">
+          <select><option>Frequency</option><option>Router mass</option><option>Domain lift</option></select>
+          <div class="seg">
+            <button class="active">All</button>
+            <button>Active</button>
+            <button>Hot</button>
+            <button>Dead</button>
+            <button>Masked</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Atlas grid -->
+      <div class="at-content">
+        <div class="atlas-area" id="atlasGrid"></div>
+
+        <!-- Horizontal control bar (instead of left rail) -->
+        <div class="control-bar">
+          <div class="control-group">
+            <label>Suite</label>
+            <select style="background:var(--panel-raised); border:1px solid var(--line); color:var(--text); padding:2px 6px; border-radius:4px; font-size:10px;">
+              <option>Balanced 150</option>
+              <option>Fast 50</option>
+              <option>Deep 500</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label>Tokens</label>
+            <span class="mono" style="font-size:10px; color:var(--text);">64</span>
+            <label style="margin-left:6px;">Trace</label>
+            <span class="mono" style="font-size:10px; color:var(--text);">2048</span>
+          </div>
+          <div class="control-group">
+            <button class="btn btn-primary">∿ Run Trace</button>
+          </div>
+          <div class="control-group" style="margin-left:auto;">
+            <label>Selection</label>
+            <span style="font-size:9px; color:var(--text-dim);">24 exp · 3 layers</span>
+            <button class="btn btn-sm">⊘ Mask</button>
+            <button class="btn btn-sm">⊖ Drop</button>
+            <button class="btn btn-sm">🔒 Keep</button>
+          </div>
+          <div class="control-group">
+            <button class="btn btn-sm">⬆ Export Plan</button>
+            <button class="btn btn-sm btn-warm">✂ Use Plan</button>
+          </div>
+        </div>
+
+        <!-- Compare below atlas -->
+        <div class="compare-area">
+          <div class="compare-summary">
+            <div class="label">Compare</div>
+            <div class="summary-text">Suite eval · 150 prompts · baseline 88% · masked 84%</div>
+            <span class="pill cyan">● baseline 42.1 tok/s</span>
+            <span class="pill amber">● masked 48.3 tok/s</span>
+          </div>
+          <div class="compare-cols">
+            <div class="compare-col">
+              <div class="compare-col-title cyan"><div class="dot"></div> Baseline</div>
+              <div class="compare-col-body">The sky appears blue due to Rayleigh scattering, which disperses shorter blue wavelengths more than longer red wavelengths throughout the atmosphere…</div>
+            </div>
+            <div class="compare-col">
+              <div class="compare-col-title amber"><div class="dot"></div> Masked</div>
+              <div class="compare-col-body">The sky appears blue due to Rayleigh scattering of sunlight in the atmosphere. Shorter wavelengths scatter more than longer ones…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right rail with tabs -->
+    <div class="right-rail">
+      <div class="rail-tabs">
+        <div class="rail-tab active">⊙ Expert</div>
+        <div class="rail-tab">⊘ Mask</div>
+        <div class="rail-tab">✂ Prune</div>
+        <div class="rail-tab">⟳ Runs</div>
+      </div>
+      <div class="rail-content">
+        <!-- Expert tab -->
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <span class="mono" style="font-size:12px; font-weight:600;">L04 / E47</span>
+            <span class="badge amber">🔥 code-runner</span>
+          </div>
+          <div class="stat-grid">
+            <div class="stat-row">Hits <span class="val">847</span></div>
+            <div class="stat-row">Freq <span class="val">0.342</span></div>
+            <div class="stat-row">Mass <span class="val">0.093</span></div>
+            <div class="stat-row">Rank <span class="val">2.41</span></div>
+            <div class="stat-row">Tokens <span class="val">12.4k</span></div>
+            <div class="stat-row">Conf <span class="val">0.78</span></div>
+          </div>
+          <input class="styled" style="margin-top:5px;" value="code-runner" placeholder="Label">
+          <div class="toggle-row">
+            <div class="toggle on"><div class="toggle-box"></div> Disable</div>
+            <div class="toggle"><div class="toggle-box"></div> Drop</div>
+            <div class="toggle"><div class="toggle-box"></div> Lock</div>
+          </div>
+          <div class="field-row" style="margin-top:5px;">Top-K override <span class="val">trained</span></div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="font-size:10px;"><span class="icon">◊</span> Domains</div>
+          <div class="stat-row">coding <span class="val">12 · 3.2×</span></div>
+          <div class="stat-row">reasoning <span class="val">4 · 1.8×</span></div>
+          <div class="stat-row">agentic <span class="val">2 · 1.4×</span></div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="font-size:10px;"><span class="icon">∪</span> Coactivation</div>
+          <div class="stat-row">E12 <span class="val">15 · J 0.42</span></div>
+          <div class="stat-row">E89 <span class="val">8 · J 0.31</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const grid = document.getElementById('atlasGrid');
+const layers = 28, experts = 128;
+for (let l = 0; l < layers; l++) {
+  const row = document.createElement('div');
+  row.className = 'atlas-row';
+  const label = document.createElement('div');
+  label.className = 'atlas-label';
+  label.textContent = 'L' + String(l).padStart(2,'0');
+  row.appendChild(label);
+  for (let e = 0; e < experts; e++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const r = Math.random();
+    if (r < 0.06) cell.classList.add('dead');
+    else if (r < 0.12) cell.classList.add('hot-2');
+    else if (r < 0.22) cell.classList.add('hot');
+    else if (r < 0.5) cell.classList.add('normal-2');
+    else cell.classList.add('normal');
+    if (l === 4 && e === 47) { cell.classList.add('selected','masked'); }
+    if (l === 4 && e === 12) cell.classList.add('masked');
+    if (l === 7 && e === 3) cell.classList.add('drop');
+    if (l === 10 && e === 22) cell.classList.add('locked');
+    row.appendChild(cell);
+  }
+  grid.appendChild(row);
+}
+</script>
+</body>
+</html>

@@ -678,7 +678,7 @@ def test_mimo_v2_shared_capability_resolver_preserves_parser_and_cache_policy():
         "tool_parser": "xml_function",
         "think_in_template": False,
         "supports_tools": True,
-        "supports_thinking": True,
+        "supports_thinking": False,
         "family": "mimo_v2",
         "modality": "text",
         "modalities": {"text": True, "vision": False, "audio": False, "video": False},

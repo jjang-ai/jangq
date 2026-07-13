@@ -69,8 +69,8 @@ public final class JANGTQAttentionBlock {
     public let kFp32: MTLBuffer         // (nKVHeads * headDim,) fp32
     public let vFp32: MTLBuffer         // (nKVHeads * headDim,) fp32
     public let qHalfFull: MTLBuffer     // full qProj output, fp16 — includes gate if present
-    public let qHalf: MTLBuffer         // view of qHalfFull over queries only (first half when gated)
-    public let gateHalf: MTLBuffer?     // view of qHalfFull over gate only (second half), nil when no gate
+    public let qHalf: MTLBuffer         // (nHeads * headDim,) query half buffer
+    public let gateHalf: MTLBuffer?     // (nHeads * headDim,) gate half buffer, nil when no gate
     public let kHalf: MTLBuffer
     public let vHalf: MTLBuffer
     public let attnOut: MTLBuffer       // (nHeads * headDim,) fp16
@@ -180,32 +180,23 @@ public final class JANGTQAttentionBlock {
         self.kFp32      = try mkBuf(kvDim   * f32)
         self.vFp32      = try mkBuf(kvDim   * f32)
         self.qHalfFull  = try mkBuf(qOutDim * f16)
+        self.qHalf      = try mkBuf(qBase * f16)
         self.kHalf      = try mkBuf(kvDim   * f16)
         self.vHalf      = try mkBuf(kvDim   * f16)
         self.attnOut    = try mkBuf(qBase   * f16)
         self.oFp32      = try mkBuf(self.hidden * f32)
         self.oHalf      = try mkBuf(self.hidden * f16)
 
-        // `qHalf` = the first qBase entries of qHalfFull (the queries).
-        // `gateHalf` = the second qBase entries when attnOutputGate.
-        // Both are aliasing views over the same backing memory.
-        self.qHalf = dev.makeBuffer(
-            bytesNoCopy: qHalfFull.contents(), length: qBase * f16,
-            options: .storageModeShared, deallocator: nil
-        ) ?? qHalfFull
         if attnOutputGate {
-            self.gateHalf = dev.makeBuffer(
-                bytesNoCopy: qHalfFull.contents().advanced(by: qBase * f16),
-                length: qBase * f16, options: .storageModeShared, deallocator: nil
-            )
+            self.gateHalf = try mkBuf(qBase * f16)
         } else {
             self.gateHalf = nil
         }
     }
 
-    /// Run the entire attention block in ONE command buffer.
-    /// The blit-based KV cache append happens between the compute encoders
-    /// so we never have to sync to CPU mid-attention.
+    /// Run the attention block for a single decode token.
+    /// Qwen gated attention stays on Metal: q_proj is split per head into
+    /// query/gate buffers, SDPA is gated, then o_proj consumes the gated output.
     ///
     /// `position` is the absolute token position (0-indexed) — used as the
     /// KV cache slot index. The model passes the SAME position to every
@@ -224,7 +215,7 @@ public final class JANGTQAttentionBlock {
             throw JANGError.inferenceError("attn cb alloc failed")
         }
 
-        // === Compute encoder 1: norm + Q/K/V + cast + qk_norm + RoPE ===
+        // === Compute encoder 1: norm + Q/K/V + cast + optional gated-Q split + qk_norm + RoPE ===
         guard let enc1 = cb.makeComputeCommandEncoder() else {
             throw JANGError.inferenceError("attn enc1 alloc failed")
         }
@@ -245,12 +236,23 @@ public final class JANGTQAttentionBlock {
                        biasesBuf: vProj.biases, xBuf: normedX, yBuf: vFp32,
                        inFeatures: vProj.inFeatures, outFeatures: vProj.outFeatures,
                        groupSize: vProj.groupSize)
-        // Cast the FULL q output (queries + gate when attnOutputGate).
-        ops.castF32ToF16.encode(into: enc1, src: qFp32, dst: qHalfFull, count: Int(qProj.outFeatures))
+        if attnOutputGate {
+            ops.castF32ToF16.encode(into: enc1, src: qFp32, dst: qHalfFull, count: Int(qProj.outFeatures))
+        } else {
+            ops.castF32ToF16.encode(into: enc1, src: qFp32, dst: qHalf, count: nHeads * headDim)
+        }
         ops.castF32ToF16.encode(into: enc1, src: kFp32, dst: kHalf, count: nKVHeads * headDim)
         ops.castF32ToF16.encode(into: enc1, src: vFp32, dst: vHalf, count: nKVHeads * headDim)
-        // qNorm/kNorm apply to queries only (the first `nHeads * headDim` entries
-        // of qHalfFull; gateHalf is untouched by norm / RoPE).
+        if attnOutputGate, let gate = gateHalf {
+            ops.gatedQSplit.encode(
+                into: enc1,
+                qFull: qHalfFull,
+                q: qHalf,
+                gate: gate,
+                nHeads: nHeads,
+                headDim: headDim
+            )
+        }
         if let qN = qNorm {
             ops.headRMSNorm.encode(into: enc1, qk: qHalf, gamma: qN,
                                    nHeads: nHeads, headDim: headDim, eps: normEps)
@@ -260,9 +262,9 @@ public final class JANGTQAttentionBlock {
                                    nHeads: nKVHeads, headDim: headDim, eps: normEps)
         }
         ops.rope.encode(into: enc1, qk: qHalf, nHeads: nHeads, headDim: headDim,
-                        position: position, base: ropeBase)
+                        rotaryDim: ropeDim, position: position, base: ropeBase)
         ops.rope.encode(into: enc1, qk: kHalf, nHeads: nKVHeads, headDim: headDim,
-                        position: position, base: ropeBase)
+                        rotaryDim: ropeDim, position: position, base: ropeBase)
         enc1.endEncoding()
 
         // === Blit encoder: append K, V to cache at THIS token's position slot ===
@@ -273,38 +275,24 @@ public final class JANGTQAttentionBlock {
                                 position: position, kBuf: kHalf, vBuf: vHalf)
         blitEnc.endEncoding()
 
-        // === Compute encoder 2: SDPA + O proj + cast ===
+        // === Compute encoder 3: SDPA ===
         // SDPA reads positions [0..position] inclusive (current token included)
         let curLen = position + 1
-        guard let enc2 = cb.makeComputeCommandEncoder() else {
-            throw JANGError.inferenceError("attn enc2 alloc failed")
+        guard let enc3 = cb.makeComputeCommandEncoder() else {
+            throw JANGError.inferenceError("attn enc3 alloc failed")
         }
-        ops.sdpa.encode(into: enc2, q: qHalf,
+        ops.sdpa.encode(into: enc3, q: qHalf,
                         kCache: cache.keys[layerIndex], vCache: cache.values[layerIndex],
                         out: attnOut,
                         nHeads: nHeads, nKVHeads: nKVHeads, headDim: headDim,
                         curLen: curLen, maxSeq: cache.maxSeqLen)
-        enc2.endEncoding()
-
-        cb.commit()
-        cb.waitUntilCompleted()
-
-        // Qwen3-Next attn_output_gate: attnOut ← attnOut * sigmoid(gateHalf)
-        // elementwise per-(head, head_dim). Tiny so CPU is fine.
-        if attnOutputGate, let g = gateHalf {
-            let total = nHeads * headDim
-            let ap = attnOut.contents().bindMemory(to: Float16.self, capacity: total)
-            let gp = g.contents().bindMemory(to: Float16.self, capacity: total)
-            for i in 0..<total {
-                let s = 1.0 / (1.0 + Foundation.exp(-Float(gp[i])))
-                ap[i] = Float16(Float(ap[i]) * s)
-            }
-        }
-
-        // o_proj + cast done on a fresh encoder so we see the post-gate attnOut.
-        guard let cb2 = affine8.context.queue.makeCommandBuffer(),
-              let enc3 = cb2.makeComputeCommandEncoder() else {
-            throw JANGError.inferenceError("attn enc3 alloc failed")
+        if attnOutputGate, let gate = gateHalf {
+            ops.attentionGate.encode(
+                into: enc3,
+                attnOut: attnOut,
+                gate: gate,
+                count: nHeads * headDim
+            )
         }
         affine8.encode(into: enc3,
                        qweightBuf: oProj.qweight, scalesBuf: oProj.scales,
@@ -313,8 +301,8 @@ public final class JANGTQAttentionBlock {
                        groupSize: oProj.groupSize)
         ops.castF32ToF16.encode(into: enc3, src: oFp32, dst: oHalf, count: hidden)
         enc3.endEncoding()
-        cb2.commit()
-        cb2.waitUntilCompleted()
+        cb.commit()
+        cb.waitUntilCompleted()
 
         // NOTE: cache advance happens at the model level (one advance per
         // token, not per layer). We do NOT call cache.advance() here.

@@ -14,8 +14,10 @@ def test_inspect_source_prints_valid_json():
     )
     data = json.loads(r.stdout)
     assert data["model_type"] == "qwen3_5_moe"
+    assert "text_model_type" in data
     assert data["is_moe"] is True
     assert data["num_experts"] == 8
+    assert "num_experts_per_tok" in data
     assert data["dtype"] in ("bfloat16", "float16", "float8_e4m3fn", "unknown")
     assert "jangtq_compatible" in data
     assert data["jangtq_compatible"] is True   # qwen3_5_moe is in the v1 whitelist
@@ -33,6 +35,36 @@ def test_inspect_source_video_vl_false_for_non_video_fixture():
     assert data["is_video_vl"] is False
     assert "num_hidden_layers" in data
     assert data["num_hidden_layers"] == 2   # tiny_qwen fixture value
+
+
+def test_inspect_source_reads_nested_qwen36_text_config(tmp_path):
+    model_dir = tmp_path / "qwen36"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_moe",
+        "text_config": {
+            "model_type": "qwen3_5_moe_text",
+            "hidden_size": 2048,
+            "num_hidden_layers": 40,
+            "num_experts": 256,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 512,
+        },
+    }))
+
+    r = subprocess.run(
+        [sys.executable, "-m", "jang_tools", "inspect-source", "--json", str(model_dir)],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(r.stdout)
+    assert data["model_type"] == "qwen3_5_moe"
+    assert data["text_model_type"] == "qwen3_5_moe_text"
+    assert data["is_moe"] is True
+    assert data["num_experts"] == 256
+    assert data["num_hidden_layers"] == 40
+    assert data["num_experts_per_tok"] == 8
+    assert data["hidden_size"] == 2048
+    assert data["jangtq_compatible"] is True
 
 
 def test_inspect_source_missing_config_errors(tmp_path):

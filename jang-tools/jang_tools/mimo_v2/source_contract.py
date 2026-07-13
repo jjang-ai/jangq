@@ -73,7 +73,7 @@ def inspect_mimo_source(src_dir: str | Path) -> MiMoSourceContract:
         "unwired_modalities": ["vision", "audio"],
         "cache_type": "kv",
         "supports_tools": True,
-        "supports_thinking": True,
+        "supports_thinking": False,
         "reasoning_parser": "think_xml",
         "tool_parser": "xml_function",
         "tool_status": "template_uses_xml_function_tool_call",

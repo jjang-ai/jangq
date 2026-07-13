@@ -25,9 +25,21 @@ final class JSONLProgressParserTests: XCTestCase {
         XCTAssertEqual(v, 99)
     }
 
-    func test_tolerantOnMalformedLine() {
+    func test_ignoresPlainTextProgressLine() {
         let parser = JSONLProgressParser()
-        let ev = parser.parse(line: "not json")
+        let ev = parser.parse(line: "  Processing:  42%|████      | 42/100")
+        XCTAssertNil(ev)
+    }
+
+    func test_ignoresArgparseChoiceHelpLine() {
+        let parser = JSONLProgressParser()
+        let ev = parser.parse(line: "            {inspect,validate,estimate,convert,profile}")
+        XCTAssertNil(ev)
+    }
+
+    func test_tolerantOnMalformedJSONLine() {
+        let parser = JSONLProgressParser()
+        let ev = parser.parse(line: #"{"v":1,"type":"tick","#)
         guard case .parseError = ev?.payload else {
             return XCTFail("expected parseError, got \(String(describing: ev))")
         }

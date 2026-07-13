@@ -1,7 +1,7 @@
 // JANGStudio/JANGStudio/Runner/InferenceRunner.swift
 import Foundation
 
-struct InferenceResult: Codable, Equatable {
+struct InferenceResult: Codable, Equatable, Sendable {
     let text: String
     let tokens: Int
     let tokensPerSec: Double
@@ -19,7 +19,7 @@ struct InferenceResult: Codable, Equatable {
     }
 }
 
-struct InferenceError: Error, Equatable {
+struct InferenceError: Error, Equatable, Sendable {
     let message: String
     let code: Int32
 

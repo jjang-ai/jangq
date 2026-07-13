@@ -85,6 +85,7 @@ public struct JANGTQWeight: @unchecked Sendable {
     ///   stacked switch_mlp:  (n_experts, out_features, packed_in)
     public let packed: MTLBuffer
     public let packedShape: [Int]
+    public let logicalInFeatures: Int?
 
     /// Per-row norms (float16). Shape:
     ///   per-expert dense:    (out_features,)
@@ -95,7 +96,9 @@ public struct JANGTQWeight: @unchecked Sendable {
     public var isStacked: Bool { packedShape.count == 3 }
     public var nExperts: Int { isStacked ? packedShape[0] : 1 }
     public var outFeatures: Int { isStacked ? packedShape[1] : packedShape[0] }
-    public var inFeatures: Int { (isStacked ? packedShape[2] : packedShape[1]) * (32 / bits) }
+    public var inFeatures: Int {
+        logicalInFeatures ?? (isStacked ? packedShape[2] : packedShape[1]) * (32 / bits)
+    }
 }
 
 /// Loaded JANGTQ runtime sidecar — signs + codebooks indexed by their cache key.
@@ -180,11 +183,16 @@ public final class JANGTQLoader {
         // (TQ-quantized) AND .weight / .scales / .biases (MLX affine 8-bit) AND
         // standalone half tensors (norms, gate, etc.).
         let shards = try loadSafetensorsShards(from: directory)
+        let shouldShiftQwenNormWeights = Self.shouldShiftQwenNormWeights(
+            config: config,
+            shards: shards
+        )
 
         // TQ pending (per-expert)
         var pendingPacked: [String: (file: SafetensorsFile, info: TensorInfo)] = [:]
         var pendingNorms:  [String: (file: SafetensorsFile, info: TensorInfo)] = [:]
         var pendingBits:   [String: Int] = [:]
+        var pendingInFeatures: [String: Int] = [:]
 
         // Affine 8-bit pending
         var pendingAW: [String: (file: SafetensorsFile, info: TensorInfo)] = [:]
@@ -218,6 +226,24 @@ public final class JANGTQLoader {
                         }
                     }
                     pendingBits[base] = bitsValue
+                } else if name.hasSuffix(".tq_in_features") {
+                    let base = String(name.dropLast(".tq_in_features".count))
+                    let data = try shard.tensorData(name: name)
+                    var inFeaturesValue: Int = 0
+                    if info.dtype == "U8" || info.dtype == "I8" {
+                        inFeaturesValue = Int(data.first ?? 0)
+                    } else if info.dtype == "I32" || info.dtype == "U32" {
+                        inFeaturesValue = data.withUnsafeBytes { raw in
+                            Int(raw.load(as: Int32.self))
+                        }
+                    } else if info.dtype == "I64" || info.dtype == "U64" {
+                        inFeaturesValue = data.withUnsafeBytes { raw in
+                            Int(raw.load(as: Int64.self))
+                        }
+                    }
+                    if inFeaturesValue > 0 {
+                        pendingInFeatures[base] = inFeaturesValue
+                    }
                 } else if name.hasSuffix(".weight") && info.dtype == "U32" {
                     let base = String(name.dropLast(".weight".count))
                     pendingAW[base] = (shard, info)
@@ -229,7 +255,18 @@ public final class JANGTQLoader {
                     pendingAB[base] = (shard, info)
                 } else if info.dtype == "F16" || info.dtype == "BF16" {
                     // Plain half tensor (norms, gate Linear weight, etc.)
-                    halfBuffers[name] = try shard.makeMetalBuffer(name: name, device: device)
+                    if shouldShiftQwenNormWeights,
+                       Self.isQwenShiftedNormTensor(name: name, info: info) {
+                        halfBuffers[name] = try Self.makeShiftedHalfBuffer(
+                            shard: shard,
+                            name: name,
+                            info: info,
+                            device: device,
+                            delta: 1.0
+                        )
+                    } else {
+                        halfBuffers[name] = try shard.makeMetalBuffer(name: name, device: device)
+                    }
                 }
             }
         }
@@ -283,6 +320,30 @@ public final class JANGTQLoader {
         }
 
         var weights: [String: JANGTQWeight] = [:]
+
+        func inferredLogicalInFeatures(base: String, proj: String? = nil) -> Int? {
+            if let explicit = pendingInFeatures[base] {
+                return explicit
+            }
+            let model = config.model
+            let projection = proj ?? {
+                if base.hasSuffix(".gate_proj") { return "gate_proj" }
+                if base.hasSuffix(".up_proj") { return "up_proj" }
+                if base.hasSuffix(".down_proj") { return "down_proj" }
+                return ""
+            }()
+            guard base.contains(".switch_mlp.") || base.contains(".experts.") else {
+                return nil
+            }
+            if projection == "gate_proj" || projection == "up_proj" || projection == "w1" || projection == "w3" {
+                return model.hiddenSize > 0 ? model.hiddenSize : nil
+            }
+            if projection == "down_proj" || projection == "w2" {
+                let intermediate = model.moeIntermediateSize ?? model.intermediateSize
+                return intermediate > 0 ? intermediate : nil
+            }
+            return nil
+        }
 
         // 4. Build stacked switch_mlp tensors
         for (key, experts) in expertGroups {
@@ -353,6 +414,7 @@ public final class JANGTQLoader {
                 bits: bitsValue,
                 packed: packedBuf,
                 packedShape: [nExperts, outFeatures, packedIn],
+                logicalInFeatures: inferredLogicalInFeatures(base: stackedBase, proj: key.proj),
                 norms: normsBuf,
                 normsShape: [nExperts, outFeatures]
             )
@@ -369,6 +431,7 @@ public final class JANGTQLoader {
                 bits: bits,
                 packed: packedBuf,
                 packedShape: p.info.shape,
+                logicalInFeatures: inferredLogicalInFeatures(base: base),
                 norms: normsBuf,
                 normsShape: n.info.shape
             )
@@ -456,5 +519,84 @@ public final class JANGTQLoader {
     private struct GroupKey: Hashable {
         let prefix: String
         let proj: String
+    }
+
+    private static func shouldShiftQwenNormWeights(
+        config: JANGModelConfig,
+        shards: [SafetensorsFile]
+    ) -> Bool {
+        let modelType = config.model.modelType?.lowercased() ?? ""
+        let architecture = config.model.architectures?.joined(separator: " ").lowercased() ?? ""
+        let isQwenHybrid = modelType.contains("qwen3_5")
+            || modelType.contains("qwen3_next")
+            || architecture.contains("qwen3_5")
+            || architecture.contains("qwen3next")
+        guard isQwenHybrid else { return false }
+
+        for shard in shards {
+            for (name, info) in shard.tensors {
+                if name.contains("mtp.") {
+                    return true
+                }
+                if name.contains("conv1d.weight"),
+                   let last = info.shape.last,
+                   last != 1 {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func isQwenShiftedNormTensor(name: String, info: TensorInfo) -> Bool {
+        guard info.shape.count == 1 else { return false }
+        let suffixes = [
+            ".input_layernorm.weight",
+            ".post_attention_layernorm.weight",
+            "model.norm.weight",
+            ".q_norm.weight",
+            ".k_norm.weight",
+        ]
+        return suffixes.contains { name.hasSuffix($0) }
+    }
+
+    private static func makeShiftedHalfBuffer(
+        shard: SafetensorsFile,
+        name: String,
+        info: TensorInfo,
+        device: MTLDevice,
+        delta: Float
+    ) throws -> MTLBuffer {
+        let count = info.shape.reduce(1, *)
+        let outBytes = count * MemoryLayout<Float16>.stride
+        guard let buffer = device.makeBuffer(length: outBytes, options: .storageModeShared) else {
+            throw JANGError.bufferAllocationFailed(outBytes)
+        }
+        let dst = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+        let data = try shard.tensorData(name: name)
+        try data.withUnsafeBytes { raw in
+            if info.dtype == "F16" {
+                let src = raw.bindMemory(to: Float16.self)
+                guard src.count >= count else {
+                    throw JANGError.safetensorsError("Tensor \(name) is shorter than expected")
+                }
+                for i in 0..<count {
+                    dst[i] = Float16(Float(src[i]) + delta)
+                }
+            } else if info.dtype == "BF16" {
+                let src = raw.bindMemory(to: UInt16.self)
+                guard src.count >= count else {
+                    throw JANGError.safetensorsError("Tensor \(name) is shorter than expected")
+                }
+                for i in 0..<count {
+                    let bits = UInt32(src[i]) << 16
+                    let value = Float(bitPattern: bits)
+                    dst[i] = Float16(value + delta)
+                }
+            } else {
+                throw JANGError.invalidFormat("Cannot shift non-half tensor \(name) dtype=\(info.dtype)")
+            }
+        }
+        return buffer
     }
 }

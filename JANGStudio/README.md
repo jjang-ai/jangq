@@ -8,15 +8,20 @@ Download the latest `JANGStudio.dmg` from [Releases](https://github.com/jjang-ai
 
 ## What it does
 
-5-step wizard:
+Two product modes (sidebar filters to match):
 
-1. **Pick your model folder** (BF16, FP16, or FP8 HuggingFace directory)
-2. **Confirm the detected architecture** (dense vs MoE, MLA vs full attention, image-VL vs video-VL)
-3. **Choose a profile** — JANG (all architectures) or JANGTQ (Qwen 3.6 & MiniMax in v1)
-4. **Run** — live logs, phase progress, cancel if you need to
-5. **Verify** — 12-row post-convert checklist proves `jang_config.json`, tokenizer, chat template (inline / `.jinja` / `.json`), shards match the index, `generation_config.json`, and `num_hidden_layers > 0` all landed before you can finish
+### Convert (default — 4 steps)
 
-See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for step-by-step screenshots.
+1. **Source Model** — pick a HuggingFace folder (BF16 / FP16 / FP8); architecture is detected inline
+2. **Conversion Profile** — JANG (all arches) or JANGTQ (Qwen 3.6 & MiniMax in v1); Advanced overrides (force dtype / block size) live here
+3. **Build / Convert** — live logs, phase progress, cancel if you need to
+4. **Verify** — post-convert checklist proves `jang_config.json`, tokenizer, chat template, shards, etc.
+
+### Expert Lab (MoE only — 6 steps)
+
+Source → Expert Review → Prune Review → Profile → Build / Convert → Verify. On MoE sources, choose **Expert Lab** on Source to trace routing, mask/compare experts, hard-prune BF16/F16, then quantize the reviewed pruned source.
+
+See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for step-by-step walkthrough.
 
 ## System requirements
 
@@ -40,6 +45,7 @@ JANG works on every architecture. JANGTQ v1 supports `qwen3_5_moe` (Qwen 3.6) an
 ## Docs
 
 - [User Guide](docs/USER_GUIDE.md) — wizard walkthrough
+- [Design Direction](docs/DESIGN_DIRECTION.md) — canonical UI style reference for the compact pro-noir Expert Lab direction
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — common errors
 - [Contributing](docs/CONTRIBUTING.md) — dev setup
 - [Progress Protocol](docs/PROGRESS_PROTOCOL.md) — JSONL schema (for replacing the GUI with other frontends)

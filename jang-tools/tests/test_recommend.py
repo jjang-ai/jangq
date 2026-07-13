@@ -83,6 +83,27 @@ def test_recommend_qwen35_moe_recommends_jang_default(tmp_path):
     assert any(a.get("family") == "jangtq" for a in rec["recommended"]["alternatives"])
 
 
+def test_recommend_reads_nested_qwen36_text_config(tmp_path):
+    d = _make_model_dir(tmp_path, {
+        "model_type": "qwen3_5_moe",
+        "text_config": {
+            "model_type": "qwen3_5_moe_text",
+            "hidden_size": 2048,
+            "num_hidden_layers": 40,
+            "vocab_size": 248320,
+            "num_experts": 256,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 512,
+        },
+    })
+    rec = recommend(d)
+    assert rec["detected"]["is_moe"] is True
+    assert rec["detected"]["expert_count"] == 256
+    assert rec["detected"]["family_class"] == "moe_hybrid_ssm"
+    assert rec["recommended"]["profile"] == "JANG_4K"
+    assert any(a.get("family") == "jangtq" for a in rec["recommended"]["alternatives"])
+
+
 def test_recommend_minimax_forces_bfloat16(tmp_path):
     d = _make_model_dir(tmp_path, {"model_type": "minimax_m2", "num_experts": 512,
                                     "hidden_size": 6144, "num_hidden_layers": 40,

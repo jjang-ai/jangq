@@ -36,10 +36,9 @@ def test_zaya_capability_builder_matches_converter_contract():
     assert caps["cache_type"] == "hybrid"
 
 
-def test_zaya1_vl_capability_builder_keeps_parser_metadata_thinking_supported():
-    """Same supports_thinking=True for zaya1_vl — VL bundle wraps the same
-    LM trunk + Qwen2.5-VL ViT; reasoning behavior is the LM-trunk's, which
-    is the same chain-of-thought-by-default behavior measured for zaya."""
+def test_zaya1_vl_capability_builder_matches_current_vmlx_runtime_contract():
+    """ZAYA1-VL keeps tools/cache enabled, but current vMLX runtime does not
+    expose qwen3 reasoning until the VLM thinking contract is proven."""
     caps = build_capabilities(
         {
             "source_model": {
@@ -53,9 +52,9 @@ def test_zaya1_vl_capability_builder_keeps_parser_metadata_thinking_supported():
     assert caps["family"] == "zaya1_vl"
     assert caps["modality"] == "vision"
     assert caps["tool_parser"] == "zaya_xml"
-    assert caps["reasoning_parser"] == "qwen3"
+    assert caps["reasoning_parser"] is None
     assert caps["think_in_template"] is False
-    assert caps["supports_thinking"] is True
+    assert caps["supports_thinking"] is False
     assert caps["cache_type"] == "hybrid"
 
 
@@ -97,7 +96,7 @@ def test_deepseek_v4_family_map_uses_dsml_not_deepseek():
     assert family == "deepseek_v4"
     assert reasoning == "deepseek_r1"
     assert think_in_template is True
-    assert cache_type == "mla"
+    assert cache_type == "kv"
 
 
 def test_dsv4_capability_builder_stamps_dsml_tool_parser():

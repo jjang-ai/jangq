@@ -154,6 +154,15 @@ final class JANGTQLoaderTests: XCTestCase {
         return bytes
     }
 
+    private func halvesToData(_ values: [Float]) -> Data {
+        var bytes = Data(capacity: values.count * MemoryLayout<Float16>.stride)
+        for v in values {
+            var x = Float16(v)
+            bytes.append(Data(bytes: &x, count: MemoryLayout<Float16>.stride))
+        }
+        return bytes
+    }
+
     /// Write a minimal safetensors file with the given (name, dtype, shape, data) tuples.
     /// Aligns to 8-byte boundaries for the data section.
     private func writeShard(
@@ -288,6 +297,149 @@ final class JANGTQLoaderTests: XCTestCase {
         let cb64 = try bundle.sidecar.codebook(inFeatures: 64, bits: 2)
         let cb64Ptr = cb64.contents().bindMemory(to: Float.self, capacity: 4)
         XCTAssertNotEqual(cb64Ptr[0], cb32Ptr[0])
+    }
+
+    func testQwenUnsanitizedNormWeightsAreShiftedOnLoad() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(
+            "jangtq_qwen_norm_shift_\(UUID().uuidString)"
+        )
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+
+        let configJSON: [String: Any] = [
+            "model_type": "qwen3_5_moe",
+            "architectures": ["Qwen3_5_MoeForCausalLM"],
+            "hidden_size": 4,
+            "intermediate_size": 8,
+            "moe_intermediate_size": 4,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "vocab_size": 32,
+            "num_experts": 2,
+            "num_experts_per_tok": 1,
+            "first_k_dense_replace": 0,
+            "rms_norm_eps": 1e-5,
+            "layer_types": ["linear_attention"],
+            "linear_num_key_heads": 1,
+            "linear_num_value_heads": 1,
+            "linear_key_head_dim": 2,
+            "linear_value_head_dim": 2,
+            "linear_conv_kernel_dim": 2,
+        ]
+        try JSONSerialization.data(withJSONObject: configJSON, options: [.prettyPrinted])
+            .write(to: dir.appendingPathComponent("config.json"))
+
+        let jangCfg: [String: Any] = [
+            "version": 2,
+            "weight_format": "mxtq",
+            "source_model": ["name": "QwenNormShift", "architecture": "qwen3_5_moe"],
+            "mxtq_seed": 42,
+            "mxtq_bits": ["routed_expert": 2, "attention": 8],
+            "quantization": ["group_size": 4, "bits_default": 2],
+        ]
+        try JSONSerialization.data(withJSONObject: jangCfg, options: [.prettyPrinted])
+            .write(to: dir.appendingPathComponent("jang_config.json"))
+
+        try writeShard(
+            url: dir.appendingPathComponent("model-00001-of-00001.safetensors"),
+            tensors: [
+                (
+                    "language_model.model.layers.0.linear_attn.conv1d.weight",
+                    "F16",
+                    [4, 1, 2],
+                    halvesToData([Float](repeating: 0.0, count: 8))
+                ),
+                (
+                    "language_model.model.layers.0.input_layernorm.weight",
+                    "F16",
+                    [2],
+                    halvesToData([0.25, -0.5])
+                ),
+                (
+                    "language_model.model.layers.0.post_attention_layernorm.weight",
+                    "F16",
+                    [2],
+                    halvesToData([1.5, -1.0])
+                ),
+                (
+                    "language_model.model.layers.0.self_attn.q_norm.weight",
+                    "F16",
+                    [2],
+                    halvesToData([0.0, 2.0])
+                ),
+                (
+                    "language_model.model.layers.0.self_attn.k_norm.weight",
+                    "F16",
+                    [2],
+                    halvesToData([-0.25, 0.75])
+                ),
+                (
+                    "language_model.model.norm.weight",
+                    "F16",
+                    [2],
+                    halvesToData([0.5, -0.125])
+                ),
+                (
+                    "language_model.model.layers.0.linear_attn.norm.weight",
+                    "F16",
+                    [2],
+                    halvesToData([0.875, 1.125])
+                ),
+            ]
+        )
+        try writeShard(
+            url: dir.appendingPathComponent("jangtq_runtime.safetensors"),
+            tensors: []
+        )
+
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device")
+        }
+        let bundle = try JANGTQLoader(device: device).load(from: dir)
+
+        func readHalfTensor(_ name: String, count: Int) throws -> [Float] {
+            guard let buffer = bundle.halfTensors[name] else {
+                XCTFail("missing half tensor \(name)")
+                return []
+            }
+            let ptr = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+            return (0..<count).map { Float(ptr[$0]) }
+        }
+
+        func assertHalfTensor(_ name: String, equals expected: [Float]) throws {
+            let actual = try readHalfTensor(name, count: expected.count)
+            XCTAssertEqual(actual.count, expected.count)
+            for i in expected.indices {
+                XCTAssertEqual(actual[i], expected[i], accuracy: 1e-3, "\(name)[\(i)]")
+            }
+        }
+
+        try assertHalfTensor(
+            "language_model.model.layers.0.input_layernorm.weight",
+            equals: [1.25, 0.5]
+        )
+        try assertHalfTensor(
+            "language_model.model.layers.0.post_attention_layernorm.weight",
+            equals: [2.5, 0.0]
+        )
+        try assertHalfTensor(
+            "language_model.model.layers.0.self_attn.q_norm.weight",
+            equals: [1.0, 3.0]
+        )
+        try assertHalfTensor(
+            "language_model.model.layers.0.self_attn.k_norm.weight",
+            equals: [0.75, 1.75]
+        )
+        try assertHalfTensor(
+            "language_model.model.norm.weight",
+            equals: [1.5, 0.875]
+        )
+        try assertHalfTensor(
+            "language_model.model.layers.0.linear_attn.norm.weight",
+            equals: [0.875, 1.125]
+        )
     }
 
     func testMissingSidecarThrows() throws {

@@ -15,6 +15,27 @@ import Metal
 
 final class JANGTQGeneratorTests: XCTestCase {
 
+    func testSamplerSkipsSuppressedControlTokens() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let buffer = device.makeBuffer(length: 5 * MemoryLayout<Float>.stride, options: .storageModeShared)
+        else {
+            throw XCTSkip("Metal unavailable")
+        }
+        let logits = buffer.contents().bindMemory(to: Float.self, capacity: 5)
+        logits[0] = 0.0
+        logits[1] = 0.1
+        logits[2] = 100.0
+        logits[3] = 2.0
+        logits[4] = 1.0
+
+        let sampler = JANGTQSampler()
+        XCTAssertEqual(sampler.argmax(logits: buffer, vocabSize: 5), 2)
+        XCTAssertEqual(
+            sampler.argmax(logits: buffer, vocabSize: 5, suppressedTokenIds: [2]),
+            3
+        )
+    }
+
     private func writeShard(url: URL, tensors: [(String, String, [Int], Data)]) throws {
         var headerDict: [String: Any] = [:]
         var offset = 0

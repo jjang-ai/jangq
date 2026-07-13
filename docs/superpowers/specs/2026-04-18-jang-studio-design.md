@@ -337,7 +337,7 @@ Produces a zip at `~/Desktop/JANGStudio-diagnostics-<timestamp>.zip` containing:
 3. Strip site-packages of: pip cache, *.pyc, tests/, __pycache__/
 4. pip install --target build/python/lib/python3.11/site-packages \
      "../jang-tools/dist/jang-<ver>-py3-none-any.whl[mlx,vlm]"
-   # The [mlx,vlm] extras pull mlx>=0.22, mlx-lm>=0.20, mlx-vlm>=0.1
+   # The [mlx,vlm] extras pull mlx>=0.31.2, mlx-lm>=0.31.3, mlx-vlm>=0.6.3
    # plus numpy, safetensors, tqdm, transformers, tokenizers, sentencepiece
    # (transitive deps, version-pinned in jang-tools/pyproject.toml).
 5. Strip build/python/ further — drop unused stdlib (tkinter, idle, test/, ensurepip)

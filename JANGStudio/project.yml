@@ -13,6 +13,9 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_IDENTITY: "-"
     DEVELOPMENT_TEAM: ""
+packages:
+  JANGRuntime:
+    path: ../jang-runtime
 targets:
   JANGStudio:
     type: application
@@ -36,7 +39,11 @@ targets:
         com.apple.security.cs.allow-jit: false
         com.apple.security.cs.disable-library-validation: true
         com.apple.security.files.user-selected.read-write: true
-    dependencies: []
+    dependencies:
+      - package: JANGRuntime
+        product: JANGKit
+      - package: JANGRuntime
+        product: JANGExpertLab
     postCompileScripts:
       - script: |
           set -e
@@ -45,6 +52,12 @@ targets:
           if [ ! -d "$SRC" ]; then
             echo "warning: Python bundle missing at $SRC. Run Scripts/build-python-bundle.sh once."
             exit 0
+          fi
+          LOCAL_JANG="$SRCROOT/../jang-tools/jang_tools"
+          BUNDLE_JANG="$SRC/lib/python3.11/site-packages/jang_tools"
+          if [ -d "$LOCAL_JANG" ] && [ -d "$BUNDLE_JANG" ]; then
+            rsync -a --delete "$LOCAL_JANG/" "$BUNDLE_JANG/"
+            echo "note: Refreshed bundled jang_tools from $LOCAL_JANG"
           fi
           mkdir -p "$DST"
           rsync -a --delete "$SRC/" "$DST/"

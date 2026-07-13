@@ -156,19 +156,25 @@ def tq_quantize_weight(weight: np.ndarray, bits: int = 2, seed: int = 42) -> dic
     for b in boundaries:
         indices = indices + (w_normed > b).astype(mx.uint8)
 
-    # Vectorized pack — 117x faster than per-row loop.  Safe because all
-    # GLM/MiniMax/Qwen in_features are divisible by vals_per_u32 (32/bits):
-    # in_feat=6144/2048 and bits=2/3/4 → no per-row padding needed, so
-    # flattening before pack gives bit-identical output.  Verified on
-    # (2048, 6144) 2-bit: max abs diff 0 vs per-row; see
-    # `/tmp/pack_bits_vectorized_test.py`.
+    # Vectorized flat packing is valid only when each source row ends on a
+    # uint32 pack boundary.  3-bit JANGTQ stores 10 values per uint32, and
+    # Qwen/Zaya-style widths such as 2048 leave an 8-value tail.  In that
+    # case flattening would pack the tail of row N together with the head of
+    # row N+1, so use row-wise padding instead.
     vals_per_u32 = 32 // bits
-    assert in_feat % vals_per_u32 == 0, (
-        f"tq_quantize_weight vectorized pack assumes in_feat "
-        f"({in_feat}) divisible by vals_per_u32 ({vals_per_u32}); "
-        f"fall back to per-row pack if this asserts."
-    )
-    packed = pack_bits(indices.reshape(-1), bits).reshape(out_feat, -1)
+    if in_feat % vals_per_u32 == 0:
+        packed = pack_bits(indices.reshape(-1), bits).reshape(out_feat, -1)
+    else:
+        pad = (vals_per_u32 - (in_feat % vals_per_u32)) % vals_per_u32
+        if pad:
+            indices = mx.concatenate(
+                [indices, mx.zeros((out_feat, pad), dtype=mx.uint8)],
+                axis=1,
+            )
+        rows = indices.reshape(out_feat, -1, vals_per_u32).astype(mx.uint32)
+        packed = mx.zeros((out_feat, rows.shape[1]), dtype=mx.uint32)
+        for i in range(vals_per_u32):
+            packed = packed | (rows[:, :, i] << (i * bits))
 
     mx.eval(packed, norms)
 

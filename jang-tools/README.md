@@ -385,7 +385,7 @@ On MoE models, attention is only 1-5% of parameters. Boosting it to 8-bit costs 
 - **Conversion**: any platform (numpy + safetensors)
 - **Inference**: Apple Silicon Mac (M1/M2/M3/M4) with MLX
 - **Dependencies**: `safetensors>=0.4`, `numpy>=1.24`, `tqdm>=4.60`, `huggingface_hub>=0.20`
-- **Optional**: `mlx>=0.22`, `mlx-lm>=0.20` (inference), `mlx-vlm>=0.1` (VLM)
+- **Optional**: `mlx>=0.31.2`, `mlx-lm>=0.31.3` (inference), `mlx-vlm>=0.6.3` (VLM)
 
 ## Links
 

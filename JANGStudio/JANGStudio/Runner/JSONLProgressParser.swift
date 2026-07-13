@@ -21,7 +21,10 @@ final class JSONLProgressParser {
     }
 
     func parse(line: String) -> ProgressEvent? {
-        guard let data = line.data(using: .utf8) else { return nil }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") else { return nil }
+        let afterBrace = trimmed.dropFirst().drop(while: { $0.isWhitespace })
+        guard afterBrace.first == "\"", let data = trimmed.data(using: .utf8) else { return nil }
         let raw: Raw
         do { raw = try decoder.decode(Raw.self, from: data) }
         catch {

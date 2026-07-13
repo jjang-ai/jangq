@@ -15,7 +15,7 @@ final class CoverageMatrixTests: XCTestCase {
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: tmp) }
 
-    // 11 arch classes covering: dense, MoE (8/256 experts), VL image, VL video, every dtype,
+    // 12 arch classes covering: dense, MoE (8/256 experts), VL image, VL video, every dtype,
     // JANGTQ-whitelisted + non-whitelisted, MiniMax-class (custom .py required).
     private static let archClasses: [(model: String, experts: Int, isVL: Bool, isVideoVL: Bool,
                                       dtype: SourceDtype, label: String)] = [
@@ -25,7 +25,9 @@ final class CoverageMatrixTests: XCTestCase {
         ("qwen3_5_moe",     256, false, false, .bf16, "qwen 256 experts BF16"),
         ("qwen3_5_moe",     256, true,  false, .bf16, "qwen image-VL BF16"),
         ("qwen3_5_moe",     256, true,  true,  .bf16, "qwen video-VL BF16"),
+        ("qwen3_5_moe",     256, false, false, .fp16, "qwen 256 experts FP16"),
         ("qwen3_5_moe",     256, false, false, .fp8,  "qwen 256 experts FP8"),
+        ("qwen3_5_moe_text", 256, false, false, .bf16, "qwen text 256 experts BF16"),
         ("minimax_m2",      256, false, false, .fp8,  "minimax FP8"),
         ("minimax_m2",      256, false, false, .bf16, "minimax BF16"),
         ("glm_moe_dsa",     256, false, false, .fp8,  "glm FP8 (JANGTQ blocked in v1)"),
@@ -69,7 +71,11 @@ final class CoverageMatrixTests: XCTestCase {
     }
 
     func test_preflight_JANGTQ_rejectsNonWhitelistedArchs() throws {
-        let nonWhitelisted = Self.archClasses.filter { $0.model != "qwen3_5_moe" && $0.model != "minimax_m2" }
+        let nonWhitelisted = Self.archClasses.filter {
+            $0.model != "qwen3_5_moe"
+                && $0.model != "qwen3_5_moe_text"
+                && $0.model != "minimax_m2"
+        }
         for arch in nonWhitelisted {
             for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
                 let p = try makePlan(arch, family: .jangtq, profile: prof)
@@ -81,9 +87,10 @@ final class CoverageMatrixTests: XCTestCase {
         }
     }
 
-    func test_preflight_JANGTQ_acceptsWhitelistedWithBF16orFP8() throws {
+    func test_preflight_JANGTQ_acceptsWhitelistedWithBF16FP16orFP8() throws {
         let whitelisted = Self.archClasses.filter {
-            ($0.model == "qwen3_5_moe" || $0.model == "minimax_m2") && ($0.dtype == .bf16 || $0.dtype == .fp8)
+            ($0.model == "qwen3_5_moe" || $0.model == "qwen3_5_moe_text" || $0.model == "minimax_m2")
+                && ($0.dtype == .bf16 || $0.dtype == .fp16 || $0.dtype == .fp8)
         }
         for arch in whitelisted {
             for prof in ["JANGTQ2", "JANGTQ3", "JANGTQ4"] {
@@ -109,12 +116,12 @@ final class CoverageMatrixTests: XCTestCase {
             for prof in jang {
                 let p = try makePlan(arch, family: .jang, profile: prof)
                 let args = CLIArgsBuilder.args(for: p)
-                XCTAssertEqual(Array(args.prefix(3)), ["-m", "jang_tools", "convert"],
+                XCTAssertEqual(Array(args.prefix(5)), ["-m", "jang_tools", "--progress=json", "--quiet-text", "convert"],
                     "\(arch.label)/\(prof): wrong prefix")
                 XCTAssertTrue(args.contains(prof), "\(arch.label)/\(prof): profile not in args")
                 XCTAssertTrue(args.contains("--progress=json"), "\(arch.label)/\(prof): missing --progress=json")
             }
-            if arch.model == "qwen3_5_moe" || arch.model == "minimax_m2" {
+            if arch.model == "qwen3_5_moe" || arch.model == "qwen3_5_moe_text" || arch.model == "minimax_m2" {
                 for prof in jangtq {
                     let p = try makePlan(arch, family: .jangtq, profile: prof)
                     let args = CLIArgsBuilder.args(for: p)

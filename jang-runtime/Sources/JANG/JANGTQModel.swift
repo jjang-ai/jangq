@@ -31,6 +31,7 @@ public final class JANGTQModel {
     public let finalNorm: MTLBuffer
     public let layers: [JANGTQDecoderLayer]
     public let config: ModelConfig
+    public let modelPrefix: String
 
     public init(
         bundle: JANGTQModelBundle,
@@ -44,21 +45,23 @@ public final class JANGTQModel {
         self.affine8 = try JANGTQAffine8Matmul(context: context)
         self.ops = try JANGTQDecodeOps(context: context)
         self.config = bundle.config.model
+        let resolvedModelPrefix = Self.resolveModelPrefix(bundle: bundle)
+        self.modelPrefix = resolvedModelPrefix
 
-        guard let embed = bundle.affineWeights["model.embed_tokens"] else {
-            throw JANGError.tensorNotFound("model.embed_tokens")
+        guard let embed = bundle.affineWeights["\(resolvedModelPrefix).embed_tokens"] else {
+            throw JANGError.tensorNotFound("\(resolvedModelPrefix).embed_tokens")
         }
         self.embedTokens = embed
 
         // tied or separate lm_head
-        if let head = bundle.affineWeights["lm_head"] {
+        if let head = Self.resolveLMHead(bundle: bundle, modelPrefix: resolvedModelPrefix) {
             self.lmHead = head
         } else {
             self.lmHead = embed
         }
 
-        guard let fn = bundle.halfTensors["model.norm.weight"] else {
-            throw JANGError.tensorNotFound("model.norm.weight")
+        guard let fn = bundle.halfTensors["\(resolvedModelPrefix).norm.weight"] else {
+            throw JANGError.tensorNotFound("\(resolvedModelPrefix).norm.weight")
         }
         self.finalNorm = fn
 
@@ -76,6 +79,7 @@ public final class JANGTQModel {
         for i in 0..<config.numHiddenLayers {
             let layer = try JANGTQDecoderLayer(
                 layerIndex: i, config: config, bundle: bundle,
+                modelPrefix: resolvedModelPrefix,
                 context: context, kernels: kernels, affine8: affine8,
                 ops: ops, moePrefix: moePrefix, cache: cache,
                 swigluLimit: config.routedSwiGLULimit
@@ -90,7 +94,13 @@ public final class JANGTQModel {
     /// Each layer's attention writes to the SAME position slot in the cache
     /// (because all 62 layers process the same token). The cache currentLength
     /// counter is advanced exactly ONCE per call, after all layers finish.
-    public func forward(tokenId: Int, position: Int) throws -> MTLBuffer {
+    public func forward(
+        tokenId: Int,
+        position: Int,
+        traceConfig: JANGExpertTraceConfig? = nil,
+        traceCollector: JANGExpertTraceCollector? = nil,
+        traceTokenIndex: Int? = nil
+    ) throws -> MTLBuffer {
         precondition(position == cache.currentLength,
             "position \(position) must equal cache.currentLength \(cache.currentLength)")
 
@@ -101,7 +111,13 @@ public final class JANGTQModel {
 
         // 2. Decoder layers — all 62 layers see the same position
         for layer in layers {
-            x = try layer.forward(x: x, position: position)
+            x = try layer.forward(
+                x: x,
+                position: position,
+                traceConfig: traceConfig,
+                traceCollector: traceCollector,
+                traceTokenIndex: traceTokenIndex
+            )
         }
 
         // 3. Final RMSNorm (GPU)
@@ -122,14 +138,75 @@ public final class JANGTQModel {
         return logits
     }
 
-    public func reset() { cache.reset() }
+    public func reset() {
+        cache.reset()
+        for layer in layers {
+            layer.resetState()
+        }
+    }
+
+    private static func resolveModelPrefix(bundle: JANGTQModelBundle) -> String {
+        let candidates = [
+            "model",
+            "language_model.model",
+            "model.language_model",
+            "language_model",
+        ]
+        return candidates.first { prefix in
+            bundle.affineWeights["\(prefix).embed_tokens"] != nil
+        } ?? "model"
+    }
+
+    private static func resolveLMHead(
+        bundle: JANGTQModelBundle,
+        modelPrefix: String
+    ) -> JANGTQAffineWeight? {
+        var candidates = ["\(modelPrefix).lm_head"]
+        if modelPrefix.hasSuffix(".model") {
+            candidates.append(String(modelPrefix.dropLast(".model".count)) + ".lm_head")
+        }
+        candidates.append("lm_head")
+        return candidates.compactMap { bundle.affineWeights[$0] }.first
+    }
 }
 
 // MARK: - Decoder layer wrapper
 
+public enum JANGTQDecoderAttention {
+    case full(JANGTQAttentionBlock)
+    case linear(JANGTQLinearAttentionBlock)
+
+    public var kind: String {
+        switch self {
+        case .full:
+            return "full_attention"
+        case .linear:
+            return "linear_attention"
+        }
+    }
+
+    public func forward(x: MTLBuffer, cache: JANGTQKVCache, position: Int) throws -> MTLBuffer {
+        switch self {
+        case .full(let block):
+            return try block.forward(x: x, cache: cache, position: position)
+        case .linear(let block):
+            return try block.forward(x: x, position: position)
+        }
+    }
+
+    public func resetState() {
+        switch self {
+        case .full:
+            return
+        case .linear(let block):
+            block.resetState()
+        }
+    }
+}
+
 public final class JANGTQDecoderLayer {
     public let layerIndex: Int
-    public let attention: JANGTQAttentionBlock
+    public let attention: JANGTQDecoderAttention
     public let postAttnNorm: MTLBuffer
     public let engine: JANGTQDecoderEngine
     public let ops: JANGTQDecodeOps
@@ -140,6 +217,7 @@ public final class JANGTQDecoderLayer {
         layerIndex: Int,
         config: ModelConfig,
         bundle: JANGTQModelBundle,
+        modelPrefix: String = "model",
         context: MetalContext,
         kernels: JANGTQKernels,
         affine8: JANGTQAffine8Matmul,
@@ -151,11 +229,42 @@ public final class JANGTQDecoderLayer {
         self.layerIndex = layerIndex
         self.config = config
         self.ops = ops
-        self.attention = try JANGTQAttentionBlock(
-            layerIndex: layerIndex, config: config, bundle: bundle,
-            affine8: affine8, ops: ops
-        )
-        let postNormKey = "model.layers.\(layerIndex).post_attention_layernorm.weight"
+        let layerRoot = "\(modelPrefix).layers.\(layerIndex)"
+        let layerType = config.layerTypes?.indices.contains(layerIndex) == true
+            ? config.layerTypes?[layerIndex]
+            : nil
+        if layerType == "linear_attention" {
+            self.attention = .linear(
+                try JANGTQLinearAttentionBlock(
+                    layerIndex: layerIndex,
+                    config: config,
+                    bundle: bundle,
+                    layerPrefix: "\(layerRoot).linear_attn",
+                    inputLayernormPath: "\(layerRoot).input_layernorm.weight",
+                    affine8: affine8,
+                    ops: ops
+                )
+            )
+        } else {
+            if let layerType, layerType != "full_attention" {
+                throw JANGError.invalidFormat(
+                    "unsupported layer_types[\(layerIndex)]='\(layerType)'"
+                )
+            }
+            self.attention = .full(
+                try JANGTQAttentionBlock(
+                    layerIndex: layerIndex,
+                    config: config,
+                    bundle: bundle,
+                    layerPrefix: "\(layerRoot).self_attn",
+                    inputLayernormPath: "\(layerRoot).input_layernorm.weight",
+                    attnOutputGate: config.hasAttnOutputGate,
+                    ropeDim: nil,
+                    affine8: affine8, ops: ops
+                )
+            )
+        }
+        let postNormKey = "\(layerRoot).post_attention_layernorm.weight"
         guard let pn = bundle.halfTensors[postNormKey] else {
             throw JANGError.tensorNotFound(postNormKey)
         }
@@ -173,7 +282,13 @@ public final class JANGTQDecoderLayer {
 
     /// `r = x + attn(input_norm(x)); out = r + moe(post_attn_norm(r))`
     /// All ops on GPU (attention internally runs the input_layernorm via ops.rmsnorm).
-    public func forward(x: MTLBuffer, position: Int) throws -> MTLBuffer {
+    public func forward(
+        x: MTLBuffer,
+        position: Int,
+        traceConfig: JANGExpertTraceConfig? = nil,
+        traceCollector: JANGExpertTraceCollector? = nil,
+        traceTokenIndex: Int? = nil
+    ) throws -> MTLBuffer {
         // Attention sub-block (its own input_layernorm is inside, on GPU)
         let attnOut = try attention.forward(
             x: x, cache: engine.cache, position: position
@@ -195,9 +310,19 @@ public final class JANGTQDecoderLayer {
         // MoE block (router on CPU, MLP kernels on GPU, combine on CPU for now)
         let k = config.numExpertsPerTok ?? 8
         let moeOut = try engine.runMoE(
-            layer: layerIndex, normedX: normed, hidden: config.hiddenSize, k: k
+            layer: layerIndex,
+            normedX: normed,
+            hidden: config.hiddenSize,
+            k: k,
+            traceConfig: traceConfig,
+            traceCollector: traceCollector,
+            tokenIndex: traceTokenIndex
         )
         return try ops.residual.run(a: r, b: moeOut, dim: config.hiddenSize)
+    }
+
+    public func resetState() {
+        attention.resetState()
     }
 }
 
@@ -207,13 +332,18 @@ public struct JANGTQSampler {
     public init() {}
 
     /// Argmax over fp32 logits buffer.
-    public func argmax(logits: MTLBuffer, vocabSize: Int) -> Int {
+    public func argmax(
+        logits: MTLBuffer,
+        vocabSize: Int,
+        suppressedTokenIds: Set<Int> = []
+    ) -> Int {
         let p = logits.contents().bindMemory(to: Float.self, capacity: vocabSize)
-        var bestI = 0
-        var bestV = p[0]
-        for i in 1..<vocabSize {
+        var bestI = -1
+        var bestV = -Float.infinity
+        for i in 0..<vocabSize {
+            if suppressedTokenIds.contains(i) { continue }
             if p[i] > bestV { bestV = p[i]; bestI = i }
         }
-        return bestI
+        return bestI >= 0 ? bestI : 0
     }
 }

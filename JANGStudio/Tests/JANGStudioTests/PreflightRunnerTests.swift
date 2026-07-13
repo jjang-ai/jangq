@@ -1,4 +1,5 @@
 // JANGStudio/Tests/JANGStudioTests/PreflightRunnerTests.swift
+import CryptoKit
 import XCTest
 @testable import JANGStudio
 
@@ -34,6 +35,100 @@ final class PreflightRunnerTests: XCTestCase {
         XCTAssertTrue(checks.contains { $0.id == .jangtqArchSupported && $0.status == .fail })
     }
 
+    func test_jangtqAcceptsFP16MoESource() throws {
+        let src = tmp.appendingPathComponent("src"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out")
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 64, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .fp16, totalBytes: 0, shardCount: 1)
+        plan.family = .jangtq
+        plan.profile = "JANGTQ3"
+
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+
+        XCTAssertEqual(checks.first { $0.id == .jangtqArchSupported }?.status, .pass)
+        XCTAssertEqual(checks.first { $0.id == .jangtqSourceDtype }?.status, .pass)
+    }
+
+    func test_jangtqArchSupported_acceptsVLWrapperViaTextModelType() throws {
+        // Outer modelType is not on the whitelist/module map; textModelType is.
+        // Preflight must use architectureModelTypes (same as isJANGTQAllowed / CLIArgsBuilder).
+        let src = tmp.appendingPathComponent("src-wrapper"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3_5_moe_wrapper"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-wrapper")
+        plan.detected = .init(modelType: "qwen3_5_moe_wrapper", isMoE: true, numExperts: 256, isVL: true,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1,
+                              textModelType: "qwen3_5_moe_text")
+        plan.family = .jangtq
+        plan.profile = "JANGTQ3"
+
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let arch = try XCTUnwrap(checks.first { $0.id == .jangtqArchSupported })
+        XCTAssertEqual(arch.status, .pass,
+                       "wrapper + textModelType qwen3_5_moe_text should pass arch check, hint=\(arch.hint ?? "nil")")
+    }
+
+    func test_jangtqArchSupported_failsUnknownModelTypeNilText() throws {
+        let src = tmp.appendingPathComponent("src-unknown"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"some_other_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-unknown")
+        plan.detected = .init(modelType: "some_other_moe", isMoE: true, numExperts: 64, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1,
+                              textModelType: nil)
+        plan.family = .jangtq
+        plan.profile = "JANGTQ2"
+
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let arch = try XCTUnwrap(checks.first { $0.id == .jangtqArchSupported })
+        XCTAssertEqual(arch.status, .fail)
+        XCTAssertTrue(arch.hint?.contains("some_other_moe") == true,
+                      "fail hint should mention detected type, got: \(arch.hint ?? "nil")")
+    }
+
+    func test_jangtqArchSupported_failsWhenWhitelistedButNoModuleMapping() throws {
+        // Synthetic: put an unmapped type on the whitelist without a Studio module entry.
+        // Preflight must still fail with the no-module mapping hint (whitelist ∩ module).
+        let src = tmp.appendingPathComponent("src-nomodule"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try #"{"model_type":"future_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        let plan = ConversionPlan()
+        plan.sourceURL = src
+        plan.outputURL = tmp.appendingPathComponent("out-nomodule")
+        plan.detected = .init(modelType: "future_moe", isMoE: true, numExperts: 64, isVL: false,
+                              isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1)
+        plan.family = .jangtq
+        plan.profile = "JANGTQ2"
+
+        let f = Capabilities.frozen
+        let caps = Capabilities(
+            jangtqWhitelist: f.jangtqWhitelist + ["future_moe"],
+            knownExpert512Types: f.knownExpert512Types,
+            supportedSourceDtypes: f.supportedSourceDtypes,
+            blockSizes: f.blockSizes,
+            defaultBlockSize: f.defaultBlockSize,
+            methods: f.methods,
+            defaultMethod: f.defaultMethod,
+            tokenizerClassBlocklist: f.tokenizerClassBlocklist,
+            hadamardDefaultForBitTier: f.hadamardDefaultForBitTier
+        )
+        XCTAssertTrue(plan.isJANGTQAllowed(for: caps.jangtqWhitelist),
+                      "precondition: future_moe is on the synthetic whitelist")
+        XCTAssertNil(CLIArgsBuilder.jangtqModule(for: plan),
+                     "precondition: future_moe has no Studio module mapping")
+
+        let checks = PreflightRunner().run(plan: plan, capabilities: caps)
+        let arch = try XCTUnwrap(checks.first { $0.id == .jangtqArchSupported })
+        XCTAssertEqual(arch.status, .fail,
+                       "whitelisted but unmapped arch must fail preflight")
+        XCTAssertTrue(arch.hint?.lowercased().contains("module") == true,
+                      "hint should mention module mapping, got: \(arch.hint ?? "nil")")
+    }
+
     func test_outputSameAsSourceFails() throws {
         let src = tmp.appendingPathComponent("model"); try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
         try #"{"model_type":"qwen3_5_moe"}"#.write(to: src.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
@@ -44,6 +139,1397 @@ final class PreflightRunnerTests: XCTestCase {
                               isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 0)
         let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
         XCTAssertTrue(checks.contains { $0.id == .outputUsable && $0.status == .fail })
+    }
+
+    func test_reviewedPrunePreflightFailsWhenVerificationMissing() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("verification.json") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenVerificationFailed() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try #"{"ok":false,"errors":["router rows mismatch"]}"#
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("router rows mismatch") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenRequiredVerificationCheckMissing() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try #"{"ok":true,"checks":{"router_rows_match":true}}"#
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("config_parses") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenVerificationCheckFailsDespiteOK() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":false}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("expert_rows_match") == true)
+    }
+
+    func test_reviewedPrunePreflightPassesOnlyForVerifiedPrunedSource() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .pass, reviewed.hint ?? "")
+    }
+
+    func test_reviewedPrunePreflightRejectsComparisonSafeDropMaskMismatch() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_comparison_summary.json")) { json in
+            json["safeDropCandidates"] = [["layer": 0, "expert": 0]]
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("safe-drop candidates do not match mask.json disabled experts") == true,
+            reviewed.hint ?? ""
+        )
+    }
+
+    func test_reviewedPrunePreflightRejectsPlanDropsOutsideSameSuiteSafeDrops() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try rewriteEmbeddedPlanDropExperts(planURL, experts: [0])
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("drops experts outside same-suite safe-drop candidates") == true,
+            reviewed.hint ?? ""
+        )
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunePlanEvalIndexSidecarDrift() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try reorderEmbeddedPlanPromptIDs(planURL)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("embedded eval_index does not match expert_lab_eval_index.json") == true,
+            reviewed.hint ?? ""
+        )
+        XCTAssertTrue(reviewed.hint?.contains("prompt IDs differ") == true, reviewed.hint ?? "")
+    }
+
+    func test_reviewedPrunePreflightRejectsEvalIndexWithoutDecodeSettingsEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_eval_index.json")) { json in
+            json.removeValue(forKey: "generation_settings_checked")
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval_index.json is missing decode settings evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsEvalIndexSuiteFingerprintDrift() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let suite = pruned.appendingPathComponent("expert_lab_suite.jsonl")
+        let originalSuite = try String(contentsOf: suite, encoding: .utf8)
+        try originalSuite
+            .replacingOccurrences(
+                of: "Return only the number: 17 * 23.",
+                with: "Return only the number: 19 * 29."
+            )
+            .write(to: suite, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval_index.json suite.jsonl fingerprint does not match suite.jsonl") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSuiteFingerprintDrift() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let suite = pruned.appendingPathComponent("expert_lab_suite.jsonl")
+        let originalSuite = try String(contentsOf: suite, encoding: .utf8)
+        try originalSuite
+            .replacingOccurrences(
+                of: "Return only the number: 17 * 23.",
+                with: "Return only the number: 19 * 29."
+            )
+            .write(to: suite, atomically: true, encoding: .utf8)
+        let updatedSuiteSHA256 = try Self.fileSHA256(suite)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_eval_index.json")) { json in
+            json["suite_sha256"] = updatedSuiteSHA256
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source reviewed prompt suite fingerprint does not match reviewed suite") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsExternalReviewSidecarPaths() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let externalEvidence = try makeModelDir("external-evidence")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: externalEvidence)
+        try FileManager.default.copyItem(
+            at: externalEvidence.appendingPathComponent("expert_lab_review_summary.json"),
+            to: pruned.appendingPathComponent("expert_lab_review_summary.json")
+        )
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("review summary pruned source path does not match the selected pruned BF16/F16 source") == true
+        )
+    }
+
+    func test_reviewedPrunePreflightRejectsReviewSummaryPrunedSourceMismatch() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let otherPruned = try makeModelDir("other-pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_review_summary.json")) { json in
+            json["pruned_source"] = otherPruned.path
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("review summary pruned source path does not match the selected pruned BF16/F16 source") == true
+        )
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedGenerationSummarySourceMismatch() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let otherPruned = try makeModelDir("other-pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")) { json in
+            json["pruned_source"] = otherPruned.path
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("pruned-source generation summary path does not match the selected pruned BF16/F16 source") == true
+        )
+    }
+
+    func test_reviewedPrunePreflightRejectsEvalIndexPromptOrderMismatch() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try writeEvalIndexPromptOrder(in: pruned, indices: Array((0..<50).reversed()))
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval_index.json prompt order does not match suite.jsonl") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSourceGenerationPromptOrderMismatch() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try writePrunedGenerationPromptOrder(in: pruned, indices: [1, 0] + Array(2..<50))
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation prompt order does not match reviewed suite") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsExtraEvalIndexRowsBeyondComparisonSummary() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try expandReviewSidecarsTo51Prompts(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("eval_index.json covers 51 of 50 compared prompts") == true
+                || reviewed.hint?.contains("embedded eval_index does not match expert_lab_eval_index.json") == true,
+            reviewed.hint ?? ""
+        )
+    }
+
+    func test_reviewedPrunePreflightRejectsComparisonSummaryDriftFromEvalRows() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try markFirstEvalRowHighRisk(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(
+            reviewed.hint?.contains("comparison summary high-risk domains do not match eval.jsonl") == true,
+            reviewed.hint ?? "missing hint"
+        )
+    }
+
+    func test_reviewedPrunePreflightFailsWhenSuiteLacksRequiredSemanticProbes() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned, includeRequiredSemanticProbes: false)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("suite.jsonl is missing required semantic prompt probes") == true)
+    }
+
+    func test_reviewedPrunePreflightRequiresPlanSidecarInPrunedSource() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let externalPlanURL = tmp.appendingPathComponent("review-run-prune-plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: externalPlanURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: externalPlanURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("Reviewed prune plan is missing or unreadable") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenPlanLacksSemanticEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON(includeSemanticEvidence: false)
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("activation lift evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenPlanPromptTagsAreEmpty() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON(includePromptTags: false)
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("prompt tags/examples") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenPlanLacksMaskedImpactEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON(includeMaskedImpact: false)
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("masked-output impact evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenPlanLacksMaskedImpactScope() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON(includeMaskedImpactScope: false)
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("masked-output impact scope evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWithoutPrunedSourceSuiteVerification() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let summary = """
+        {
+          "schema": "jang-expert-lab-pruned-source-review-v1",
+          "same_suite_verification_ready": true,
+          "review_sidecars_ready": true,
+          "pruned_suite_verification_ready": false,
+          "pruned_suite_verification_issue": "pruned BF16/F16 same-suite vMLX verification has not run yet",
+          "pruned_source": "\(pruned.path)",
+          "prompt_count": 50,
+          "suite_jsonl": "\(pruned.appendingPathComponent("expert_lab_suite.jsonl").path)",
+          "comparison_summary": "\(pruned.appendingPathComponent("expert_lab_comparison_summary.json").path)",
+          "eval_jsonl": "\(pruned.appendingPathComponent("expert_lab_eval.jsonl").path)",
+          "eval_trace_jsonl": "\(pruned.appendingPathComponent("expert_lab_eval_trace.jsonl").path)",
+          "eval_index": "\(pruned.appendingPathComponent("expert_lab_eval_index.json").path)"
+        }
+        """
+        try summary.write(to: pruned.appendingPathComponent("expert_lab_review_summary.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned BF16/F16 same-suite vMLX verification has not run yet") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsExtraPrunedSourceGenerationRows() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let generations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let extra = #"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"extra","text":"Unexpected prompt."},"result":{"text":"extra","tokens":12,"runtime_info":{"runtime_mode":"bf16_vmlx","backend":"vmlx","device_name":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"\#(pruned.path)"}}}"#
+        let updated = try String(contentsOf: generations, encoding: .utf8) + extra + "\n"
+        try updated.write(to: generations, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation JSONL has 51 rows for 50 prompts") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSourceGenerationPromptIDDrift() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let generations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let drifted = (0..<50)
+            .map { #"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"other\#($0)","text":"Say hello."},"result":{"text":"hello from pruned bf16","tokens":12,"runtime_info":{"runtime_mode":"bf16_vmlx","backend":"vmlx","device_name":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"\#(pruned.path)"}}}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try drifted.write(to: generations, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation missing suite prompt IDs") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSourceGenerationRowsMissingDecodeSettings() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")) { json in
+            json["generation_defaults"] = [
+                "max_tokens": 96,
+                "temperature": 0.0
+            ]
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation row is missing decode settings evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSourceGenerationRowsMissingRuntimeEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let generations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let stripped = (0..<50)
+            .map { #"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"p\#($0)","text":"Say hello."},"result":{"text":"hello from pruned bf16","tokens":12}}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try stripped.write(to: generations, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation is missing per-prompt runtime evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSourceGenerationRowsMissingLayerStatsWhenLayerCountKnown() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try writeKnownLayerHookEvidence(in: pruned, layerCount: 2)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation is missing per-prompt routed-layer stats") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPrunedSourceGenerationRowsMissingTokenTraceWhenLayerCountKnown() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try writeKnownLayerHookEvidence(in: pruned, layerCount: 1)
+        try writePrunedGenerationsWithLayerStats(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("pruned-source generation is missing per-prompt token_trace routing evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenPlanSafetyBelowTopK() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON(keepExperts: 4, trainedTopK: 8)
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("trained top-k") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenPlanLacksEmbeddedSameSuiteEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.safetyOnlyReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("embedded same-suite comparison evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexHasNoTokenDepthEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"native_jangtq_review_bundle","runtime_backend":"jangtq","runtime_device":"Unit Metal","runtime_metal_enabled":true}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("generation-depth token evidence") == true, reviewed.hint ?? "missing hint")
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexHasNoRuntimeEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json"}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("runtime device evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexHasNoPackageVersionEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("vMLX package version evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsTopKOnlyMaskEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"hooked_moe_layers":40,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":0,"top_k_override":4}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+        try #"{"disabled_by_layer":{}}"#
+            .write(to: pruned.appendingPathComponent("mask.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("top-k-only comparisons cannot authorize hard pruning") == true, reviewed.hint ?? "missing hint")
+    }
+
+    func test_reviewedPrunePreflightRejectsEvalRowsMissingRuntimeEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let evalRows = (0..<50)
+            .map { #"{"promptID":"p\#($0)","baselineText":"hello","maskedText":"hello","textDelta":0.0,"baselineTokenCount":12,"maskedTokenCount":12,"baselineRouteRecordCount":1,"maskedRouteRecordCount":1,"jangToolsVersion":"2.5.31","mlxVersion":"0.31.2","mlxLMVersion":"0.31.3","sourceModelPath":"/tmp/jang-unit-bf16-source","maskApplied":true,"disabledExpertCount":1,"risk":"none","regressionSeverity":"none"}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try evalRows.write(to: pruned.appendingPathComponent("expert_lab_eval.jsonl"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval.jsonl is missing per-prompt runtime device evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPartialVMLXHookCoverage() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let suite = pruned.appendingPathComponent("expert_lab_suite.jsonl")
+        let comparison = pruned.appendingPathComponent("expert_lab_comparison_summary.json")
+        let eval = pruned.appendingPathComponent("expert_lab_eval.jsonl")
+        let evalTrace = pruned.appendingPathComponent("expert_lab_eval_trace.jsonl")
+        let evalIndex = pruned.appendingPathComponent("expert_lab_eval_index.json")
+        let prunedGenerations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let prunedSummary = pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"hooked_moe_layers":12,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: evalIndex, atomically: true, encoding: .utf8)
+        try """
+        {
+          "schema": "jang-expert-lab-pruned-source-review-v1",
+          "same_suite_verification_ready": true,
+          "review_sidecars_ready": true,
+          "review_sidecars_issue": null,
+          "pruned_suite_verification_ready": true,
+          "pruned_suite_verification_issue": null,
+          "pruned_source": "\(pruned.path)",
+          "pruned_suite_summary": "\(prunedSummary.path)",
+          "pruned_suite_generations": "\(prunedGenerations.path)",
+          "prompt_count": 50,
+          "layer_count": 40,
+          "source_model_path": "/tmp/jang-unit-bf16-source",
+          "suite_jsonl": "\(suite.path)",
+          "comparison_summary": "\(comparison.path)",
+          "eval_jsonl": "\(eval.path)",
+          "eval_trace_jsonl": "\(evalTrace.path)",
+          "eval_index": "\(evalIndex.path)"
+        }
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_review_summary.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("vMLX hook coverage 12 of 40 routed layers") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsIncompleteVMLXHookCoverageFlag() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let suite = pruned.appendingPathComponent("expert_lab_suite.jsonl")
+        let comparison = pruned.appendingPathComponent("expert_lab_comparison_summary.json")
+        let eval = pruned.appendingPathComponent("expert_lab_eval.jsonl")
+        let evalTrace = pruned.appendingPathComponent("expert_lab_eval_trace.jsonl")
+        let evalIndex = pruned.appendingPathComponent("expert_lab_eval_index.json")
+        let prunedGenerations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let prunedSummary = pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"hooked_moe_layers":40,"expected_moe_layers":40,"hook_coverage_complete":false,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: evalIndex, atomically: true, encoding: .utf8)
+        try """
+        {
+          "schema": "jang-expert-lab-pruned-source-review-v1",
+          "same_suite_verification_ready": true,
+          "review_sidecars_ready": true,
+          "review_sidecars_issue": null,
+          "pruned_suite_verification_ready": true,
+          "pruned_suite_verification_issue": null,
+          "pruned_source": "\(pruned.path)",
+          "pruned_suite_summary": "\(prunedSummary.path)",
+          "pruned_suite_generations": "\(prunedGenerations.path)",
+          "prompt_count": 50,
+          "layer_count": 40,
+          "source_model_path": "/tmp/jang-unit-bf16-source",
+          "suite_jsonl": "\(suite.path)",
+          "comparison_summary": "\(comparison.path)",
+          "eval_jsonl": "\(eval.path)",
+          "eval_trace_jsonl": "\(evalTrace.path)",
+          "eval_index": "\(evalIndex.path)"
+        }
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_review_summary.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("incomplete vMLX routed-layer hook coverage") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexHasNoRoutingEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("routing record evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPartialRouteCoverage() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":49,"eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("routing record evidence for every indexed prompt") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsEvalTraceRouteCountMismatch() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_eval_index.json")) { json in
+            json["baseline_route_record_count"] = 51
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval_trace.jsonl has 50 baseline routing records for 51 indexed baseline route records") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPartialEvalIndexLayerStatsCoverage() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_eval_index.json")) { json in
+            json["baseline_layer_stats_prompt_count"] = 50
+            json["masked_layer_stats_prompt_count"] = 49
+        }
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval_index.json layer-stat coverage is incomplete for indexed prompts") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsPartialEvalRowLayerStatsEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try writeEvalRowsWithPartialLayerStats(in: pruned)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval.jsonl layer-stat evidence is incomplete for baseline/masked prompts") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenSameSuiteComparisonHasHighRiskDomains() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(
+            in: pruned,
+            comparisonJSON: #"{"promptCount":50,"passRateBaseline":1.0,"passRateMasked":1.0,"meanTextDelta":0.7,"highRiskDomains":["math"],"safeDropCandidates":[]}"#
+        )
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("high-risk domains") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexStillHasRiskyPrompts() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":["p13"],"high_risk_domains":["math"],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"baseline_route_record_count":50,"masked_route_record_count":50,"eval_jsonl":"expert_lab_eval.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"native_jangtq_review_bundle","runtime_backend":"jangtq","runtime_device":"Unit Metal","runtime_metal_enabled":true}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("risky prompt IDs") == true, reviewed.hint ?? "missing hint")
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexDoesNotListComparedPrompts() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        try #"{"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":["p0"],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":["math","code","formatting","instruction_following","reasoning","safety_medical_legal_sensitive","chinese","non_english","multilingual","translation","english_dominant","unknown_language_role"],"missing_semantic_coverage":[],"eval_jsonl":"expert_lab_eval.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"native_jangtq_review_bundle","runtime_backend":"jangtq","runtime_device":"Unit Metal","runtime_metal_enabled":true}"#
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("lists 1 prompt IDs for 50 indexed prompts") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenEvalIndexPromptIDsDoNotMatchEvalRows() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let mismatchedEvalText = (0..<50)
+            .map { #"{"promptID":"q\#($0)","baselineText":"hello","maskedText":"hello"}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try mismatchedEvalText.write(to: pruned.appendingPathComponent("expert_lab_eval.jsonl"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("missing from eval.jsonl") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsEvalRowsOutsideIndexedSuite() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let eval = pruned.appendingPathComponent("expert_lab_eval.jsonl")
+        let extra = #"{"promptID":"outside-suite","baselineText":"hello","maskedText":"hello","baselineRouteRecordCount":1,"maskedRouteRecordCount":1}"#
+        try (String(contentsOf: eval, encoding: .utf8) + extra + "\n")
+            .write(to: eval, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval.jsonl prompt IDs outside eval_index.json") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsTraceRowsOutsideIndexedSuite() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let trace = pruned.appendingPathComponent("expert_lab_eval_trace.jsonl")
+        let extra = #"{"promptID":"outside-suite","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#
+        try (String(contentsOf: trace, encoding: .utf8) + extra + "\n")
+            .write(to: trace, atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("eval_trace.jsonl prompt IDs outside eval_index.json") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsTraceMissingMaskedVariant() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let baselineOnlyTrace = (0..<50)
+            .map { #"{"promptID":"p\#($0)","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try baselineOnlyTrace.write(to: pruned.appendingPathComponent("expert_lab_eval_trace.jsonl"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("missing masked routing records") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsMaskedTraceWithoutMaskEvidence() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let traceWithoutMaskedDisabledExperts = (0..<50)
+            .flatMap { index in
+                [
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#,
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"masked","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#
+                ]
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try traceWithoutMaskedDisabledExperts.write(to: pruned.appendingPathComponent("expert_lab_eval_trace.jsonl"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("masked routing records are missing mask evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsMaskedTraceSelectingDisabledExperts() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let traceSelectingDisabledExperts = (0..<50)
+            .flatMap { index in
+                [
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#,
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"masked","record":{"tokenIndex":0,"layer":0,"selectedExperts":[1],"scores":[1.0],"disabledExperts":[1],"effectiveTopK":1}}"#
+                ]
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try traceSelectingDisabledExperts.write(to: pruned.appendingPathComponent("expert_lab_eval_trace.jsonl"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("selected disabled experts") == true)
+    }
+
+    func test_reviewedPrunePreflightRejectsMaskedTraceThatDoesNotMatchMaskJSON() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try Self.validReviewedPrunePlanJSON()
+            .write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+        let traceWithWrongDisabledExpert = (0..<50)
+            .flatMap { index in
+                [
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#,
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"masked","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[2],"effectiveTopK":1}}"#
+                ]
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try traceWithWrongDisabledExpert.write(to: pruned.appendingPathComponent("expert_lab_eval_trace.jsonl"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("mask.json evidence") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsWhenSameSuiteComparisonIsUnderCovered() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try #"{"version":1}"#.write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(
+            in: pruned,
+            comparisonJSON: #"{"promptCount":1,"passRateBaseline":1.0,"passRateMasked":1.0,"meanTextDelta":0.0,"highRiskDomains":[],"safeDropCandidates":[{"layer":0,"expert":1}]}"#
+        )
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("compare at least 50 prompts") == true)
+    }
+
+    func test_reviewedPrunePreflightFallsBackToPrunedSourcePlanSidecar() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        try Self.validReviewedPrunePlanJSON().write(
+            to: pruned.appendingPathComponent("prune_plan.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = reviewedPrunePlan(
+            original: original,
+            pruned: pruned,
+            prunePlan: pruned.appendingPathComponent("missing-original-run-plan.json")
+        )
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .pass)
+    }
+
+    func test_reviewedPrunePreflightFailsWithoutSameSuiteReviewSidecars() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try #"{"version":1}"#.write(to: planURL, atomically: true, encoding: .utf8)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("expert_lab_review_summary.json") == true)
+    }
+
+    func test_reviewedPrunePreflightFailsIfSourceNoLongerMatchesPrunedSource() throws {
+        let original = try makeModelDir("original")
+        let pruned = try makeModelDir("pruned")
+        let other = try makeModelDir("other")
+        let planURL = pruned.appendingPathComponent("prune_plan.json")
+        try #"{"version":1}"#.write(to: planURL, atomically: true, encoding: .utf8)
+        try #"{"ok":true}"#.write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+
+        let plan = reviewedPrunePlan(original: original, pruned: pruned, prunePlan: planURL)
+        plan.sourceURL = other
+        let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
+        let reviewed = try XCTUnwrap(checks.first { $0.id == .reviewedPruneVerified })
+        XCTAssertEqual(reviewed.status, .fail)
+        XCTAssertTrue(reviewed.hint?.contains("verified pruned BF16/F16") == true)
     }
 
     // MARK: - M139 (iter 61): reject nested src/dst
@@ -432,5 +1918,576 @@ final class PreflightRunnerTests: XCTestCase {
         plan.hadamard = true
         let checks = PreflightRunner().run(plan: plan, capabilities: .frozen)
         XCTAssertTrue(checks.contains { $0.id == .hadamardVsLowBits && $0.status == .warn })
+    }
+
+    private func makeModelDir(_ name: String) throws -> URL {
+        let url = tmp.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3_5_moe"}"#.write(to: url.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        return url
+    }
+
+    private func writeKnownLayerHookEvidence(in pruned: URL, layerCount: Int) throws {
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_review_summary.json")) { json in
+            json["layer_count"] = layerCount
+        }
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_eval_index.json")) { json in
+            json["hooked_moe_layers"] = layerCount
+            json["expected_moe_layers"] = layerCount
+            json["hook_coverage_complete"] = true
+        }
+        try updateJSONFile(pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")) { json in
+            json["hooked_moe_layers"] = layerCount
+            json["expected_moe_layers"] = layerCount
+            json["hook_coverage_complete"] = true
+        }
+    }
+
+    private func writePrunedGenerationsWithLayerStats(in pruned: URL) throws {
+        let text = (0..<50)
+            .map { #"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"p\#($0)","text":"Say hello."},"result":{"text":"hello from pruned bf16","tokens":12,"runtime_info":{"runtime_mode":"bf16_vmlx","backend":"vmlx","device_name":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"\#(pruned.path)"},"layer_stats":[{"layer":0,"token_count":1,"hit_counts":{"0":1},"probability_mass":{"0":1.0}}]}}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try text.write(to: pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl"), atomically: true, encoding: .utf8)
+    }
+
+    private func updateJSONFile(_ url: URL, update: (inout [String: Any]) -> Void) throws {
+        let data = try Data(contentsOf: url)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        update(&json)
+        let updated = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try updated.write(to: url)
+    }
+
+    private func reorderEmbeddedPlanPromptIDs(_ planURL: URL) throws {
+        let data = try Data(contentsOf: planURL)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var evalIndex = try XCTUnwrap(json["eval_index"] as? [String: Any])
+        var promptIDs = try XCTUnwrap(evalIndex["prompt_ids"] as? [String])
+        guard promptIDs.count >= 2 else {
+            XCTFail("expected at least two prompt IDs in embedded eval_index")
+            return
+        }
+        promptIDs.swapAt(0, 1)
+        evalIndex["prompt_ids"] = promptIDs
+        json["eval_index"] = evalIndex
+        let updated = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try updated.write(to: planURL)
+    }
+
+    private func rewriteEmbeddedPlanDropExperts(_ planURL: URL, experts: [Int]) throws {
+        let data = try Data(contentsOf: planURL)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var layers = try XCTUnwrap(json["layers"] as? [String: Any])
+        var layer = try XCTUnwrap(layers["0"] as? [String: Any])
+        layer["drop"] = experts
+        layers["0"] = layer
+        json["layers"] = layers
+        let updated = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try updated.write(to: planURL)
+    }
+
+    private func markFirstEvalRowHighRisk(in pruned: URL) throws {
+        let url = pruned.appendingPathComponent("expert_lab_eval.jsonl")
+        var lines = try String(contentsOf: url, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        var first = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any]
+        )
+        first["domain"] = "domain"
+        first["semanticDomains"] = ["safety_medical_legal_sensitive"]
+        first["risk"] = "regression"
+        first["regressionSeverity"] = "high"
+        first["baselinePassed"] = true
+        first["maskedPassed"] = false
+        first["baselineQualified"] = true
+        first["promptClassification"] = "degraded"
+        first["safeDropEvidenceEligible"] = false
+        first["textDelta"] = 0.9
+        let data = try JSONSerialization.data(withJSONObject: first, options: [.sortedKeys])
+        lines[0] = String(data: data, encoding: .utf8) ?? "{}"
+        try lines.joined(separator: "\n").appending("\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func writeExpertLabReviewSidecars(
+        in pruned: URL,
+        comparisonJSON: String? = nil,
+        includeRequiredSemanticProbes: Bool = true
+    ) throws {
+        let suite = pruned.appendingPathComponent("expert_lab_suite.jsonl")
+        let comparison = pruned.appendingPathComponent("expert_lab_comparison_summary.json")
+        let eval = pruned.appendingPathComponent("expert_lab_eval.jsonl")
+        let evalTrace = pruned.appendingPathComponent("expert_lab_eval_trace.jsonl")
+        let evalIndex = pruned.appendingPathComponent("expert_lab_eval_index.json")
+        let mask = pruned.appendingPathComponent("mask.json")
+        let prunedGenerations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let prunedSummary = pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")
+        let suiteText = (0..<50)
+            .map { index -> String in
+                switch index {
+                case 0 where includeRequiredSemanticProbes:
+                    return #"{"id":"p0","domain":"math","subdomain":"arithmetic","text":"Return only the number: 17 * 23.","tags":["arithmetic"]}"#
+                case 1 where includeRequiredSemanticProbes:
+                    return #"{"id":"p1","domain":"coding","subdomain":"swift","text":"Write a Swift function that groups strings by first character.","tags":["swift","code"]}"#
+                case 2 where includeRequiredSemanticProbes:
+                    return #"{"id":"p2","domain":"structured","subdomain":"json","text":"Return JSON fields decision and rationale for this status.","tags":["json","formatting"]}"#
+                case 3 where includeRequiredSemanticProbes:
+                    return #"{"id":"p3","domain":"instruction","subdomain":"hierarchy","text":"Explain how to respond when a user asks you to ignore a system rule.","tags":["instruction-following"]}"#
+                case 4 where includeRequiredSemanticProbes:
+                    return #"{"id":"p4","domain":"reasoning","subdomain":"logic","text":"If A implies B and B is false, what follows about A?","tags":["logic"]}"#
+                case 5 where includeRequiredSemanticProbes:
+                    return #"{"id":"p5","domain":"robustness","subdomain":"medicine-safety","text":"Explain safe next steps for incomplete symptoms without diagnosing.","tags":["safety","medical","legal"]}"#
+                case 6 where includeRequiredSemanticProbes:
+                    return #"{"id":"p6","domain":"multilingual","subdomain":"chinese","text":"Translate this status update into Simplified Chinese: Build succeeded.","tags":["chinese","translation","non_english"]}"#
+                case 7 where includeRequiredSemanticProbes:
+                    return #"{"id":"p7","domain":"general","subdomain":"explanation","text":"Classify this prompt as English dominant.","tags":["english_dominant"]}"#
+                case 8 where includeRequiredSemanticProbes:
+                    return #"{"id":"p8","domain":"multilingual","subdomain":"unknown-language-role","text":"Classify whether this text is mixed or unknown language role: Bonjour, build succeeded.","tags":["unknown_language_role","non_english"]}"#
+                default:
+                    return #"{"id":"p\#(index)","domain":"general","text":"Say hello."}"#
+                }
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try suiteText.write(to: suite, atomically: true, encoding: .utf8)
+        try (comparisonJSON ?? Self.validComparisonSummaryJSON())
+            .write(to: comparison, atomically: true, encoding: .utf8)
+        let suiteSHA256 = try Self.fileSHA256(suite)
+        let evalText = (0..<50)
+            .map { index in
+                #"{"promptID":"p\#(index)","domain":"general","semanticDomains":[\#(Self.semanticDomainsJSON(index: index))],"expectedKind":"exact","expected":"hello","validatorKind":"exact","validatorAvailable":true,"validatorSource":"suite_expected","baselinePassed":true,"maskedPassed":true,"baselineQualified":true,"promptClassification":"preserved","safeDropEvidenceEligible":true,"baselineText":"hello","maskedText":"hello","textDelta":0.0,"baselineTokenCount":12,"maskedTokenCount":12,"baselineRouteRecordCount":1,"maskedRouteRecordCount":1,"baselineGenerationSettings":{"max_tokens":96,"temperature":0.0,"top_p":1.0,"top_k":0},"maskedGenerationSettings":{"max_tokens":96,"temperature":0.0,"top_p":1.0,"top_k":0},"runtimeMode":"bf16_vmlx","runtimeBackend":"vmlx","runtimeDevice":"Unit Metal","runtimeMetalEnabled":true,"jangToolsVersion":"2.5.31","mlxVersion":"0.31.2","mlxLMVersion":"0.31.3","sourceModelPath":"/tmp/jang-unit-bf16-source","maskApplied":true,"disabledExpertCount":1,"risk":"none","regressionSeverity":"none"}"#
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try evalText.write(to: eval, atomically: true, encoding: .utf8)
+        let evalTraceText = (0..<50)
+            .flatMap { index in
+                [
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#,
+                    #"{"promptID":"p\#(index)","domain":"general","variant":"masked","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[1],"effectiveTopK":1}}"#
+                ]
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try evalTraceText.write(to: evalTrace, atomically: true, encoding: .utf8)
+        let promptIDs = Self.promptIDJSON(count: 50)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":[\(Self.requiredSemanticCoverageJSON())],"missing_semantic_coverage":[],"validator_schema":"jang-expert-lab-validator-v1","validator_available_prompt_count":50,"prompt_classification_counts":{\(Self.classificationCountsJSON(count: 50))},"baseline_qualified_prompt_count":50,"baseline_qualified_prompt_ids":[\(promptIDs)],"baseline_invalid_prompt_ids":[],"inconclusive_prompt_ids":[],"preserved_prompt_ids":[\(promptIDs)],"degraded_prompt_ids":[],"baseline_qualified_masked_pass_rate":1.0,"baseline_qualified_semantic_coverage":[\(Self.requiredSemanticCoverageJSON())],"missing_baseline_qualified_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"generation_settings_checked":true,"suite_sha256":"\(suiteSHA256)","eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: evalIndex, atomically: true, encoding: .utf8)
+        try #"{"disabled_by_layer":{"0":[1]}}"#
+            .write(to: mask, atomically: true, encoding: .utf8)
+        let prunedGenerationText = (0..<50)
+            .map { #"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"p\#($0)","text":"Say hello."},"result":{"text":"hello from pruned bf16","tokens":12,"runtime_info":{"runtime_mode":"bf16_vmlx","backend":"vmlx","device_name":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"\#(pruned.path)"}}}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try prunedGenerationText.write(to: prunedGenerations, atomically: true, encoding: .utf8)
+        try """
+        {
+          "schema": "jang-expert-lab-pruned-bf16-suite-v1",
+          "ready": true,
+          "pruned_source": "\(pruned.path)",
+          "suite_sha256": "\(suiteSHA256)",
+          "prompt_count": 50,
+          "generation_count": 50,
+          "runtime_mode": "bf16_vmlx",
+          "runtime_backend": "vmlx",
+          "runtime_device": "Unit Metal",
+          "runtime_metal_enabled": true,
+          "jang_tools_version": "2.5.31",
+          "mlx_version": "0.31.2",
+          "mlx_lm_version": "0.31.3",
+          "runtime_source_model_path": "\(pruned.path)",
+          "reviewed_masked_comparison_count": 50,
+          "reviewed_masked_mean_text_delta": 0.0,
+          "reviewed_masked_max_text_delta": 0.0,
+          "pruned_validator_outcomes_checked": true,
+          "baseline_qualified_prompt_count": 50,
+          "pruned_baseline_qualified_pass_rate": 1.0,
+          "pruned_classification_counts": {\(Self.classificationCountsJSON(count: 50))},
+          "baseline_invalid_prompt_ids": [],
+          "inconclusive_prompt_ids": [],
+          "pruned_preserved_prompt_ids": [\(promptIDs)],
+          "pruned_degraded_prompt_ids": [],
+          "baseline_qualified_semantic_coverage": [\(Self.requiredSemanticCoverageJSON())],
+          "missing_baseline_qualified_semantic_coverage": [],
+          "reviewed_masked_eval_trace_jsonl": "\(evalTrace.path)",
+          "generations_jsonl": "\(prunedGenerations.path)"
+        }
+        """
+            .write(to: prunedSummary, atomically: true, encoding: .utf8)
+        let summary = """
+        {
+          "schema": "jang-expert-lab-pruned-source-review-v1",
+          "same_suite_verification_ready": true,
+          "review_sidecars_ready": true,
+          "review_sidecars_issue": null,
+          "pruned_suite_verification_ready": true,
+          "pruned_suite_verification_issue": null,
+          "pruned_source": "\(pruned.path)",
+          "pruned_suite_summary": "\(prunedSummary.path)",
+          "pruned_suite_generations": "\(prunedGenerations.path)",
+          "prompt_count": 50,
+          "source_model_path": "/tmp/jang-unit-bf16-source",
+          "suite_jsonl": "\(suite.path)",
+          "comparison_summary": "\(comparison.path)",
+          "eval_jsonl": "\(eval.path)",
+          "eval_trace_jsonl": "\(evalTrace.path)",
+          "eval_index": "\(evalIndex.path)",
+          "mask_json": "\(mask.path)",
+          "mask": "\(mask.path)"
+        }
+        """
+        try summary.write(to: pruned.appendingPathComponent("expert_lab_review_summary.json"), atomically: true, encoding: .utf8)
+    }
+
+    private func writeEvalRowsWithPartialLayerStats(in pruned: URL) throws {
+        let evalText = (0..<50)
+            .map { index -> String in
+                let layerStats = index == 0
+                    ? #","baselineLayerStats":[{"layer":0}],"maskedLayerStats":[{"layer":0}]"#
+                    : ""
+                return #"{"promptID":"p\#(index)","domain":"general","semanticDomains":[\#(Self.semanticDomainsJSON(index: index))],"expectedKind":"exact","expected":"hello","validatorKind":"exact","validatorAvailable":true,"validatorSource":"suite_expected","baselinePassed":true,"maskedPassed":true,"baselineQualified":true,"promptClassification":"preserved","safeDropEvidenceEligible":true,"baselineText":"hello","maskedText":"hello","textDelta":0.0,"baselineTokenCount":12,"maskedTokenCount":12,"baselineRouteRecordCount":1,"maskedRouteRecordCount":1,"baselineGenerationSettings":{"max_tokens":96,"temperature":0.0,"top_p":1.0,"top_k":0},"maskedGenerationSettings":{"max_tokens":96,"temperature":0.0,"top_p":1.0,"top_k":0},"runtimeMode":"bf16_vmlx","runtimeBackend":"vmlx","runtimeDevice":"Unit Metal","runtimeMetalEnabled":true,"jangToolsVersion":"2.5.31","mlxVersion":"0.31.2","mlxLMVersion":"0.31.3","sourceModelPath":"/tmp/jang-unit-bf16-source","maskApplied":true,"disabledExpertCount":1,"risk":"none","regressionSeverity":"none"\#(layerStats)}"#
+            }
+            .joined(separator: "\n")
+            .appending("\n")
+        try evalText.write(to: pruned.appendingPathComponent("expert_lab_eval.jsonl"), atomically: true, encoding: .utf8)
+    }
+
+    private func expandReviewSidecarsTo51Prompts(in pruned: URL) throws {
+        let suite = pruned.appendingPathComponent("expert_lab_suite.jsonl")
+        let eval = pruned.appendingPathComponent("expert_lab_eval.jsonl")
+        let evalTrace = pruned.appendingPathComponent("expert_lab_eval_trace.jsonl")
+        let evalIndex = pruned.appendingPathComponent("expert_lab_eval_index.json")
+        let prunedGenerations = pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl")
+        let prunedSummary = pruned.appendingPathComponent("expert_lab_pruned_generation_summary.json")
+
+        try appendLine(#"{"id":"p50","domain":"general","text":"Say one more hello."}"#, to: suite)
+        try appendLine(#"{"promptID":"p50","domain":"general","semanticDomains":["general"],"expectedKind":"exact","expected":"hello","validatorKind":"exact","validatorAvailable":true,"validatorSource":"suite_expected","baselinePassed":true,"maskedPassed":true,"baselineQualified":true,"promptClassification":"preserved","safeDropEvidenceEligible":true,"baselineText":"hello","maskedText":"hello","textDelta":0.0,"baselineTokenCount":12,"maskedTokenCount":12,"baselineRouteRecordCount":1,"maskedRouteRecordCount":1,"baselineGenerationSettings":{"max_tokens":96,"temperature":0.0,"top_p":1.0,"top_k":0},"maskedGenerationSettings":{"max_tokens":96,"temperature":0.0,"top_p":1.0,"top_k":0},"runtimeMode":"bf16_vmlx","runtimeBackend":"vmlx","runtimeDevice":"Unit Metal","runtimeMetalEnabled":true,"jangToolsVersion":"2.5.31","mlxVersion":"0.31.2","mlxLMVersion":"0.31.3","sourceModelPath":"/tmp/jang-unit-bf16-source","maskApplied":true,"disabledExpertCount":1,"risk":"none","regressionSeverity":"none"}"#, to: eval)
+        try appendLine(#"{"promptID":"p50","domain":"general","variant":"baseline","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[],"effectiveTopK":1}}"#, to: evalTrace)
+        try appendLine(#"{"promptID":"p50","domain":"general","variant":"masked","record":{"tokenIndex":0,"layer":0,"selectedExperts":[0],"scores":[1.0],"disabledExperts":[1],"effectiveTopK":1}}"#, to: evalTrace)
+        try appendLine(#"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"p50","text":"Say one more hello."},"result":{"text":"hello from pruned bf16","tokens":12,"runtime_info":{"runtime_mode":"bf16_vmlx","backend":"vmlx","device_name":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"\#(pruned.path)"}}}"#, to: prunedGenerations)
+
+        let promptIDs = Self.promptIDJSON(count: 51)
+        let suiteSHA256 = try Self.fileSHA256(suite)
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":51,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":[\(Self.requiredSemanticCoverageJSON())],"missing_semantic_coverage":[],"validator_schema":"jang-expert-lab-validator-v1","validator_available_prompt_count":51,"prompt_classification_counts":{\(Self.classificationCountsJSON(count: 51))},"baseline_qualified_prompt_count":51,"baseline_qualified_prompt_ids":[\(promptIDs)],"baseline_invalid_prompt_ids":[],"inconclusive_prompt_ids":[],"preserved_prompt_ids":[\(promptIDs)],"degraded_prompt_ids":[],"baseline_qualified_masked_pass_rate":1.0,"baseline_qualified_semantic_coverage":[\(Self.requiredSemanticCoverageJSON())],"missing_baseline_qualified_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":51,"masked_route_record_count":51,"generation_settings_checked":true,"suite_sha256":"\(suiteSHA256)","eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: evalIndex, atomically: true, encoding: .utf8)
+        try """
+        {
+          "schema": "jang-expert-lab-pruned-bf16-suite-v1",
+          "ready": true,
+          "pruned_source": "\(pruned.path)",
+          "suite_sha256": "\(suiteSHA256)",
+          "prompt_count": 51,
+          "generation_count": 51,
+          "runtime_mode": "bf16_vmlx",
+          "runtime_backend": "vmlx",
+          "runtime_device": "Unit Metal",
+          "runtime_metal_enabled": true,
+          "jang_tools_version": "2.5.31",
+          "mlx_version": "0.31.2",
+          "mlx_lm_version": "0.31.3",
+          "runtime_source_model_path": "\(pruned.path)",
+          "reviewed_masked_comparison_count": 51,
+          "reviewed_masked_mean_text_delta": 0.0,
+          "reviewed_masked_max_text_delta": 0.0,
+          "pruned_validator_outcomes_checked": true,
+          "baseline_qualified_prompt_count": 51,
+          "pruned_baseline_qualified_pass_rate": 1.0,
+          "pruned_classification_counts": {\(Self.classificationCountsJSON(count: 51))},
+          "baseline_invalid_prompt_ids": [],
+          "inconclusive_prompt_ids": [],
+          "pruned_preserved_prompt_ids": [\(promptIDs)],
+          "pruned_degraded_prompt_ids": [],
+          "baseline_qualified_semantic_coverage": [\(Self.requiredSemanticCoverageJSON())],
+          "missing_baseline_qualified_semantic_coverage": [],
+          "reviewed_masked_eval_trace_jsonl": "\(evalTrace.path)",
+          "generations_jsonl": "\(prunedGenerations.path)"
+        }
+        """
+            .write(to: prunedSummary, atomically: true, encoding: .utf8)
+    }
+
+    private func appendLine(_ line: String, to url: URL) throws {
+        let existing = try String(contentsOf: url, encoding: .utf8)
+        try existing
+            .appending(line)
+            .appending("\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func writeEvalIndexPromptOrder(in pruned: URL, indices: [Int]) throws {
+        let promptIDs = Self.promptIDJSON(indices: indices)
+        let suiteSHA256 = try Self.fileSHA256(pruned.appendingPathComponent("expert_lab_suite.jsonl"))
+        try """
+        {"schema":"jang-expert-lab-eval-index-v1","prompt_count":50,"prompt_ids":[\(promptIDs)],"risky_prompt_ids":[],"high_risk_domains":[],"semantic_coverage":[\(Self.requiredSemanticCoverageJSON())],"missing_semantic_coverage":[],"validator_schema":"jang-expert-lab-validator-v1","validator_available_prompt_count":50,"prompt_classification_counts":{\(Self.classificationCountsJSON(count: 50))},"baseline_qualified_prompt_count":50,"baseline_qualified_prompt_ids":[\(promptIDs)],"baseline_invalid_prompt_ids":[],"inconclusive_prompt_ids":[],"preserved_prompt_ids":[\(promptIDs)],"degraded_prompt_ids":[],"baseline_qualified_masked_pass_rate":1.0,"baseline_qualified_semantic_coverage":[\(Self.requiredSemanticCoverageJSON())],"missing_baseline_qualified_semantic_coverage":[],"min_baseline_tokens":12,"min_masked_tokens":12,"mean_baseline_tokens":12.0,"mean_masked_tokens":12.0,"baseline_route_record_count":50,"masked_route_record_count":50,"generation_settings_checked":true,"suite_sha256":"\(suiteSHA256)","eval_jsonl":"expert_lab_eval.jsonl","eval_trace_jsonl":"expert_lab_eval_trace.jsonl","comparison_summary":"expert_lab_comparison_summary.json","mask":"mask.json","runtime_mode":"bf16_vmlx","runtime_backend":"vmlx","runtime_device":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"/tmp/jang-unit-bf16-source","mask_applied":true,"disabled_expert_count":1}
+        """
+            .write(to: pruned.appendingPathComponent("expert_lab_eval_index.json"), atomically: true, encoding: .utf8)
+    }
+
+    private func writePrunedGenerationPromptOrder(in pruned: URL, indices: [Int]) throws {
+        let text = indices
+            .map { #"{"schema":"jang-expert-lab-vmlx-generation-v1","prompt":{"id":"p\#($0)","text":"Say hello."},"result":{"text":"hello from pruned bf16","tokens":12,"runtime_info":{"runtime_mode":"bf16_vmlx","backend":"vmlx","device_name":"Unit Metal","runtime_metal_enabled":true,"jang_tools_version":"2.5.31","mlx_version":"0.31.2","mlx_lm_version":"0.31.3","source_model_path":"\#(pruned.path)"}}}"# }
+            .joined(separator: "\n")
+            .appending("\n")
+        try text.write(to: pruned.appendingPathComponent("expert_lab_pruned_generations.jsonl"), atomically: true, encoding: .utf8)
+    }
+
+    private func reviewedPrunePlan(original: URL, pruned: URL, prunePlan: URL) -> ConversionPlan {
+        let plan = ConversionPlan()
+        plan.sourceURL = pruned
+        plan.outputURL = tmp.appendingPathComponent("converted")
+        plan.detected = .init(modelType: "qwen3_5_moe", isMoE: true, numExperts: 128,
+                              isVL: false, isVideoVL: false, hasGenerationConfig: true,
+                              dtype: .bf16, totalBytes: 1024, shardCount: 1)
+        plan.expertReviewOriginalSourceURL = original
+        plan.expertReviewPrunedSourceURL = pruned
+        plan.expertReviewPrunePlanURL = prunePlan
+        plan.expertReviewPruneReportURL = pruned.appendingPathComponent("expert_lab_prune_report.md")
+        return plan
+    }
+
+    private static let requiredSemanticDomains = [
+        "math",
+        "code",
+        "formatting",
+        "instruction_following",
+        "reasoning",
+        "safety_medical_legal_sensitive",
+        "chinese",
+        "non_english",
+        "multilingual",
+        "translation",
+        "english_dominant",
+        "unknown_language_role"
+    ]
+
+    private static func promptIDJSON(count: Int) -> String {
+        (0..<count).map { #""p\#($0)""# }.joined(separator: ",")
+    }
+
+    private static func promptIDJSON(indices: [Int]) -> String {
+        indices.map { #""p\#($0)""# }.joined(separator: ",")
+    }
+
+    private static func stringArrayJSON(_ values: [String]) -> String {
+        values.map { #""\#($0)""# }.joined(separator: ",")
+    }
+
+    private static func requiredSemanticCoverageJSON() -> String {
+        stringArrayJSON(requiredSemanticDomains)
+    }
+
+    private static func semanticDomainsJSON(index: Int) -> String {
+        let domains = index < requiredSemanticDomains.count ? [requiredSemanticDomains[index]] : ["general"]
+        return stringArrayJSON(domains)
+    }
+
+    private static func classificationCountsJSON(count: Int) -> String {
+        #""baseline_invalid":0,"preserved":\#(count),"degraded":0,"inconclusive":0"#
+    }
+
+    private static func validComparisonSummaryJSON(promptCount: Int = 50) -> String {
+        """
+        {
+          "promptCount": \(promptCount),
+          "passRateBaseline": 1.0,
+          "passRateMasked": 1.0,
+          "validatorAvailablePromptCount": \(promptCount),
+          "classificationCounts": {\(classificationCountsJSON(count: promptCount))},
+          "baselineQualifiedPromptCount": \(promptCount),
+          "baselineQualifiedMaskedPassRate": 1.0,
+          "baselineQualifiedPromptIDs": [\(promptIDJSON(count: promptCount))],
+          "baselineInvalidPromptIDs": [],
+          "inconclusivePromptIDs": [],
+          "preservedPromptIDs": [\(promptIDJSON(count: promptCount))],
+          "degradedPromptIDs": [],
+          "baselineQualifiedSemanticCoverage": [\(requiredSemanticCoverageJSON())],
+          "missingBaselineQualifiedSemanticCoverage": [],
+          "meanTextDelta": 0.0,
+          "highRiskDomains": [],
+          "safeDropCandidates": [{"layer": 0, "expert": 1}]
+        }
+        """
+    }
+
+    private static func fileSHA256(_ url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        return SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func validReviewedPrunePlanJSON(
+        keepExperts: Int = 128,
+        trainedTopK: Int = 8,
+        includeSemanticEvidence: Bool = true,
+        includePromptTags: Bool = true,
+        includeMaskedImpact: Bool = true,
+        includeMaskedImpactScope: Bool = true,
+        includeReviewedMaskMember: Bool = true
+    ) -> String {
+        let promptIDs = promptIDJSON(count: 50)
+        let promptTags = includePromptTags ? #""translation", "non_english""# : ""
+        let maskedImpactFields = [
+            includeMaskedImpact ? #""ablation_delta": 0.0"# : nil,
+            includeMaskedImpact && includeMaskedImpactScope ? #""masked_impact_scope": "same_suite_mask_mean_text_delta""# : nil,
+            includeMaskedImpact && includeReviewedMaskMember ? #""reviewed_mask_member": true"# : nil
+        ].compactMap { $0 }
+        let maskedImpactLine = maskedImpactFields.isEmpty
+            ? ""
+            : maskedImpactFields.joined(separator: ", ") + ","
+        let semanticEvidence = includeSemanticEvidence
+            ? """
+              {
+                "expert": 0,
+                "hits": 18,
+                "probabilityMass": 0.62,
+                "frequency": 0.36,
+                "router_mass": 0.62,
+                \(maskedImpactLine)
+                "domains": {"multilingual": 8, "chinese": 5, "non_english": 8},
+                "domain_lift": {"chinese": 2.4, "non_english": 1.8, "multilingual": 1.5},
+                "prompt_evidence": [
+                  {
+                    "promptID": "p0",
+                    "domain": "multilingual",
+                    "subdomain": "chinese",
+                    "tags": [\(promptTags)],
+                    "promptExcerpt": "Translate the sentence into Simplified Chinese.",
+                    "hits": 5
+                  }
+                ],
+                "label": "chinese-specialist",
+                "reason": "kept by reviewed BF16/vMLX prompt evidence",
+                "kept": true
+              }
+            """
+            : """
+              {
+                "expert": 0,
+                "hits": 18,
+                "probabilityMass": 0.62,
+                "frequency": 0.36,
+                "router_mass": 0.62,
+                \(maskedImpactLine)
+                "domains": {"multilingual": 8, "chinese": 5, "non_english": 8},
+                "label": "chinese-specialist",
+                "reason": "legacy row without semantic proof",
+                "kept": true
+              }
+            """
+        return """
+        {
+          "version": 1,
+          "method": "prompt_trace_hits_mass_domain_lift_v1",
+          "source_model": "/tmp/jang-unit-bf16-source",
+          "promptCount": 50,
+          "keepExpertsPerLayer": \(keepExperts),
+          "comparison_summary": {
+            "promptCount": 50,
+            "passRateBaseline": 1.0,
+            "passRateMasked": 1.0,
+            "validatorAvailablePromptCount": 50,
+            "classificationCounts": {\(classificationCountsJSON(count: 50))},
+            "baselineQualifiedPromptCount": 50,
+            "baselineQualifiedMaskedPassRate": 1.0,
+            "baselineQualifiedPromptIDs": [\(promptIDs)],
+            "baselineInvalidPromptIDs": [],
+            "inconclusivePromptIDs": [],
+            "preservedPromptIDs": [\(promptIDs)],
+            "degradedPromptIDs": [],
+            "baselineQualifiedSemanticCoverage": [\(requiredSemanticCoverageJSON())],
+            "missingBaselineQualifiedSemanticCoverage": [],
+            "meanTextDelta": 0.0,
+            "meanLatencyDeltaPct": 0.0,
+            "highRiskDomains": [],
+            "safeDropCandidates": [{"layer": 0, "expert": 1}]
+          },
+          "eval_index": {
+            "schema": "jang-expert-lab-eval-index-v1",
+            "prompt_count": 50,
+            "prompt_ids": [\(promptIDs)],
+            "risky_prompt_ids": [],
+            "high_risk_domains": [],
+            "semantic_coverage": [\(requiredSemanticCoverageJSON())],
+            "missing_semantic_coverage": [],
+            "validator_schema": "jang-expert-lab-validator-v1",
+            "validator_available_prompt_count": 50,
+            "prompt_classification_counts": {\(classificationCountsJSON(count: 50))},
+            "baseline_qualified_prompt_count": 50,
+            "baseline_qualified_prompt_ids": [\(promptIDs)],
+            "baseline_invalid_prompt_ids": [],
+            "inconclusive_prompt_ids": [],
+            "preserved_prompt_ids": [\(promptIDs)],
+            "degraded_prompt_ids": [],
+            "baseline_qualified_masked_pass_rate": 1.0,
+            "baseline_qualified_semantic_coverage": [\(requiredSemanticCoverageJSON())],
+            "missing_baseline_qualified_semantic_coverage": [],
+            "min_baseline_tokens": 12,
+            "min_masked_tokens": 12,
+            "mean_baseline_tokens": 12.0,
+            "mean_masked_tokens": 12.0,
+            "baseline_route_record_count": 50,
+            "masked_route_record_count": 50,
+            "eval_trace_jsonl": "expert_lab_eval_trace.jsonl",
+            "runtime_mode": "bf16_vmlx",
+            "runtime_backend": "vmlx",
+            "runtime_device": "Unit Metal",
+            "runtime_metal_enabled": true,
+            "hooked_moe_layers": 1,
+            "jang_tools_version": "2.5.31",
+            "mlx_version": "0.31.2",
+            "mlx_lm_version": "0.31.3",
+            "source_model_path": "/tmp/jang-unit-bf16-source",
+            "mask_applied": true,
+            "disabled_expert_count": 1
+          },
+          "safety": {
+            "passed": true,
+            "minimum_active_experts_per_layer": \(keepExperts),
+            "trained_top_k_by_layer": {"0": \(trainedTopK)},
+            "issues": []
+          },
+          "target": {"type": "keep_per_layer", "keep_experts_per_layer": \(keepExperts)},
+          "layers": {
+            "0": {
+              "layer": 0,
+              "num_source_experts": 256,
+              "keep": [0],
+              "drop": [1],
+              "evidence": [
+                \(semanticEvidence),
+                {"expert": 1, "hits": 0, "probabilityMass": 0.0, "domains": {}, "label": "unobserved", "kept": false}
+              ]
+            }
+          }
+        }
+        """
+    }
+
+    private static func safetyOnlyReviewedPrunePlanJSON(
+        keepExperts: Int = 128,
+        trainedTopK: Int = 8
+    ) -> String {
+        """
+        {
+          "version": 1,
+          "method": "prompt_trace_hits_mass_domain_lift_v1",
+          "promptCount": 50,
+          "keepExpertsPerLayer": \(keepExperts),
+          "safety": {
+            "passed": true,
+            "minimum_active_experts_per_layer": \(keepExperts),
+            "trained_top_k_by_layer": {"0": \(trainedTopK)},
+            "issues": []
+          },
+          "target": {"type": "keep_per_layer", "keep_experts_per_layer": \(keepExperts)},
+          "layers": {}
+        }
+        """
     }
 }

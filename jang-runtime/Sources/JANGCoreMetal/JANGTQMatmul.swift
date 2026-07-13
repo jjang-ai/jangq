@@ -185,7 +185,7 @@ public struct JANGTQFusedGateUpSwiGLU {
         K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2,
         swigluLimit: Float = 0
     ) {
-        precondition(bits > 0 && bits <= 8 && 32 % bits == 0)
+        precondition([2, 3, 4, 8].contains(bits))
         let valsPerU32 = 32 / bits
         let packedCols = (inFeatures + valsPerU32 - 1) / valsPerU32
         let limitMilli = UInt32(max(0, Int((swigluLimit * 1000).rounded())))
@@ -267,7 +267,7 @@ public struct JANGTQGatherMatmul {
         outBuf: MTLBuffer,
         K: Int, inFeatures: Int, outFeatures: Int, bits: Int = 2
     ) {
-        precondition(bits > 0 && bits <= 8 && 32 % bits == 0)
+        precondition([2, 3, 4, 8].contains(bits))
         let valsPerU32 = 32 / bits
         let packedCols = (inFeatures + valsPerU32 - 1) / valsPerU32
         var meta: [UInt32] = [

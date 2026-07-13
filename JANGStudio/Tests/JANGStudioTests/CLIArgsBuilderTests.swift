@@ -36,7 +36,7 @@ final class CLIArgsBuilderTests: XCTestCase {
         for prof in profiles {
             let args = CLIArgsBuilder.args(for: plan(profile: prof))
             XCTAssertEqual(Array(args.prefix(2)), ["-m", "jang_tools"], "profile=\(prof) should route to jang_tools, got \(args.prefix(2))")
-            XCTAssertEqual(args[2], "convert", "profile=\(prof) should use `convert` subcommand")
+            XCTAssertEqual(args[4], "convert", "profile=\(prof) should use `convert` subcommand after global flags")
             XCTAssertTrue(args.contains("-p"), "profile=\(prof) missing -p flag")
             XCTAssertEqual(args[args.firstIndex(of: "-p")! + 1], prof,
                            "profile=\(prof) flag value should match input")
@@ -52,6 +52,10 @@ final class CLIArgsBuilderTests: XCTestCase {
             let qwenArgs = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: prof, modelType: "qwen3_5_moe"))
             XCTAssertEqual(qwenArgs[1], qwenExpected, "qwen JANGTQ \(prof) routes wrong")
             XCTAssertTrue(qwenArgs.contains(prof))
+
+            let qwenTextArgs = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: prof, modelType: "qwen3_5_moe_text"))
+            XCTAssertEqual(qwenTextArgs[1], qwenExpected, "qwen text JANGTQ \(prof) routes wrong")
+            XCTAssertTrue(qwenTextArgs.contains(prof))
 
             let mmArgs = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: prof, modelType: "minimax_m2"))
             XCTAssertEqual(mmArgs[1], mmExpected, "minimax JANGTQ \(prof) routes wrong")
@@ -81,6 +85,11 @@ final class CLIArgsBuilderTests: XCTestCase {
         }
     }
 
+    func test_jangGlobalProgressFlagsPrecedeConvertSubcommand() {
+        let args = CLIArgsBuilder.args(for: plan())
+        XCTAssertEqual(Array(args.prefix(5)), ["-m", "jang_tools", "--progress=json", "--quiet-text", "convert"])
+    }
+
     func test_jangtqDoesNotPassMethodOrHadamard() {
         let args = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: "JANGTQ3",
                                                  method: .rtn, hadamard: true,
@@ -98,12 +107,70 @@ final class CLIArgsBuilderTests: XCTestCase {
         XCTAssertTrue(args.contains("/Volumes/Out/Qwen3.6-JANG_2L"))
     }
 
-    func test_unknownJANGTQArchFallsBackToQwenConverter() {
-        // Defensive: if detected.modelType somehow isn't in the whitelist but user reached
-        // the JANGTQ tab (shouldn't happen given preflight), we fall back to the qwen converter
-        // to avoid a crash. Preflight should have already rejected this case.
+    func test_unknownJANGTQArchReturnsEmptyArgs() {
+        // Hard-fail: unmapped architectures must not silently route to the Qwen
+        // converter (pre-PR1 default). Preflight + RunStep refuse to start.
         let args = CLIArgsBuilder.args(for: plan(family: .jangtq, profile: "JANGTQ2", modelType: "some_other_moe"))
+        XCTAssertEqual(args, [], "unmapped JANGTQ arch must return empty argv, got \(args)")
+        XCTAssertNil(CLIArgsBuilder.jangtqModule(for: plan(family: .jangtq, profile: "JANGTQ2", modelType: "some_other_moe")))
+    }
+
+    func test_unknownModelType_nilTextModelType_returnsEmptyArgs() {
+        let p = plan(family: .jangtq, profile: "JANGTQ2", modelType: "some_other_moe")
+        // Explicit: no textModelType fallback available.
+        p.detected = .init(modelType: "some_other_moe", isMoE: true, numExperts: 64, isVL: false,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1,
+                           textModelType: nil)
+        XCTAssertEqual(CLIArgsBuilder.args(for: p), [])
+        XCTAssertNil(CLIArgsBuilder.jangtqModule(for: p))
+    }
+
+    func test_jangtqModule_usesTextModelTypeForWrapper() {
+        // VL wrapper: outer modelType is not on the module map, but textModelType is.
+        // Same fixture shape as ConversionPlanTests wrapper allow-list case.
+        let p = plan(family: .jangtq, profile: "JANGTQ3", modelType: "qwen3_5_moe_wrapper")
+        p.detected = .init(modelType: "qwen3_5_moe_wrapper", isMoE: true, numExperts: 256, isVL: true,
+                           isVideoVL: false, hasGenerationConfig: true, dtype: .bf16, totalBytes: 0, shardCount: 1,
+                           textModelType: "qwen3_5_moe_text")
+        let args = CLIArgsBuilder.args(for: p)
+        XCTAssertFalse(args.isEmpty, "wrapper + textModelType should produce non-empty argv")
         XCTAssertEqual(args[1], "jang_tools.convert_qwen35_jangtq")
+        XCTAssertEqual(CLIArgsBuilder.jangtqModule(for: p), "jang_tools.convert_qwen35_jangtq")
+    }
+
+    func test_jangtqModule_nilWhenDetectedMissing() {
+        let p = ConversionPlan()
+        p.sourceURL = URL(fileURLWithPath: "/tmp/src")
+        p.outputURL = URL(fileURLWithPath: "/tmp/out")
+        p.family = .jangtq
+        p.profile = "JANGTQ2"
+        p.detected = nil
+        XCTAssertNil(CLIArgsBuilder.jangtqModule(for: p))
+        XCTAssertEqual(CLIArgsBuilder.args(for: p), [])
+    }
+
+    func test_failureReason_distinguishesMissingURLsVsUnmappedJANGTQ() {
+        let missingURLs = ConversionPlan()
+        missingURLs.family = .jangtq
+        let missingReason = CLIArgsBuilder.failureReason(for: missingURLs)
+        XCTAssertNotNil(missingReason)
+        XCTAssertTrue(missingReason!.contains("sourceURL and outputURL"),
+                      "missing URLs reason should mention URLs, got: \(missingReason!)")
+
+        let unmapped = plan(family: .jangtq, profile: "JANGTQ2", modelType: "some_other_moe")
+        let unmappedReason = CLIArgsBuilder.failureReason(for: unmapped)
+        XCTAssertNotNil(unmappedReason)
+        XCTAssertTrue(unmappedReason!.contains("no module mapping"),
+                      "unmapped reason should mention module mapping, got: \(unmappedReason!)")
+        XCTAssertTrue(unmappedReason!.contains("some_other_moe"))
+
+        let ok = plan(family: .jangtq, profile: "JANGTQ2", modelType: "qwen3_5_moe")
+        XCTAssertNil(CLIArgsBuilder.failureReason(for: ok),
+                     "mapped JANGTQ with URLs should have no failure reason")
+
+        let jangOK = plan(family: .jang, profile: "JANG_4K", modelType: "llama")
+        XCTAssertNil(CLIArgsBuilder.failureReason(for: jangOK),
+                     "JANG family never fails on module map")
     }
 
     // MARK: - Advanced overrides propagate to the JANG CLI

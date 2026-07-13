@@ -19,7 +19,7 @@ struct JANGStudioApp: App {
                     await profiles.refresh()
                 }
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
 
         Settings {
             SettingsWindow(settings: settings)

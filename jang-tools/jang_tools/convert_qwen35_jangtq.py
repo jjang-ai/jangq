@@ -173,13 +173,19 @@ try:
         if ".shared_expert." in tensor_name and tensor_name.endswith(".weight"):
             return (8, "affine", None)
 
-        # Routed experts (pre-stacked) → MXTQ at profile bits
-        #   experts.gate_up_proj  → split into switch_mlp.gate_proj + switch_mlp.up_proj
-        #   experts.down_proj     → switch_mlp.down_proj
-        if tensor_name.endswith(".mlp.experts.gate_up_proj"):
+        # Routed experts (pre-stacked) → MXTQ at profile bits.
+        # Qwen3.5/3.6 usually ships packed gate_up + down tensors, while
+        # fixtures and some MoE exports use split gate/up/down `.weight`
+        # tensors. Treat both layouts as routed experts; otherwise split 3D
+        # expert tensors fall through to affine quantization and MLX rejects
+        # small shapes such as (64, 8, 8) with group_size=64.
+        if routed_projection_from_name(tensor_name) == "gate_up_proj":
             bits = _MIXED_EXPERT_BITS["gate_proj"] if _MIXED_EXPERT_BITS else EXPERT_BITS
             return (bits, "mxtq", None)
-        if tensor_name.endswith(".mlp.experts.down_proj"):
+        if routed_projection_from_name(tensor_name) in {"gate_proj", "up_proj"}:
+            bits = _MIXED_EXPERT_BITS["gate_proj"] if _MIXED_EXPERT_BITS else EXPERT_BITS
+            return (bits, "mxtq", None)
+        if routed_projection_from_name(tensor_name) == "down_proj":
             bits = _MIXED_EXPERT_BITS["down_proj"] if _MIXED_EXPERT_BITS else EXPERT_BITS
             return (bits, "mxtq", None)
 
@@ -199,6 +205,31 @@ try:
         if hf_key == "lm_head.weight" or hf_key.startswith("lm_head."):
             return "language_model." + hf_key
         return hf_key
+
+
+    def strip_weight_suffix(name):
+        return name[:-len(".weight")] if name.endswith(".weight") else name
+
+
+    def routed_projection_from_name(name):
+        base = strip_weight_suffix(name)
+        for projection in ("gate_up_proj", "gate_proj", "up_proj", "down_proj"):
+            if base.endswith(f".mlp.experts.{projection}"):
+                return projection
+        return None
+
+
+    def mxtq_output_base(out_name, projection):
+        base = strip_weight_suffix(out_name)
+        if projection == "gate_up_proj":
+            raise ValueError("packed gate_up projection must be split before naming")
+        if projection in {"gate_proj", "up_proj", "down_proj"}:
+            return base.replace(f"experts.{projection}", f"switch_mlp.{projection}")
+        return base
+
+
+    def can_affine_quantize(tensor):
+        return tensor.ndim == 2 and tensor.shape[-1] >= 64 and tensor.shape[-1] % 64 == 0
 
 
     print("=" * 60)
@@ -288,7 +319,7 @@ try:
         print(f"  Resume: {len(done_keys)} keys already written, continuing from shard {shard_idx + 1}", flush=True)
 
 
-    def is_already_done(out_name, method, split_gate_up):
+    def is_already_done(out_name, method, routed_projection):
         if method == "skip":
             return True
         if method == "passthrough":
@@ -297,15 +328,19 @@ try:
             base = out_name[:-7] if out_name.endswith(".weight") else out_name
             return (f"{base}.weight" in done_keys and f"{base}.scales" in done_keys and f"{base}.biases" in done_keys)
         if method == "mxtq":
-            if split_gate_up:
-                gb = out_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
-                ub = out_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
-                return (f"{gb}.tq_packed" in done_keys and f"{ub}.tq_packed" in done_keys)
+            if routed_projection == "gate_up_proj":
+                base = strip_weight_suffix(out_name)
+                gb = base.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
+                ub = base.replace("experts.gate_up_proj", "switch_mlp.up_proj")
+                return (
+                    f"{gb}.tq_packed" in done_keys and f"{ub}.tq_packed" in done_keys and
+                    f"{gb}.tq_in_features" in done_keys and f"{ub}.tq_in_features" in done_keys
+                )
             else:
-                base = out_name.replace("experts.down_proj", "switch_mlp.down_proj") \
-                       if out_name.endswith("experts.down_proj") else out_name
+                base = mxtq_output_base(out_name, routed_projection)
                 return (f"{base}.tq_packed" in done_keys and
-                        f"{base}.tq_norms" in done_keys and f"{base}.tq_bits" in done_keys)
+                        f"{base}.tq_norms" in done_keys and f"{base}.tq_bits" in done_keys and
+                        f"{base}.tq_in_features" in done_keys)
         return False
 
 
@@ -321,12 +356,12 @@ try:
             total_skipped += 1
             continue
 
-        split_gate_up = tensor_name.endswith("experts.gate_up_proj")
+        routed_projection = routed_projection_from_name(tensor_name)
 
         # Resume check
-        if done_keys and is_already_done(out_name, method, split_gate_up):
+        if done_keys and is_already_done(out_name, method, routed_projection):
             skipped_resume += 1
-            if method == "mxtq":   total_mxtq += (2 if split_gate_up else 1)
+            if method == "mxtq":   total_mxtq += (2 if routed_projection == "gate_up_proj" else 1)
             elif method == "affine": total_affine += 1
             else:                    total_passthrough += 1
             continue
@@ -358,6 +393,16 @@ try:
             total_passthrough += 1
 
         elif method == "affine":
+            if not can_affine_quantize(tensor):
+                add_tensor(out_name, tensor.astype(np.float16))
+                total_passthrough += 1
+                print(
+                    f"    [affine-skip] {tensor_name} shape={tuple(tensor.shape)} "
+                    "is not compatible with affine group_size=64; stored fp16 passthrough",
+                    flush=True,
+                )
+                del tensor
+                continue
             w = mx.array(tensor.astype(np.float16))
             qw, qs, qb = mx.quantize(w, group_size=64, bits=bits)
             base = out_name[:-7] if out_name.endswith(".weight") else out_name
@@ -370,27 +415,33 @@ try:
         elif method == "mxtq":
             # Routed experts come pre-stacked (3D): [n_experts, out, in] in HF.
             # Use tq_quantize_experts (handles 3D); tq_quantize_weight is 2D-only.
-            if split_gate_up:
+            def add_tq_group(base_name, result, source_in_features):
+                add_tensor(f"{base_name}.tq_packed", result["packed"])
+                add_tensor(f"{base_name}.tq_norms",  result["norms"])
+                add_tensor(f"{base_name}.tq_bits",   np.array([bits], dtype=np.uint8))
+                add_tensor(
+                    f"{base_name}.tq_in_features",
+                    np.array([int(source_in_features)], dtype=np.int32),
+                )
+
+            if routed_projection == "gate_up_proj":
                 # tensor shape: (n_experts, 2*inter, hidden)
                 mid = tensor.shape[1] // 2
                 gate_tensor = tensor[:, :mid, :]
                 up_tensor   = tensor[:, mid:, :]
-                gate_out = out_name.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
-                up_out   = out_name.replace("experts.gate_up_proj", "switch_mlp.up_proj")
+                base = strip_weight_suffix(out_name)
+                gate_out = base.replace("experts.gate_up_proj", "switch_mlp.gate_proj")
+                up_out   = base.replace("experts.gate_up_proj", "switch_mlp.up_proj")
                 for half_tensor, half_out in ((gate_tensor, gate_out), (up_tensor, up_out)):
                     result = tq_quantize_experts(half_tensor, bits=bits, seed=SEED)
-                    add_tensor(f"{half_out}.tq_packed", result["packed"])
-                    add_tensor(f"{half_out}.tq_norms",  result["norms"])
-                    add_tensor(f"{half_out}.tq_bits",   np.array([bits], dtype=np.uint8))
+                    add_tq_group(half_out, result, half_tensor.shape[-1])
                     total_mxtq += 1
                 del gate_tensor, up_tensor
             else:
-                # experts.down_proj pre-stacked (3D)
-                down_out = out_name.replace("experts.down_proj", "switch_mlp.down_proj")
+                # Split expert projections and experts.down_proj pre-stacked (3D).
+                out_base = mxtq_output_base(out_name, routed_projection)
                 result = tq_quantize_experts(tensor, bits=bits, seed=SEED)
-                add_tensor(f"{down_out}.tq_packed", result["packed"])
-                add_tensor(f"{down_out}.tq_norms",  result["norms"])
-                add_tensor(f"{down_out}.tq_bits",   np.array([bits], dtype=np.uint8))
+                add_tq_group(out_base, result, tensor.shape[-1])
                 total_mxtq += 1
 
         del tensor
@@ -524,6 +575,14 @@ try:
     # Map it back to a concrete class that swift-transformers knows. For the
     # Qwen 3.5/3.6 family this is Qwen2Tokenizer (same vocab family).
     _tok_cfg = OUT / "tokenizer_config.json"
+    if not _tok_cfg.exists() and (OUT / "tokenizer.json").exists():
+        _tc = {
+            "tokenizer_class": "PreTrainedTokenizerFast",
+            "model_max_length": text_cfg.get("max_position_embeddings", 131072),
+        }
+        with open(_tok_cfg, "w") as f:
+            json.dump(_tc, f, indent=2)
+        print("  [tokenizer] synthesized minimal tokenizer_config.json from tokenizer.json", flush=True)
     if _tok_cfg.exists():
         try:
             with open(_tok_cfg) as f:
@@ -533,6 +592,21 @@ try:
                 with open(_tok_cfg, "w") as f:
                     json.dump(_tc, f, indent=2)
                 print("  [osaurus-fix] tokenizer_class: TokenizersBackend → Qwen2Tokenizer", flush=True)
+            _special_map = OUT / "special_tokens_map.json"
+            if not _special_map.exists():
+                special = {}
+                for _key in [
+                    "bos_token", "eos_token", "pad_token", "unk_token",
+                    "sep_token", "cls_token", "mask_token",
+                ]:
+                    if _tc.get(_key):
+                        special[_key] = _tc[_key]
+                if _tc.get("additional_special_tokens"):
+                    special["additional_special_tokens"] = _tc["additional_special_tokens"]
+                if special:
+                    with open(_special_map, "w") as f:
+                        json.dump(special, f, indent=2)
+                    print("  [tokenizer] synthesized special_tokens_map.json from tokenizer_config.json", flush=True)
         except Exception as _e:
             print(f"  [osaurus-fix] skipped: {_e}", flush=True)
 

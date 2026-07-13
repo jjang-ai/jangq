@@ -42,7 +42,7 @@ struct Capabilities: Codable, Equatable, Sendable {
     /// jang-tools/jang_tools/capabilities_cli.py — treat this as "last known good"
     /// for offline UI rendering; real behavior still requires a working runtime.
     static let frozen: Capabilities = .init(
-        jangtqWhitelist: ["minimax_m2", "qwen3_5_moe"],
+        jangtqWhitelist: ["minimax_m2", "qwen3_5_moe", "qwen3_5_moe_text"],
         knownExpert512Types: ["minimax_m2", "glm_moe_dsa"],
         supportedSourceDtypes: [
             .init(name: "bfloat16", alias: "bf16", description: "HuggingFace standard for modern LLMs"),

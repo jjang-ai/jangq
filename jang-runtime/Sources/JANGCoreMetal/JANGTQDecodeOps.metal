@@ -77,15 +77,19 @@ kernel void jangtq_rmsnorm(
 // ============================================================================
 //
 // Applies rotary position embedding to a (n_heads, head_dim) tensor in place.
+// `rotary_dim` may be smaller than `head_dim` for partial RoPE models; the
+// full head_dim remains the row stride and only the first rotary_dim values
+// in each head are rotated.
 // Convention matches mlx_lm `nn.RoPE(traditional=False)`: split each head into
-// real (first half) + imag (second half), rotate by pos*freq.
+// real (first half of rotary_dim) + imag (second half), rotate by pos*freq.
 //
-// Grid: (n_heads * head_dim/2, 1, 1)
+// Grid: (n_heads * rotary_dim/2, 1, 1)
 // One thread per (head, dim_pair).
 //
 struct RoPEParams {
     uint  n_heads;
     uint  head_dim;
+    uint  rotary_dim;
     uint  position;
     float base;     // 10000.0 for standard RoPE
 };
@@ -95,14 +99,14 @@ kernel void jangtq_rope(
     constant RoPEParams& p     [[buffer(1)]],
     uint tid                    [[thread_position_in_grid]]
 ) {
-    uint half_dim = p.head_dim / 2u;
+    uint half_dim = p.rotary_dim / 2u;
     uint total_pairs = p.n_heads * half_dim;
     if (tid >= total_pairs) return;
 
     uint h = tid / half_dim;
     uint i = tid % half_dim;
 
-    float freq = pow(p.base, -2.0f * float(i) / float(p.head_dim));
+    float freq = pow(p.base, -2.0f * float(i) / float(p.rotary_dim));
     float angle = float(p.position) * freq;
     float c = cos(angle);
     float s = sin(angle);
@@ -287,4 +291,51 @@ kernel void jangtq_cast_f32_to_f16(
 ) {
     if (tid >= p.count) return;
     dst[tid] = half(src[tid]);
+}
+
+
+// ============================================================================
+//  Qwen gated attention helpers
+// ============================================================================
+//
+// Qwen3-Next/Qwen3.6 gated full attention packs q_proj per head as
+// [query_head, gate_head]. Split that layout into separate contiguous query and
+// gate buffers before q_norm/RoPE/SDPA.
+//
+struct QwenGatedQParams {
+    uint n_heads;
+    uint head_dim;
+};
+
+kernel void jangtq_qwen_gated_q_split(
+    device const half* q_full [[buffer(0)]],
+    device       half* q      [[buffer(1)]],
+    device       half* gate   [[buffer(2)]],
+    constant QwenGatedQParams& p [[buffer(3)]],
+    uint tid                  [[thread_position_in_grid]]
+) {
+    uint total = p.n_heads * p.head_dim;
+    if (tid >= total) return;
+
+    uint head = tid / p.head_dim;
+    uint dim = tid - head * p.head_dim;
+    uint src_base = head * p.head_dim * 2u;
+    q[tid] = q_full[src_base + dim];
+    gate[tid] = q_full[src_base + p.head_dim + dim];
+}
+
+struct AttentionGateParams {
+    uint count;
+};
+
+kernel void jangtq_apply_attention_gate(
+    device       half* attn_out [[buffer(0)]],
+    device const half* gate     [[buffer(1)]],
+    constant AttentionGateParams& p [[buffer(2)]],
+    uint tid                    [[thread_position_in_grid]]
+) {
+    if (tid >= p.count) return;
+    float g = float(gate[tid]);
+    float s = 1.0f / (1.0f + exp(-g));
+    attn_out[tid] = half(float(attn_out[tid]) * s);
 }

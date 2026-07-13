@@ -15,6 +15,7 @@ let package = Package(
         .executable(name: "jang-core", targets: ["JangCoreCLI"]),
         .library(name: "JANG", targets: ["JANG"]),
         .library(name: "JANGKit", targets: ["JANGKit"]),
+        .library(name: "JANGExpertLab", targets: ["JANGExpertLab"]),
         .library(name: "JANGCore", targets: ["JANGCore"]),
         .library(name: "JANGCoreMetal", targets: ["JANGCoreMetal"]),
     ],
@@ -25,6 +26,7 @@ let package = Package(
         .target(name: "JANGMetal", dependencies: [], path: "Sources/JANGMetal"),
         .target(name: "JANG", dependencies: ["JANGMetal", "JANGCoreMetal"], path: "Sources/JANG"),
         .target(name: "JANGKit", dependencies: ["JANG"], path: "Sources/JANGKit"),
+        .target(name: "JANGExpertLab", dependencies: ["JANGKit", "JANG"], path: "Sources/JANGExpertLab"),
         .target(name: "JANGCore", dependencies: [], path: "Sources/JANGCore"),
         .target(
             name: "JANGCoreMetal",
@@ -54,6 +56,7 @@ let package = Package(
         ),
         .testTarget(name: "JANGTests", dependencies: ["JANG", "JANGCoreMetal"], path: "Tests/JANGTests"),
         .testTarget(name: "JANGKitTests", dependencies: ["JANGKit"], path: "Tests/JANGKitTests"),
+        .testTarget(name: "JANGExpertLabTests", dependencies: ["JANGExpertLab"], path: "Tests/JANGExpertLabTests"),
         .testTarget(name: "JANGCoreTests", dependencies: ["JANGCore"], path: "Tests/JANGCoreTests"),
         .testTarget(
             name: "JANGCoreMetalTests",

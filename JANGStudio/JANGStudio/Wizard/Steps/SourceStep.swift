@@ -1,6 +1,19 @@
 // JANGStudio/JANGStudio/Wizard/Steps/SourceStep.swift
 import SwiftUI
 
+enum SourceStepExpertPruneSupport {
+    private static let qwenRawMoEModelTypes: Set<String> = [
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    ]
+
+    static func supportsRawQwenPrequantPrune(_ detected: ArchitectureSummary) -> Bool {
+        return detected.isMoE
+            && detected.architectureModelTypes.contains { qwenRawMoEModelTypes.contains($0) }
+            && [.bf16, .fp16].contains(detected.dtype)
+    }
+}
+
 struct SourceStep: View {
     @Bindable var coord: WizardCoordinator
     // M143 (iter 65): access AppSettings so applyRecommendation can tell
@@ -14,6 +27,8 @@ struct SourceStep: View {
     @State private var isRecommending = false
     @State private var errorText: String?
     @State private var recommendation: Recommendation?
+    @State private var showingPrequantPrune = false
+    @State private var autoOpenedAttachedPlan = false
     /// M135 (iter 57): stale-task handle tracking. User picks folder A →
     /// detection starts (Task A, ~5s) → user changes mind, picks folder B →
     /// detection starts (Task B, ~1s). Without this handle, Task A continues
@@ -77,9 +92,13 @@ struct SourceStep: View {
             if let detected = coord.plan.detected {
                 Section("Detected") {
                     LabeledContent("Model type", value: detected.modelType)
+                    if let textModelType = detected.textModelType,
+                       textModelType != detected.modelType {
+                        LabeledContent("Text model type", value: textModelType)
+                    }
                     LabeledContent(
                         "Parameters",
-                        value: detected.isMoE ? "MoE · \(detected.numExperts) experts" : "Dense"
+                        value: detected.parameterSummary
                     )
                     LabeledContent("Source dtype", value: detected.dtype.rawValue.uppercased())
                     LabeledContent(
@@ -101,6 +120,158 @@ struct SourceStep: View {
                         )
                         .foregroundStyle(.red)
                         .font(.callout)
+                    }
+                }
+
+                Section {
+                    if detected.isMoE {
+                        // PR3: required segmented control — Convert is default primary path.
+                        Picker("Workflow", selection: Binding(
+                            get: { coord.plan.workflowMode },
+                            set: { newMode in
+                                if newMode == .expertLab {
+                                    // Flip mode without navigating; user picks CTA.
+                                    coord.plan.workflowMode = .expertLab
+                                    coord.ensureActiveIsVisible()
+                                } else {
+                                    coord.setWorkflowMode(.convert)
+                                }
+                            }
+                        )) {
+                            Text("Convert").tag(WizardMode.convert)
+                            Text("Expert Lab").tag(WizardMode.expertLab)
+                        }
+                        .pickerStyle(.segmented)
+
+                        if coord.plan.workflowMode == .convert {
+                            Text("Profile → quantize → verify. Skip expert prune.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button {
+                                goDirectConvert()
+                            } label: {
+                                Label("Continue to Profile", systemImage: "arrow.right.circle")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+
+                            Button {
+                                coord.enterExpertLabReview()
+                            } label: {
+                                Label("Analyze Experts Before Pruning", systemImage: "point.3.connected.trianglepath.dotted")
+                            }
+                            .disabled(!canPrepareExpertLabBundle(detected))
+                        } else {
+                            ExpertLabConsoleCard {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    ExpertLabKicker(text: "Expert Lab path")
+                                    Label("Analyze experts before pruning", systemImage: "point.3.connected.trianglepath.dotted")
+                                        .font(.title3.weight(.semibold))
+                                    Text("Trace prompt-suite routing, inspect the expert atlas, mask and compare behavior, then generate a reviewed BF16/F16 prune plan before final conversion.")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    ExpertLabWorkflowStrip(
+                                        steps: ["Trace", "Atlas", "Mask/Compare", "Prune Plan", "BF16/F16 Prune", "Verify", "Convert"],
+                                        activeIndex: 0
+                                    )
+                                    HStack(spacing: 8) {
+                                        Label(
+                                            detected.routedExpertTotal.map { "\($0) routed slots" } ?? "\(detected.numExperts) experts",
+                                            systemImage: "square.grid.3x3"
+                                        )
+                                        Label("source stays immutable", systemImage: "lock.shield")
+                                        Label("prune before quantize", systemImage: "scissors")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                    Button {
+                                        coord.enterExpertLabReview()
+                                    } label: {
+                                        Label("Analyze Experts Before Pruning", systemImage: "point.3.connected.trianglepath.dotted")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.large)
+                                    .disabled(!canPrepareExpertLabBundle(detected))
+
+                                    Text("Runs the original BF16/F16 source through vMLX in Expert Lab, lets you disable experts and compare outputs, then returns a smart keep/drop plan for BF16/F16 source pruning.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+
+                            Button {
+                                goDirectConvert()
+                            } label: {
+                                Label("Direct Convert Without Pruning", systemImage: "arrow.right.circle")
+                            }
+                        }
+
+                        if let attachedReviewPlanURL {
+                            Label("Smart expert review plan ready. The next prune will use prompt-suite trace evidence and any experts you disabled during review.",
+                                  systemImage: "checkmark.seal.fill")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                            Text(attachedReviewPlanURL.path)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+
+                        // Router-only prune stays under Convert (non-reviewed escape hatch).
+                        if coord.plan.workflowMode == .convert || attachedReviewPlanURL != nil {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button {
+                                    if attachedReviewPlanURL != nil {
+                                        coord.plan.workflowMode = .expertLab
+                                        coord.ensureActiveIsVisible()
+                                        if coord.canActivate(.pruneReview) {
+                                            coord.active = .pruneReview
+                                        }
+                                    } else {
+                                        showingPrequantPrune = true
+                                    }
+                                } label: {
+                                    Label(attachedReviewPlanURL == nil ? "Router-Only Prune..." : "Open Reviewed Prune Plan",
+                                          systemImage: "scissors")
+                                }
+                                .disabled(!canPrequantPrune(detected))
+                                .fixedSize(horizontal: false, vertical: true)
+
+                                if canPrequantPrune(detected), attachedReviewPlanURL == nil {
+                                    Label("Fallback uses router-row strength only; it does not probe prompts. It cannot unlock final quantization.",
+                                          systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(ExpertLabVisual.warm)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+
+                        if !canPrequantPrune(detected) {
+                            Label("Pre-quant source pruning is currently wired for qwen3_5_moe/qwen3_5_moe_text raw MoE sources. You can still inspect Expert Lab traces, but hard pruning should wait for a supported source-prune adapter.",
+                                  systemImage: "info.circle")
+                                .font(.caption)
+                        }
+                    } else {
+                        Label("No routed experts were detected, so Expert Lab is not available. Continue with Convert: Profile → Run → Verify.",
+                              systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text(detected.isMoE ? "Workflow" : "Expert Lab & pruning")
+                }
+            } else if isDetecting {
+                Section("Detected") {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Inspecting source…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -187,6 +358,20 @@ struct SourceStep: View {
                         InfoHint("Smart defaults auto-filled based on what JANG Studio detected. Most beginners can skip Steps 2 and 3 and hit Start in Step 4.")
                     }
                 }
+            } else if isRecommending {
+                Section {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Building recommendation…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    HStack(spacing: 4) {
+                        Text("Recommended for this model")
+                        InfoHint("Smart defaults auto-filled based on what JANG Studio detected. Most beginners can skip Steps 2 and 3 and hit Start in Step 4.")
+                    }
+                }
             }
 
             // MARK: - Detection status
@@ -194,24 +379,47 @@ struct SourceStep: View {
                 Label(errorText, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
             }
-            if isDetecting || isRecommending {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(isDetecting ? "Inspecting source…" : "Building recommendation…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
 
             // MARK: - Continue
             if coord.plan.isStep1Complete {
-                Button("Continue →") { coord.active = .architecture }
+                Button("Continue →") {
+                    // PR3: honor workflow mode. Convert → Profile; Expert Lab → review.
+                    if coord.plan.workflowMode == .expertLab,
+                       coord.plan.detected?.isMoE == true {
+                        coord.enterExpertLabReview()
+                    } else {
+                        goDirectConvert()
+                    }
+                }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(ExpertLabVisual.canvas)
         .padding()
+        .sheet(isPresented: $showingPrequantPrune) {
+            if let url = coord.plan.sourceURL, let detected = coord.plan.detected {
+                PrequantPruneSheet(
+                    sourceURL: url,
+                    detected: detected,
+                    initialPrunePlanURL: attachedReviewPlanURL
+                ) { prunedURL in
+                    if attachedReviewPlanURL != nil {
+                        adoptReviewedPrunedSource(url: prunedURL)
+                    } else {
+                        adoptSource(url: prunedURL)
+                    }
+                }
+            }
+        }
+        .task(id: coord.plan.expertReviewPlanURL) {
+            if attachedReviewPlanURL != nil, !autoOpenedAttachedPlan {
+                autoOpenedAttachedPlan = true
+                coord.active = .pruneReview
+            }
+        }
         .onDisappear {
             // M171 (iter 94): cancel the detection Task when SourceStep
             // unmounts. SwiftUI fires .onDisappear on sidebar-jump, window
@@ -235,16 +443,82 @@ struct SourceStep: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
-            coord.plan.sourceURL = url
-            coord.plan.detected = nil
-            recommendation = nil
-            errorText = nil
-            // M135 (iter 57): cancel any previous detection task before
-            // starting a new one. Without this, a slow previous detection
-            // can stomp the new URL's state after it finishes.
             detectionTask?.cancel()
-            detectionTask = Task { await detectAndRecommend(url: url) }
+            adoptSource(url: url)
         }
+    }
+
+    private func adoptSource(url: URL) {
+        coord.plan.sourceURL = url
+        coord.plan.detected = nil
+        coord.plan.outputURL = nil
+        coord.plan.run = .idle
+        coord.plan.workflowMode = .convert
+        coord.plan.expertReviewIntent = .none
+        coord.plan.expertReviewSourceURL = nil
+        coord.plan.expertReviewPlanURL = nil
+        coord.plan.expertReviewOriginalSourceURL = nil
+        coord.plan.expertReviewPrunedSourceURL = nil
+        coord.plan.expertReviewPrunePlanURL = nil
+        coord.plan.expertReviewPruneReportURL = nil
+        autoOpenedAttachedPlan = false
+        recommendation = nil
+        errorText = nil
+        coord.ensureActiveIsVisible()
+        // M135 (iter 57): cancel any previous detection task before
+        // starting a new one. Without this, a slow previous detection
+        // can stomp the new URL's state after it finishes.
+        detectionTask?.cancel()
+        detectionTask = Task { await detectAndRecommend(url: url) }
+    }
+
+    private func adoptReviewedPrunedSource(url: URL) {
+        coord.plan.adoptReviewedPrunedSource(url)
+        coord.ensureActiveIsVisible()
+        autoOpenedAttachedPlan = false
+        recommendation = nil
+        errorText = nil
+        detectionTask?.cancel()
+        detectionTask = Task { await detectAndRecommend(url: url) }
+    }
+
+    private func goDirectConvert() {
+        coord.setWorkflowMode(.convert)
+        if coord.canActivate(.profile) {
+            coord.active = .profile
+        }
+    }
+
+    private func canPrequantPrune(_ detected: ArchitectureSummary) -> Bool {
+        SourceStepExpertPruneSupport.supportsRawQwenPrequantPrune(detected)
+    }
+
+    private func canPrepareExpertLabBundle(_ detected: ArchitectureSummary) -> Bool {
+        SourceStepExpertPruneSupport.supportsRawQwenPrequantPrune(detected)
+    }
+
+    private var attachedReviewPlanURL: URL? {
+        guard coord.plan.expertReviewIntent == .smartPrequantPrune,
+              coord.plan.expertReviewSourceURL == coord.plan.sourceURL else {
+            return nil
+        }
+        return coord.plan.expertReviewPlanURL
+    }
+
+    private func startExpertReview() {
+        autoOpenedAttachedPlan = false
+        coord.enterExpertLabReview()
+    }
+
+    private func prepareExpertLabBundle() {
+        coord.plan.family = .jangtq
+        if !coord.plan.profile.hasPrefix("JANGTQ") {
+            coord.plan.profile = "JANGTQ3"
+        }
+        coord.plan.hadamard = false
+        coord.plan.outputURL = nil
+        coord.plan.run = .idle
+        coord.active = .profile
     }
 
     private func detectAndRecommend(url: URL) async {
@@ -272,6 +546,12 @@ struct SourceStep: View {
                 // result is stale regardless of cancel state.
                 guard coord.plan.sourceURL == url else { return }
                 coord.plan.detected = detected
+                // PR3: dense models force Convert; MoE keeps current mode
+                // (already .convert after adoptSource).
+                if !detected.isMoE {
+                    coord.plan.workflowMode = .convert
+                }
+                coord.ensureActiveIsVisible()
             }
         } catch {
             await MainActor.run {
@@ -436,8 +716,11 @@ enum SourceDetectorError: Error, LocalizedError {
 enum SourceDetector {
     struct SourceInfo: Decodable {
         let model_type: String
+        let text_model_type: String?
         let is_moe: Bool
         let num_experts: Int
+        let num_hidden_layers: Int?
+        let num_experts_per_tok: Int?
         let dtype: String
         let total_bytes: Int64
         let shard_count: Int
@@ -475,6 +758,14 @@ enum SourceDetector {
         return .init(modelType: info.model_type, isMoE: info.is_moe, numExperts: info.num_experts,
                      isVL: info.is_vl, isVideoVL: info.is_video_vl,
                      hasGenerationConfig: info.has_generation_config,
-                     dtype: dtype, totalBytes: info.total_bytes, shardCount: info.shard_count)
+                     dtype: dtype, totalBytes: info.total_bytes, shardCount: info.shard_count,
+                     textModelType: info.text_model_type,
+                     numHiddenLayers: positive(info.num_hidden_layers),
+                     numExpertsPerTok: positive(info.num_experts_per_tok))
+    }
+
+    private static func positive(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
     }
 }

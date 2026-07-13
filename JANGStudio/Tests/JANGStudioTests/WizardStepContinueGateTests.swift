@@ -1,26 +1,17 @@
 // JANGStudio/Tests/JANGStudioTests/WizardStepContinueGateTests.swift
 //
-// M134 (iter 56): peer-helper parity on wizard step "Continue" buttons.
+// Peer-helper parity on wizard step "Continue" buttons.
 //
 // Each wizard step has a forward-navigation button (e.g. "Continue →",
-// "Looks right → Profile", "Start Conversion"). Pre-iter-56 the 5 steps
-// drifted:
-//   - SourceStep:       wraps the button in `if isStep1Complete { Button… }`
-//   - ArchitectureStep: NO gate (could advance with stale/nil detected state)
-//   - ProfileStep:      `.disabled(!allMandatoryPass())` (preflight-based)
-//   - RunStep:          wraps in `if run == .succeeded { Button… }`
-//   - VerifyStep:       "Convert another" resets state, always safe
-//
-// Iter 56 adds `.disabled(!coord.plan.isStep2Complete)` to Architecture.
-// This test pins the gating invariant via source-inspection so a future
-// refactor can't silently remove it.
+// "Start Conversion"). ArchitectureStep was deleted in PR2; Advanced
+// overrides now live on ProfileStep.
 //
 // We test code-SHAPE rather than runtime behavior because SwiftUI's
 // `.disabled` state isn't trivially inspectable outside a ViewInspector /
-// XCUITest harness. If/when the JANGStudio test suite adopts ViewInspector,
-// this test can migrate to a behavioral check.
+// XCUITest harness.
 
 import XCTest
+@testable import JANGStudio
 
 final class WizardStepContinueGateTests: XCTestCase {
 
@@ -40,25 +31,21 @@ final class WizardStepContinueGateTests: XCTestCase {
         return try String(contentsOf: url, encoding: .utf8)
     }
 
-    func test_architectureStep_continue_is_gated() throws {
-        let src = try stepSource("ArchitectureStep.swift")
-        // The "Looks right → Profile" button must be followed (within ~400
-        // chars) by a `.disabled(` modifier on the step-completeness
-        // predicate OR wrapped in an `if coord.plan.isStep` block.
-        guard let btnRange = src.range(of: #"Button("Looks right → Profile")"#) else {
-            XCTFail("could not locate Architecture step Continue button")
-            return
-        }
-        let after = String(src[btnRange.upperBound...].prefix(400))
-        let hasDisabled = after.contains(".disabled(!coord.plan.isStep2Complete)")
-                       || after.contains(".disabled(!coord.plan.isStep1Complete)")
-        XCTAssertTrue(hasDisabled, """
-            M134 regression: ArchitectureStep's "Looks right → Profile"
-            button must be gated by `.disabled(!coord.plan.isStepNComplete)`.
-            Pre-iter-56 it was unconditional, allowing step-advance with
-            stale/nil detected state. Context after the button:
-            \(after)
-            """)
+    func test_profileStep_hostsAdvancedOverridesDisclosure() throws {
+        // PR2: ArchitectureStep deleted; force dtype / block size live on Profile.
+        let src = try stepSource("ProfileStep.swift")
+        XCTAssertTrue(
+            src.contains("DisclosureGroup(\"Advanced overrides\""),
+            "ProfileStep must host Advanced overrides DisclosureGroup after Architecture cleanup"
+        )
+        XCTAssertTrue(
+            src.contains("forceDtype") && src.contains("forceBlockSize"),
+            "ProfileStep Advanced overrides must bind forceDtype and forceBlockSize"
+        )
+        XCTAssertTrue(
+            src.contains("coord.plan.family == .jang"),
+            "Advanced overrides should be gated to JANG family (JANGTQ ignores them)"
+        )
     }
 
     func test_sourceStep_continue_is_gated() throws {
@@ -75,6 +62,18 @@ final class WizardStepContinueGateTests: XCTestCase {
         XCTAssertTrue(
             src.contains(".disabled(!allMandatoryPass())"),
             "ProfileStep Start Conversion button must remain gated via preflight."
+        )
+        XCTAssertTrue(
+            src.contains("guard !preflight.isEmpty else { return false }"),
+            "ProfileStep must keep conversion disabled until preflight checks have actually loaded."
+        )
+        XCTAssertTrue(
+            src.contains("if isFinalConversionFromReviewedPrune"),
+            "ProfileStep must apply a stricter gate for final quantization from a reviewed BF16/F16 prune."
+        )
+        XCTAssertTrue(
+            src.contains("$0.id == .reviewedPruneVerified && $0.status == .pass"),
+            "ProfileStep final quantization must require the reviewed-prune preflight check to pass."
         )
     }
 
@@ -248,10 +247,60 @@ final class WizardStepContinueGateTests: XCTestCase {
             src.contains("coord.canActivate(step)") && src.contains("set:"),
             "WizardView sidebar set: binding must check canActivate before assigning — M176 iter 109"
         )
-        // Also pin the M176 rationale so a "simplification" that strips the guard surfaces the reviewer.
         XCTAssertTrue(
-            src.contains("M176") && src.contains("canActivate"),
-            "M176 rationale comment must remain — explains why the sidebar ignores locked-step clicks"
+            src.contains("visibleSteps()"),
+            "WizardView sidebar must filter by visibleSteps (PR3 mode switch)"
+        )
+        XCTAssertTrue(
+            src.contains("ensureActiveIsVisible"),
+            "WizardView must keep active selection visible after mode changes"
+        )
+    }
+
+    func test_runStepNavigationRequiresReviewedPruneVerificationForFinalQuant() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("JANGStudio/Wizard")
+        let src = try String(contentsOf: dir.appendingPathComponent("WizardCoordinator.swift"), encoding: .utf8)
+
+        XCTAssertTrue(src.contains("PreflightRunner.reviewedPruneVerifiedCheck(plan: plan)?.status != .pass"))
+        XCTAssertTrue(src.contains("plan.expertReviewPrunedSourceURL != nil"))
+        XCTAssertTrue(src.contains("return plan.isStep3Complete"))
+    }
+
+    func test_expertLab_primary_workflow_steps_are_visible_in_wizard() throws {
+        // PR3: name-only enum titles; numbered labels via displayTitle under mode.
+        XCTAssertEqual(
+            WizardStep.allCases.map(\.title),
+            [
+                "Source Model",
+                "Expert Review",
+                "Prune Review",
+                "Conversion Profile",
+                "Build / Convert",
+                "Verify",
+            ]
+        )
+        let coord = WizardCoordinator()
+        XCTAssertEqual(
+            coord.visibleSteps().map { coord.displayTitle(for: $0) },
+            ["1 · Source Model", "2 · Conversion Profile", "3 · Build / Convert", "4 · Verify"]
+        )
+        coord.plan.detected = .init(
+            modelType: "qwen3_5_moe", isMoE: true, numExperts: 64, isVL: false,
+            dtype: .bf16, totalBytes: 0, shardCount: 1
+        )
+        coord.plan.workflowMode = .expertLab
+        XCTAssertEqual(
+            coord.visibleSteps().map { coord.displayTitle(for: $0) },
+            [
+                "1 · Source Model",
+                "2 · Expert Review",
+                "3 · Prune Review",
+                "4 · Conversion Profile",
+                "5 · Build / Convert",
+                "6 · Verify",
+            ]
         )
     }
 

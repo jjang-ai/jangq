@@ -61,19 +61,25 @@ Required repo secrets: `APPLE_DEV_ID_CERT_P12`, `APPLE_DEV_ID_CERT_PW`, `APPLE_D
 ```
 JANGStudio/
   JANGStudio/
-    App/             - @main + WizardView
-    Models/          - ConversionPlan, ArchitectureSummary, ProgressEvent
+    App/             - @main
+    Models/          - ConversionPlan (+ WizardMode), ArchitectureSummary, ProgressEvent
     Runner/          - PythonRunner, JSONLProgressParser, BundleResolver, CLIArgsBuilder, DiagnosticsBundle
-    Verify/          - PreflightRunner (10 rows) + PostConvertVerifier (12 rows)
-    Wizard/          - WizardCoordinator + 5 step views
+    Verify/          - PreflightRunner + PostConvertVerifier
+    Wizard/          - WizardCoordinator (Convert vs Expert Lab modes, visibleSteps)
+      Steps/         - Source, Profile, Run, Verify (+ Expert/Prune review embedded)
     Resources/       - Info.plist, entitlements, Assets.xcassets
   Tests/
-    JANGStudioTests/         - 40 unit tests + fixtures
-    JANGStudioUITests/       - 1 XCUITest (sidebar renders)
+    JANGStudioTests/         - unit tests + fixtures
+    JANGStudioUITests/       - XCUITest (Convert sidebar at launch)
   Scripts/
     build-python-bundle.sh   - hermetic python3 + jang[mlx] + mlx-vlm --no-deps
     codesign-runtime.sh      - deep-sign bundled python + app (CI only)
     notarize.sh              - xcrun notarytool wrapper (CI only)
   docs/                      - USER_GUIDE, TROUBLESHOOTING, PROGRESS_PROTOCOL, CONTRIBUTING
-  project.yml                - xcodegen source of truth
+  project.yml                - xcodegen source of truth (folder-based sources; no per-step file list)
 ```
+
+Navigation notes:
+- `ConversionPlan.workflowMode` is `.convert` (4 steps) or `.expertLab` (6 steps, MoE only).
+- Advanced overrides (force dtype / block size) live on **ProfileStep**, not a separate Architecture step.
+- JANGTQ module map is in `CLIArgsBuilder.jangtqModuleByModelType` (hard-fail if unmapped).
