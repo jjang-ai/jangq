@@ -423,6 +423,9 @@ def main():
     from .intent_prune.transitions import register as _register_intent_prune_transitions
     _register_intent_prune_transitions(subparsers)
 
+    from .intent_prune.cli import register as _register_intent_prune_score
+    _register_intent_prune_score(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -439,7 +442,8 @@ def main():
                          "profiles", "capabilities", "estimate-model", "publish", "recommend",
                          "prequant-prune-qwen-moe", "expert-lab-vmlx",
                          "expert-lab-vmlx-build-eval",
-                         "intent-prune-transitions", "intent-prune-adjacency")
+                         "intent-prune-transitions", "intent-prune-adjacency",
+                         "intent-prune-score")
         and getattr(args, "json", False)
     )
     if not suppress_banner:

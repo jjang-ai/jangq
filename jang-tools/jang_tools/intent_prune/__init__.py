@@ -1,9 +1,43 @@
-"""Intent Prune helpers (path transitions, hybrid scoring later).
+"""Intent Prune helpers: transitions, path graph, hybrid_v1 scoring.
 
-PR-IP0 ships transition emission + adjacency building only. Hybrid fusion
-(IP1) consumes ``expert_transitions.jsonl`` via :mod:`transitions`.
+PR-IP0: transition emission + adjacency building.
+PR-IP1: power-iteration path scores + hybrid fusion + plan emit.
 """
 
+from .graph import (
+    build_row_stochastic,
+    decode_node,
+    mass_matrix_from_adjacency,
+    node_id,
+    path_scores_from_transitions,
+    power_iteration,
+    stationary_from_adjacency,
+)
+from .score import (
+    BALANCED_WEIGHTS,
+    HIGHWAY_E,
+    HIGHWAY_H,
+    HIGHWAY_L,
+    HIGHWAY_N,
+    PLAN_SCHEMA,
+    PRESET_WEIGHTS,
+    SAFETY_STANCES,
+    SCORER_NAME,
+    SPECIALIST_WEIGHTS,
+    HybridScoreResult,
+    build_prune_plan,
+    build_synthetic_highway_records,
+    filter_records_for_intents,
+    filter_records_for_safety,
+    fusion_score_layer,
+    mass_only_scores,
+    norm_layer,
+    resolve_weights,
+    score_hybrid,
+    score_transitions_to_plan,
+    select_keep_k,
+    write_prune_plan,
+)
 from .transitions import (
     ADJACENCY_SCHEMA,
     TRANSITION_SCHEMA,
@@ -19,6 +53,7 @@ from .transitions import (
 )
 
 __all__ = [
+    # transitions
     "ADJACENCY_SCHEMA",
     "TRANSITION_SCHEMA",
     "build_adjacency_from_transitions",
@@ -30,4 +65,36 @@ __all__ = [
     "transitions_from_generations_jsonl",
     "write_adjacency_json",
     "write_transitions_jsonl",
+    # graph
+    "build_row_stochastic",
+    "decode_node",
+    "mass_matrix_from_adjacency",
+    "node_id",
+    "path_scores_from_transitions",
+    "power_iteration",
+    "stationary_from_adjacency",
+    # score
+    "BALANCED_WEIGHTS",
+    "HIGHWAY_E",
+    "HIGHWAY_H",
+    "HIGHWAY_L",
+    "HIGHWAY_N",
+    "PLAN_SCHEMA",
+    "PRESET_WEIGHTS",
+    "SAFETY_STANCES",
+    "SCORER_NAME",
+    "SPECIALIST_WEIGHTS",
+    "HybridScoreResult",
+    "build_prune_plan",
+    "build_synthetic_highway_records",
+    "filter_records_for_intents",
+    "filter_records_for_safety",
+    "fusion_score_layer",
+    "mass_only_scores",
+    "norm_layer",
+    "resolve_weights",
+    "score_hybrid",
+    "score_transitions_to_plan",
+    "select_keep_k",
+    "write_prune_plan",
 ]
