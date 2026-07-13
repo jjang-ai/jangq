@@ -15,9 +15,11 @@ import pytest
 
 from jang_tools.intent_prune.graph import (
     build_row_stochastic,
+    build_sparse_operator,
     mass_matrix_from_adjacency,
     node_id,
     power_iteration,
+    power_iteration_sparse,
     stationary_from_adjacency,
 )
 from jang_tools.intent_prune.score import (
@@ -31,6 +33,7 @@ from jang_tools.intent_prune.score import (
     SPECIALIST_WEIGHTS,
     build_prune_plan,
     build_synthetic_highway_records,
+    filter_records_for_safety,
     fusion_score_layer,
     mass_only_scores,
     norm_layer,
@@ -39,6 +42,8 @@ from jang_tools.intent_prune.score import (
     write_prune_plan,
 )
 from jang_tools.intent_prune.transitions import (
+    CRACK_PROBE_MARKERS,
+    SAFETY_PROBE_MARKERS,
     build_adjacency_from_transitions,
     write_transitions_jsonl,
 )
@@ -383,3 +388,205 @@ def test_node_id_roundtrip():
     from jang_tools.intent_prune.graph import decode_node
 
     assert decode_node(2 * 32 + 5, 32) == (2, 5)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: empty graph, keep-K clamp, convergence, safety markers
+# ---------------------------------------------------------------------------
+
+
+def test_empty_graph_fails_closed():
+    """Zero-signal adjacency must not emit arbitrary keep-[0..K-1] plans."""
+    empty_adj = {
+        "schema": "jang-expert-adjacency-v1",
+        "edges": [],
+        "mass": {},
+        "num_layers_observed": 2,
+        "num_experts": 8,
+    }
+    with pytest.raises(ValueError, match="empty graph"):
+        score_hybrid(
+            adjacency=empty_adj,
+            num_experts=8,
+            num_layers=2,
+            keep_k=4,
+            safety_stance="balanced",
+            preset="balanced",
+        )
+
+
+def test_empty_graph_stationary_has_no_signal():
+    empty_adj = {
+        "edges": [],
+        "mass": {},
+        "num_layers_observed": 2,
+        "num_experts": 8,
+    }
+    result = stationary_from_adjacency(
+        empty_adj, num_experts=8, num_layers=2, require_signal=False
+    )
+    assert result["has_signal"] is False
+    assert result["edge_count"] == 0
+    # Path scores stay zero (no teleport-invented uniform over L*E)
+    assert all(v == 0.0 for row in result["pi"] for v in row)
+
+    with pytest.raises(ValueError, match="empty graph"):
+        stationary_from_adjacency(
+            empty_adj, num_experts=8, num_layers=2, require_signal=True
+        )
+
+
+def test_keep_k_clamps_to_num_experts():
+    records = build_synthetic_highway_records(highway_tokens=2, noise_tokens=5)
+    result = score_hybrid(
+        records=records,
+        num_experts=HIGHWAY_E,
+        num_layers=HIGHWAY_L,
+        keep_k=HIGHWAY_E + 10,  # over-wide
+        intents_keep=["code"],
+    )
+    assert result.keep_k == HIGHWAY_E
+    for layer, keep in result.keep.items():
+        assert len(keep) == HIGHWAY_E
+        assert keep == list(range(HIGHWAY_E))
+
+
+def test_keep_k_below_trained_top_k_fails_safety():
+    records = build_synthetic_highway_records(highway_tokens=2, noise_tokens=5)
+    result = score_hybrid(
+        records=records,
+        num_experts=HIGHWAY_E,
+        num_layers=HIGHWAY_L,
+        keep_k=2,
+        intents_keep=["code"],
+    )
+    plan = build_prune_plan(result, trained_top_k=3)
+    assert plan["safety"]["passed"] is False
+    assert any("trained_top_k" in issue for issue in plan["safety"]["issues"])
+
+
+def test_power_iteration_reports_nonconvergence_bipartite_no_teleport():
+    # Period-2 bipartite: 0→{1,2}, {1,2}→0. Without teleport, power iteration
+    # oscillates and must not silently claim success.
+    edges = [(0, 1, 1.0), (0, 2, 1.0), (1, 0, 1.0), (2, 0, 1.0)]
+    p = build_row_stochastic(edges, 3, observed=[0, 1, 2], teleport=0.0)
+    info = power_iteration(p, tol=1e-10, max_iter=50, return_info=True)
+    assert isinstance(info, dict)
+    assert info["converged"] is False
+    assert info["delta"] >= info["tol"]
+    assert info["iterations"] == 50
+
+    # Sparse path agrees on non-convergence
+    op = build_sparse_operator(edges, 3, observed=[0, 1, 2], teleport=0.0)
+    sparse_info = power_iteration_sparse(op, tol=1e-10, max_iter=50)
+    assert sparse_info["converged"] is False
+    assert sparse_info["delta"] >= sparse_info["tol"]
+
+
+def test_power_iteration_sparse_matches_dense_on_small_graph():
+    edges = [(0, 1, 2.0), (1, 2, 1.0), (0, 2, 0.5), (2, 0, 1.0)]
+    p = build_row_stochastic(edges, 3, observed=[0, 1, 2], teleport=0.15)
+    dense = power_iteration(p, tol=1e-12, max_iter=500, return_info=True)
+    op = build_sparse_operator(edges, 3, observed=[0, 1, 2], teleport=0.15)
+    sparse = power_iteration_sparse(op, tol=1e-12, max_iter=500)
+    assert dense["converged"] and sparse["converged"]
+    assert dense["pi"] == pytest.approx(sparse["pi"], abs=1e-9)
+
+
+def test_stationary_returns_iteration_metadata():
+    records = build_synthetic_highway_records(highway_tokens=2, noise_tokens=0)
+    adj = build_adjacency_from_transitions(
+        records, num_experts=HIGHWAY_E, weight_by_gate=True
+    )
+    result = stationary_from_adjacency(
+        adj, num_experts=HIGHWAY_E, num_layers=HIGHWAY_L
+    )
+    assert "iterations" in result
+    assert "converged" in result
+    assert "delta" in result
+    assert result["converged"] is True
+    assert result["edge_count"] > 0
+    assert result["has_signal"] is True
+
+
+def test_filter_safety_shares_transition_markers():
+    # Markers recognized at emission must also feed π_S without explicit flags.
+    assert "safety-sensitive" in SAFETY_PROBE_MARKERS
+    assert "medicine_safety" in SAFETY_PROBE_MARKERS
+    assert "jailbreak_probe" in CRACK_PROBE_MARKERS
+
+    records = [
+        {
+            "schema": "jang-expert-transitions-v1",
+            "prompt_id": "s1",
+            "domains": ["safety-sensitive"],
+            "safety_probe": False,
+            "crack_probe": False,
+            "token_index": 0,
+            "path": [
+                {"layer": 0, "experts": [0], "scores": [1.0]},
+                {"layer": 1, "experts": [1], "scores": [1.0]},
+            ],
+        },
+        {
+            "schema": "jang-expert-transitions-v1",
+            "prompt_id": "c1",
+            "domains": ["jailbreak_probe"],
+            "safety_probe": False,
+            "crack_probe": False,
+            "token_index": 1,
+            "path": [
+                {"layer": 0, "experts": [2], "scores": [1.0]},
+                {"layer": 1, "experts": [3], "scores": [1.0]},
+            ],
+        },
+        {
+            "schema": "jang-expert-transitions-v1",
+            "prompt_id": "code",
+            "domains": ["code"],
+            "safety_probe": False,
+            "crack_probe": False,
+            "token_index": 2,
+            "path": [
+                {"layer": 0, "experts": [0], "scores": [1.0]},
+                {"layer": 1, "experts": [0], "scores": [1.0]},
+            ],
+        },
+    ]
+    filtered = filter_records_for_safety(records)
+    ids = {r["prompt_id"] for r in filtered}
+    assert ids == {"s1", "c1"}
+
+    result = score_hybrid(
+        records=records,
+        num_experts=4,
+        num_layers=2,
+        keep_k=2,
+        safety_stance="keep",
+        preset="balanced",
+    )
+    # Safety path mass should be non-zero on experts touched by safety/crack domains
+    assert sum(result.pi_s[1]) > 0.0
+    assert result.pi_s[1][1] > 0.0 or result.pi_s[1][3] > 0.0
+
+
+def test_mass_only_graph_is_usable_without_edges():
+    """Mass without edges is a valid signal (path term zero); must not fail closed."""
+    adj = {
+        "edges": [],
+        "mass": {"0": {"1": 5.0, "2": 1.0}, "1": {"1": 3.0}},
+        "num_layers_observed": 2,
+        "num_experts": 4,
+    }
+    result = score_hybrid(
+        adjacency=adj,
+        num_experts=4,
+        num_layers=2,
+        keep_k=2,
+        safety_stance="balanced",
+    )
+    assert result.keep[0] == [1, 2] or 1 in result.keep[0]
+    assert result.scores[0][1] > result.scores[0][0]
+    # Path scores are zero when there are no edges
+    assert all(v == 0.0 for v in result.pi_g[0])
+

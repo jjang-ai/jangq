@@ -6,11 +6,14 @@ PR-IP1: power-iteration path scores + hybrid fusion + plan emit.
 
 from .graph import (
     build_row_stochastic,
+    build_sparse_operator,
     decode_node,
+    mass_has_signal,
     mass_matrix_from_adjacency,
     node_id,
     path_scores_from_transitions,
     power_iteration,
+    power_iteration_sparse,
     stationary_from_adjacency,
 )
 from .score import (
@@ -40,6 +43,8 @@ from .score import (
 )
 from .transitions import (
     ADJACENCY_SCHEMA,
+    CRACK_PROBE_MARKERS,
+    SAFETY_PROBE_MARKERS,
     TRANSITION_SCHEMA,
     build_adjacency_from_transitions,
     build_transition_records,
@@ -55,6 +60,8 @@ from .transitions import (
 __all__ = [
     # transitions
     "ADJACENCY_SCHEMA",
+    "CRACK_PROBE_MARKERS",
+    "SAFETY_PROBE_MARKERS",
     "TRANSITION_SCHEMA",
     "build_adjacency_from_transitions",
     "build_transition_records",
@@ -67,11 +74,14 @@ __all__ = [
     "write_transitions_jsonl",
     # graph
     "build_row_stochastic",
+    "build_sparse_operator",
     "decode_node",
+    "mass_has_signal",
     "mass_matrix_from_adjacency",
     "node_id",
     "path_scores_from_transitions",
     "power_iteration",
+    "power_iteration_sparse",
     "stationary_from_adjacency",
     # score
     "BALANCED_WEIGHTS",

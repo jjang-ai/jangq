@@ -1,13 +1,18 @@
 """Path / stationary scores for Intent Prune (MAESTRO-class).
 
-Builds a row-stochastic transition matrix over layer-prefixed expert nodes
-(``node = layer * E + expert``) and computes a PageRank-style stationary
-distribution via power iteration. Sparse / disconnected graphs get a small
-uniform teleport over observed nodes so a unique stationary exists.
+Builds a (sparse) row-stochastic transition operator over layer-prefixed
+expert nodes (``node = layer * E + expert``) and computes a PageRank-style
+stationary distribution via power iteration. Sparse / disconnected graphs
+get a small uniform teleport over observed nodes so a unique stationary
+exists.
+
+Dense ``build_row_stochastic`` remains for small fixtures / tests; production
+path scoring uses sparse adjacency-list matvec (O(edges) per iteration).
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Iterable, Mapping, Sequence
 
 # Defaults from plan §11.3
@@ -81,6 +86,15 @@ def mass_matrix_from_adjacency(
             if 0 <= expert < e_width:
                 matrix[layer][expert] = float(value)
     return matrix
+
+
+def mass_has_signal(mass: Sequence[Sequence[float]]) -> bool:
+    """True if any mass entry is strictly positive."""
+    for row in mass:
+        for value in row:
+            if float(value) > 0.0:
+                return True
+    return False
 
 
 def _collect_edges(
@@ -207,6 +221,78 @@ def _observed_nodes(
     return sorted(nodes)
 
 
+def _normalize_observed(
+    observed: Sequence[int] | None,
+    n_nodes: int,
+) -> list[int]:
+    if observed:
+        obs = [int(i) for i in observed if 0 <= int(i) < n_nodes]
+        if obs:
+            return obs
+    return list(range(n_nodes)) if n_nodes > 0 else []
+
+
+def build_sparse_operator(
+    edges: Sequence[tuple[int, int, float]],
+    n_nodes: int,
+    *,
+    observed: Sequence[int] | None = None,
+    teleport: float = DEFAULT_TELEPORT,
+) -> dict[str, Any]:
+    """Build a sparse PageRank-style transition operator.
+
+    Returns a dict consumed by :func:`power_iteration_sparse`:
+
+    * ``out_adj[i]`` — list of ``(j, raw_weight)`` outgoing edges
+    * ``out_weight[i]`` — sum of raw outgoing weights (0 ⇒ dangling)
+    * ``tele_vec`` — teleport distribution over observed nodes
+    * ``teleport`` — damping ε
+    """
+    if n_nodes <= 0:
+        return {
+            "n_nodes": 0,
+            "out_adj": [],
+            "out_weight": [],
+            "tele_vec": [],
+            "teleport": float(teleport),
+            "observed": [],
+        }
+    teleport = float(teleport)
+    if teleport < 0.0 or teleport >= 1.0:
+        raise ValueError(f"teleport must be in [0, 1), got {teleport}")
+
+    out_adj: list[dict[int, float]] = [dict() for _ in range(n_nodes)]
+    out_weight = [0.0] * n_nodes
+    for src, dst, weight in edges:
+        if src < 0 or dst < 0 or src >= n_nodes or dst >= n_nodes:
+            continue
+        w = float(weight)
+        if w <= 0.0:
+            continue
+        out_adj[src][dst] = out_adj[src].get(dst, 0.0) + w
+        out_weight[src] += w
+
+    obs = _normalize_observed(observed, n_nodes)
+    inv_obs = 1.0 / float(len(obs)) if obs else 0.0
+    tele_vec = [0.0] * n_nodes
+    for i in obs:
+        tele_vec[i] = inv_obs
+
+    # Convert dict adj to sorted list of pairs for stable iteration
+    out_list: list[list[tuple[int, float]]] = [
+        sorted(adj.items()) for adj in out_adj
+    ]
+    return {
+        "n_nodes": n_nodes,
+        "out_adj": out_list,
+        "out_weight": out_weight,
+        "tele_vec": tele_vec,
+        "teleport": teleport,
+        "observed": obs,
+        "edge_count": sum(len(row) for row in out_list),
+    }
+
+
 def build_row_stochastic(
     edges: Sequence[tuple[int, int, float]],
     n_nodes: int,
@@ -216,109 +302,118 @@ def build_row_stochastic(
 ) -> list[list[float]]:
     """Build dense row-stochastic ``P`` with optional PageRank teleport.
 
+    Prefer :func:`build_sparse_operator` + :func:`power_iteration_sparse` for
+    production-width graphs. Dense form is kept for small fixtures/tests.
+
     ``P[i][j]`` = probability of stepping from node ``i`` to node ``j``.
     Rows with no outgoing mass (dangling) teleport uniformly over ``observed``
     (or all nodes if ``observed`` is empty).
     """
     if n_nodes <= 0:
         return []
-    teleport = float(teleport)
-    if teleport < 0.0 or teleport >= 1.0:
-        raise ValueError(f"teleport must be in [0, 1), got {teleport}")
-
-    # Weighted adjacency
-    out_weight = [0.0] * n_nodes
-    adj: list[dict[int, float]] = [dict() for _ in range(n_nodes)]
-    for src, dst, weight in edges:
-        if src < 0 or dst < 0 or src >= n_nodes or dst >= n_nodes:
-            continue
-        w = float(weight)
-        if w <= 0.0:
-            continue
-        adj[src][dst] = adj[src].get(dst, 0.0) + w
-        out_weight[src] += w
-
-    if observed:
-        obs = [int(i) for i in observed if 0 <= int(i) < n_nodes]
-        if not obs:
-            obs = list(range(n_nodes))
-    else:
-        obs = list(range(n_nodes))
-    inv_obs = 1.0 / float(len(obs))
-    inv_all = 1.0 / float(n_nodes)
-
-    # Precompute uniform teleport target vector over observed nodes
-    tele_vec = [0.0] * n_nodes
-    for i in obs:
-        tele_vec[i] = inv_obs
+    op = build_sparse_operator(
+        edges, n_nodes, observed=observed, teleport=teleport
+    )
+    teleport_f = float(op["teleport"])
+    stay = 1.0 - teleport_f
+    tele_vec: list[float] = op["tele_vec"]
+    out_weight: list[float] = op["out_weight"]
+    out_adj: list[list[tuple[int, float]]] = op["out_adj"]
 
     p: list[list[float]] = [[0.0] * n_nodes for _ in range(n_nodes)]
-    stay = 1.0 - teleport
     for i in range(n_nodes):
         row = p[i]
         if out_weight[i] > 0.0 and stay > 0.0:
             scale = stay / out_weight[i]
-            for j, w in adj[i].items():
+            for j, w in out_adj[i]:
                 row[j] += scale * w
-            if teleport > 0.0:
+            if teleport_f > 0.0:
                 for j in range(n_nodes):
-                    row[j] += teleport * tele_vec[j]
+                    row[j] += teleport_f * tele_vec[j]
         else:
-            # Dangling: full teleport (or uniform over all if no observed)
-            if teleport > 0.0 or obs:
-                for j in range(n_nodes):
-                    row[j] = tele_vec[j]
-            else:
-                for j in range(n_nodes):
-                    row[j] = inv_all
+            for j in range(n_nodes):
+                row[j] = tele_vec[j]
     return p
 
 
-def power_iteration(
-    transition: Sequence[Sequence[float]],
-    *,
-    tol: float = DEFAULT_TOL,
-    max_iter: int = DEFAULT_MAX_ITER,
-    start: Sequence[float] | None = None,
+def _normalize_start(
+    n: int,
+    start: Sequence[float] | None,
 ) -> list[float]:
-    """Left-stationary distribution via power iteration: ``π_{t+1} = π_t P``.
-
-    ``transition[i][j]`` is P(i→j). Returns a probability vector summing to 1.
-    """
-    n = len(transition)
-    if n == 0:
-        return []
-    if any(len(row) != n for row in transition):
-        raise ValueError("transition matrix must be square")
-
     if start is not None:
         if len(start) != n:
             raise ValueError(f"start length {len(start)} != n={n}")
         pi = [max(float(x), 0.0) for x in start]
         total = sum(pi)
         if total <= 0.0:
-            pi = [1.0 / n] * n
-        else:
-            pi = [x / total for x in pi]
-    else:
-        pi = [1.0 / n] * n
+            return [1.0 / n] * n if n > 0 else []
+        return [x / total for x in pi]
+    return [1.0 / n] * n if n > 0 else []
 
+
+def power_iteration_sparse(
+    operator: Mapping[str, Any],
+    *,
+    tol: float = DEFAULT_TOL,
+    max_iter: int = DEFAULT_MAX_ITER,
+    start: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    """Sparse left-stationary: ``π_{t+1} = π_t P`` with teleport rank-1 update.
+
+    Returns ``{pi, iterations, converged, delta, max_iter, tol}``.
+    """
+    n = int(operator.get("n_nodes") or 0)
+    if n <= 0:
+        return {
+            "pi": [],
+            "iterations": 0,
+            "converged": True,
+            "delta": 0.0,
+            "max_iter": int(max_iter),
+            "tol": float(tol),
+        }
+
+    out_adj: list[list[tuple[int, float]]] = operator["out_adj"]
+    out_weight: list[float] = operator["out_weight"]
+    tele_vec: list[float] = operator["tele_vec"]
+    teleport = float(operator["teleport"])
+    stay = 1.0 - teleport
+
+    pi = _normalize_start(n, start)
     tol = float(tol)
     max_iter = max(int(max_iter), 1)
+    delta = float("inf")
+    converged = False
+    iterations = 0
 
-    for _ in range(max_iter):
+    for it in range(1, max_iter + 1):
+        iterations = it
         nxt = [0.0] * n
+        tele_coeff = 0.0
         for i, mass_i in enumerate(pi):
             if mass_i == 0.0:
                 continue
-            row = transition[i]
-            for j in range(n):
-                nxt[j] += mass_i * float(row[j])
-        # Renormalize against numerical drift
+            ow = out_weight[i]
+            if ow > 0.0 and stay > 0.0:
+                scale = mass_i * stay / ow
+                for j, w in out_adj[i]:
+                    nxt[j] += scale * w
+                tele_coeff += mass_i * teleport
+            else:
+                # Dangling: full teleport
+                tele_coeff += mass_i
+        if tele_coeff != 0.0:
+            for j, t in enumerate(tele_vec):
+                if t != 0.0:
+                    nxt[j] += tele_coeff * t
+
         s = sum(nxt)
         if s <= 0.0:
-            return pi
-        nxt = [x / s for x in nxt]
+            delta = float("inf")
+            break
+        inv = 1.0 / s
+        nxt = [x * inv for x in nxt]
+
         delta = 0.0
         for a, b in zip(pi, nxt):
             d = a - b
@@ -328,8 +423,92 @@ def power_iteration(
                 delta = d
         pi = nxt
         if delta < tol:
+            converged = True
             break
-    return pi
+
+    return {
+        "pi": pi,
+        "iterations": iterations,
+        "converged": converged,
+        "delta": float(delta if delta != float("inf") else delta),
+        "max_iter": max_iter,
+        "tol": tol,
+    }
+
+
+def power_iteration(
+    transition: Sequence[Sequence[float]],
+    *,
+    tol: float = DEFAULT_TOL,
+    max_iter: int = DEFAULT_MAX_ITER,
+    start: Sequence[float] | None = None,
+    return_info: bool = False,
+) -> list[float] | dict[str, Any]:
+    """Left-stationary distribution via power iteration: ``π_{t+1} = π_t P``.
+
+    ``transition[i][j]`` is P(i→j). By default returns the probability vector.
+    Pass ``return_info=True`` for ``{pi, iterations, converged, delta, ...}``.
+
+    Note: ``teleport=0`` on periodic/bipartite graphs may not converge; prefer
+    default teleport > 0. Non-convergence is reported when ``return_info=True``.
+    """
+    n = len(transition)
+    if n == 0:
+        empty = {
+            "pi": [],
+            "iterations": 0,
+            "converged": True,
+            "delta": 0.0,
+            "max_iter": int(max_iter),
+            "tol": float(tol),
+        }
+        return empty if return_info else empty["pi"]
+    if any(len(row) != n for row in transition):
+        raise ValueError("transition matrix must be square")
+
+    pi = _normalize_start(n, start)
+    tol = float(tol)
+    max_iter = max(int(max_iter), 1)
+    delta = float("inf")
+    converged = False
+    iterations = 0
+
+    for it in range(1, max_iter + 1):
+        iterations = it
+        nxt = [0.0] * n
+        for i, mass_i in enumerate(pi):
+            if mass_i == 0.0:
+                continue
+            row = transition[i]
+            for j in range(n):
+                nxt[j] += mass_i * float(row[j])
+        s = sum(nxt)
+        if s <= 0.0:
+            delta = float("inf")
+            break
+        inv = 1.0 / s
+        nxt = [x * inv for x in nxt]
+        delta = 0.0
+        for a, b in zip(pi, nxt):
+            d = a - b
+            if d < 0.0:
+                d = -d
+            if d > delta:
+                delta = d
+        pi = nxt
+        if delta < tol:
+            converged = True
+            break
+
+    info = {
+        "pi": pi,
+        "iterations": iterations,
+        "converged": converged,
+        "delta": float(delta),
+        "max_iter": max_iter,
+        "tol": tol,
+    }
+    return info if return_info else pi
 
 
 def stationary_from_adjacency(
@@ -340,6 +519,7 @@ def stationary_from_adjacency(
     teleport: float = DEFAULT_TELEPORT,
     tol: float = DEFAULT_TOL,
     max_iter: int = DEFAULT_MAX_ITER,
+    require_signal: bool = False,
 ) -> dict[str, Any]:
     """Compute path / stationary scores ``π`` reshaped to ``[L][E]``.
 
@@ -348,7 +528,13 @@ def stationary_from_adjacency(
     * ``pi`` — dense ``list[list[float]]`` shape ``[L][E]``
     * ``pi_nodes`` — dense vector over layer-prefixed nodes
     * ``num_layers``, ``num_experts``
-    * ``observed_nodes``, ``iterations`` metadata
+    * ``observed_nodes``, ``edge_count``
+    * ``iterations``, ``converged``, ``delta`` — power-iteration metadata
+    * ``has_signal`` — True when edges or positive mass exist
+
+    When there are no edges, ``pi`` is all zeros (mass-only graphs should not
+    invent uniform path scores via teleport over the full ``L*E`` space).
+    Pass ``require_signal=True`` to raise if neither edges nor mass exist.
     """
     e_width = int(
         num_experts if num_experts is not None else (adjacency.get("num_experts") or 0)
@@ -394,30 +580,64 @@ def stationary_from_adjacency(
                     pass
         n_layers = max_layer + 1 if max_layer >= 0 else 0
 
+    empty_meta = {
+        "pi": [],
+        "pi_nodes": [],
+        "num_layers": 0,
+        "num_experts": e_width,
+        "observed_nodes": [],
+        "teleport": float(teleport),
+        "edge_count": 0,
+        "iterations": 0,
+        "converged": True,
+        "delta": 0.0,
+        "has_signal": False,
+    }
     if n_layers <= 0:
-        return {
-            "pi": [],
-            "pi_nodes": [],
-            "num_layers": 0,
-            "num_experts": e_width,
-            "observed_nodes": [],
-            "teleport": float(teleport),
-        }
+        if require_signal:
+            raise ValueError("empty graph: num_layers resolved to 0 (no edges or mass)")
+        return empty_meta
 
     n_nodes = n_layers * e_width
     edges = _collect_edges(adjacency, num_experts=e_width)
     observed = _observed_nodes(
         adjacency, edges, num_experts=e_width, num_layers=n_layers
     )
-    # Restrict matrix size to full L*E space so reshape is trivial
-    p = build_row_stochastic(
+    mass_m = mass_matrix_from_adjacency(
+        adjacency, num_layers=n_layers, num_experts=e_width
+    )
+    has_mass = mass_has_signal(mass_m)
+    has_edges = len(edges) > 0
+    has_signal = has_edges or has_mass
+
+    if require_signal and not has_signal:
+        raise ValueError("empty graph: no edges or mass")
+
+    if not has_edges:
+        # Mass-only (or fully empty): do not invent uniform path scores.
+        pi = [[0.0] * e_width for _ in range(n_layers)]
+        return {
+            "pi": pi,
+            "pi_nodes": [0.0] * n_nodes,
+            "num_layers": n_layers,
+            "num_experts": e_width,
+            "observed_nodes": observed,
+            "teleport": float(teleport),
+            "edge_count": 0,
+            "iterations": 0,
+            "converged": True,
+            "delta": 0.0,
+            "has_signal": has_signal,
+            "mass": mass_m,
+        }
+
+    op = build_sparse_operator(
         edges,
         n_nodes,
         observed=observed if observed else None,
         teleport=float(teleport),
     )
 
-    # Prefer start mass on observed nodes (uniform); falls back inside power_iteration
     start = None
     if observed:
         start = [0.0] * n_nodes
@@ -426,7 +646,16 @@ def stationary_from_adjacency(
             if 0 <= idx < n_nodes:
                 start[idx] = share
 
-    pi_nodes = power_iteration(p, tol=tol, max_iter=max_iter, start=start)
+    info = power_iteration_sparse(op, tol=tol, max_iter=max_iter, start=start)
+    pi_nodes: list[float] = info["pi"]
+
+    if not info["converged"]:
+        warnings.warn(
+            f"power iteration did not converge: delta={info['delta']:.3e} "
+            f">= tol={float(tol):.3e} after {info['iterations']} iterations "
+            f"(teleport={float(teleport)}; increase max_iter or teleport)",
+            stacklevel=2,
+        )
 
     pi = [[0.0] * e_width for _ in range(n_layers)]
     for node, value in enumerate(pi_nodes):
@@ -442,6 +671,11 @@ def stationary_from_adjacency(
         "observed_nodes": observed,
         "teleport": float(teleport),
         "edge_count": len(edges),
+        "iterations": int(info["iterations"]),
+        "converged": bool(info["converged"]),
+        "delta": float(info["delta"]),
+        "has_signal": True,
+        "mass": mass_m,
     }
 
 
@@ -472,9 +706,10 @@ def path_scores_from_transitions(
         max_iter=max_iter,
     )
     result["adjacency"] = adjacency
-    result["mass"] = mass_matrix_from_adjacency(
-        adjacency,
-        num_layers=result["num_layers"],
-        num_experts=num_experts,
-    )
+    if "mass" not in result:
+        result["mass"] = mass_matrix_from_adjacency(
+            adjacency,
+            num_layers=result["num_layers"],
+            num_experts=num_experts,
+        )
     return result

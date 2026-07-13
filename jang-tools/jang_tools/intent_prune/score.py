@@ -23,14 +23,28 @@ from .graph import (
     DEFAULT_MAX_ITER,
     DEFAULT_TELEPORT,
     DEFAULT_TOL,
+    mass_has_signal,
     mass_matrix_from_adjacency,
     path_scores_from_transitions,
     stationary_from_adjacency,
 )
 from .transitions import (
+    CRACK_PROBE_MARKERS,
+    SAFETY_PROBE_MARKERS,
     TRANSITION_SCHEMA,
     build_adjacency_from_transitions,
     iter_transition_records,
+)
+
+def _normalized_marker(raw: str) -> str:
+    """Match transitions._normalized_marker (hyphen/space → underscore)."""
+    return str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+# Domain tags that count as safety/crack evidence (shared with transitions emission).
+_SAFETY_DOMAIN_MARKERS = frozenset(
+    {_normalized_marker(m) for m in SAFETY_PROBE_MARKERS}
+    | {_normalized_marker(m) for m in CRACK_PROBE_MARKERS}
 )
 
 PLAN_SCHEMA = "jang-intent-prune-plan-v1"
@@ -127,7 +141,12 @@ def filter_records_for_intents(
 def filter_records_for_safety(
     records: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Records flagged as safety/crack probes (or carrying safety domains)."""
+    """Records flagged as safety/crack probes (or carrying safety domains).
+
+    Domain markers are shared with :mod:`transitions` emission
+    (``SAFETY_PROBE_MARKERS`` / ``CRACK_PROBE_MARKERS``) so JSONL that only
+    carries domain tags still contributes to ``π_S``.
+    """
     out: list[dict[str, Any]] = []
     for record in records:
         if not isinstance(record, Mapping):
@@ -135,19 +154,18 @@ def filter_records_for_safety(
         if record.get("safety_probe") or record.get("crack_probe"):
             out.append(dict(record))
             continue
-        domains = _domain_set(record.get("domains"))
-        if domains & {
-            "safety",
-            "safety_medical_legal_sensitive",
-            "safety-medical-legal-sensitive",
-            "crack",
-            "abliteration",
-            "refusal",
-            "jailbreak_probe",
-            "jailbreak-probe",
-        }:
+        domains = {_normalized_marker(d) for d in _domain_set(record.get("domains"))}
+        if domains & _SAFETY_DOMAIN_MARKERS:
             out.append(dict(record))
     return out
+
+
+def _matrix_has_positive(matrix: Sequence[Sequence[float]]) -> bool:
+    for row in matrix:
+        for value in row:
+            if float(value) > 0.0:
+                return True
+    return False
 
 
 def resolve_weights(preset: str = "balanced") -> dict[str, float]:
@@ -378,6 +396,7 @@ def score_hybrid(
     else:
         n_layers = int(num_layers or 0)
 
+    path_meta: dict[str, Any] = {}
     if pi_g is None:
         if adj is None:
             raise ValueError("records or adjacency or pi_g required for path scores")
@@ -388,15 +407,25 @@ def score_hybrid(
             teleport=teleport,
             tol=tol,
             max_iter=max_iter,
+            require_signal=False,
         )
         pi_g_m = path_result["pi"]
         n_layers = int(path_result["num_layers"])
+        path_meta = {
+            "edge_count": int(path_result.get("edge_count") or 0),
+            "iterations": int(path_result.get("iterations") or 0),
+            "converged": bool(path_result.get("converged", True)),
+            "delta": float(path_result.get("delta") or 0.0),
+            "has_signal": bool(path_result.get("has_signal", False)),
+        }
     else:
         pi_g_m = _align_matrix(pi_g, len(pi_g), e_width)
         n_layers = len(pi_g_m)
 
     if n_layers <= 0:
-        raise ValueError("num_layers resolved to 0; no graph/mass to score")
+        raise ValueError(
+            "empty graph: num_layers resolved to 0; no edges or mass to score"
+        )
 
     if mass is None:
         if adj is None:
@@ -409,6 +438,25 @@ def score_hybrid(
         mass_m = _align_matrix(mass, n_layers, e_width)
 
     pi_g_m = _align_matrix(pi_g_m, n_layers, e_width)
+
+    # Fail closed: zero-signal graphs must not emit arbitrary keep-[0..K-1] plans.
+    # Usable signal = positive path mass, positive selection mass, or any of the
+    # conditional path scores (precomputed). Empty edges+mass with only teleport
+    # uniforms is rejected.
+    has_path = _matrix_has_positive(pi_g_m)
+    has_mass = mass_has_signal(mass_m)
+    has_precomputed_conditional = any(
+        x is not None for x in (pi_i, pi_d, pi_s)
+    ) and any(
+        _matrix_has_positive(_align_matrix(x, n_layers, e_width))
+        for x in (pi_i, pi_d, pi_s)
+        if x is not None
+    )
+    if not has_path and not has_mass and not has_precomputed_conditional:
+        raise ValueError(
+            "empty graph: no edges or mass (and no precomputed path/mass signals); "
+            "refusing to emit an arbitrary keep-K plan"
+        )
 
     # Conditional path scores from record subsets
     if pi_i is not None:
@@ -502,6 +550,9 @@ def score_hybrid(
             "teleport": float(teleport),
             "record_count": len(record_list),
             "weight_by_gate": bool(weight_by_gate),
+            "has_path_signal": has_path,
+            "has_mass_signal": has_mass,
+            **path_meta,
         },
     )
 

@@ -58,7 +58,8 @@ EXPERT_TRANSITIONS_FILENAME = "expert_transitions.jsonl"
 # Canonical / safety-taxonomy markers only (not bare "medical"/"legal").
 # Suite rows usually already carry safety_medical_legal_sensitive via
 # prequant_prune_qwen_moe._suite_semantic_domains.
-_SAFETY_PROBE_MARKERS = {
+# Shared with score.filter_records_for_safety so emission and scoring cannot drift.
+SAFETY_PROBE_MARKERS = {
     "safety",
     "safety_medical_legal_sensitive",
     "safety-medical-legal-sensitive",
@@ -75,13 +76,16 @@ _SAFETY_PROBE_MARKERS = {
     "finance-safety",
     "finance_safety",
 }
-_CRACK_PROBE_MARKERS = {
+CRACK_PROBE_MARKERS = {
     "crack",
     "abliteration",
     "refusal",
     "jailbreak_probe",
     "jailbreak-probe",
 }
+# Back-compat private aliases
+_SAFETY_PROBE_MARKERS = SAFETY_PROBE_MARKERS
+_CRACK_PROBE_MARKERS = CRACK_PROBE_MARKERS
 _SAFETY_PROBE_KEYS = (
     "safety_probe",
     "safetyProbe",
