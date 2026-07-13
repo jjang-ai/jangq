@@ -420,6 +420,9 @@ def main():
     from .expert_lab_vmlx import register as _register_expert_lab_vmlx
     _register_expert_lab_vmlx(subparsers)
 
+    from .intent_prune.transitions import register as _register_intent_prune_transitions
+    _register_intent_prune_transitions(subparsers)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -435,7 +438,8 @@ def main():
         args.command in ("inspect-source", "examples", "modelcard", "inference",
                          "profiles", "capabilities", "estimate-model", "publish", "recommend",
                          "prequant-prune-qwen-moe", "expert-lab-vmlx",
-                         "expert-lab-vmlx-build-eval")
+                         "expert-lab-vmlx-build-eval",
+                         "intent-prune-transitions", "intent-prune-adjacency")
         and getattr(args, "json", False)
     )
     if not suppress_banner:
