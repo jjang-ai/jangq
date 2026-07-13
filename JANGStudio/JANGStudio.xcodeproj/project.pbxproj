@@ -8,9 +8,10 @@
 
 /* Begin PBXBuildFile section */
 		0D081CBA0C9D9CA09E965544 /* ExpertLabSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C296A3B1A49CC4E9F66206B /* ExpertLabSheet.swift */; };
-		0F6AB92BB6E64D6AB7636E21 /* ExpertLabWorkflowFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CFF5FBF1F7848E4B3E0D217 /* ExpertLabWorkflowFlowTests.swift */; };
+		1350DC561DC1FA5F6526A645 /* IntentPruneModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22FBFCDC589F9873C3187671 /* IntentPruneModels.swift */; };
 		205C14AFA0822C693EADFF4E /* PublishToHuggingFaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA263C1681E544386558CE46 /* PublishToHuggingFaceSheet.swift */; };
 		24A011FB3F5C0B384EFD643A /* WizardStepContinueGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B8E1B0E2161A35807B83BC8 /* WizardStepContinueGateTests.swift */; };
+		24AAFCAE1FAB83029D95D1F6 /* ExpertLabWorkflowFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F49A8697679D397C8728D18C /* ExpertLabWorkflowFlowTests.swift */; };
 		25C84B0C74922EE8949D4919 /* PublishService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */; };
 		260ECD26CBB403C8D542EBA4 /* PrequantPruneSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91EAD76714231E2F6319E452 /* PrequantPruneSheet.swift */; };
 		268698DABB093D7C391FC033 /* RecommendationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04AD44A81E1DAF14ED12741 /* RecommendationService.swift */; };
@@ -36,12 +37,15 @@
 		69E48802F67A8560875697D3 /* CLIArgsBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 277EB647F5B498995EECE22B /* CLIArgsBuilderTests.swift */; };
 		6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */; };
 		6D1E60F17B76C9066EAEADFC /* ExamplesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8D05B41D11B2CF1DFB26F2 /* ExamplesService.swift */; };
+		7155D2E71F2E7AD410654781 /* IntentPruneViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61651B35549A2F02F9FFCD3B /* IntentPruneViewModel.swift */; };
 		73695D60002F4B8E2C27CE72 /* BundleResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1161C47A976A61EB4165DBF0 /* BundleResolver.swift */; };
 		8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A7DE41A192E92603284F05 /* JANGStudioApp.swift */; };
+		822F743644F7DC4E6206745A /* IntentPruneUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17C23E723AD17FD782740DE9 /* IntentPruneUITests.swift */; };
 		83996BFAB6CC4FC91EB1D101 /* PythonCLIInvoker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68500C2831E621A2FA30AB41 /* PythonCLIInvoker.swift */; };
 		8C6B306BA4E1A53E53827F7D /* QuantizationGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 648254A39ECAE196FCF4B915 /* QuantizationGuide.swift */; };
 		8D94FAB61E6661A3E56B0F81 /* CapabilitiesServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70BDD0C1E07DF29BE7178909 /* CapabilitiesServiceTests.swift */; };
 		913885FBEFFAD974B1C3D518 /* golden_convert_events.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 4BD8CB3ED2CD8F9F8B6E9963 /* golden_convert_events.jsonl */; };
+		926025EF1F0ACF5EB34C94A9 /* IntentPruneCLIArgsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2508DDCAE117A6C369C494D0 /* IntentPruneCLIArgsBuilder.swift */; };
 		92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */; };
 		9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */; };
 		986A1274A6118E34D1D57357 /* WizardFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE4D059F65E05E1AB8E6BD29 /* WizardFlowTests.swift */; };
@@ -63,10 +67,12 @@
 		D1745BAC50AB625B8B4AD178 /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9015C471C0991F1FE5A7C449 /* ChatMessage.swift */; };
 		D40090D0FEB1DDA976ED672E /* PythonRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8034E6B623B47CCA640CE7BE /* PythonRunnerTests.swift */; };
 		D62D076907E51839A85394A7 /* ProgressEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6828352632D9B1B484170875 /* ProgressEvent.swift */; };
+		D98417FDCFA1538BC4E3881E /* IntentPruneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A9C3D1E232290DFC9A24A3C /* IntentPruneView.swift */; };
 		E1742144DDF72A4CB64AF44B /* VerifyCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24FFE334F18C9B1B5E7232E9 /* VerifyCheck.swift */; };
 		E4B0B2229E63F2A6A18B3A4B /* ProfilesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB6996C22CD2CF0F5D29A975 /* ProfilesService.swift */; };
 		EA46E2BFBBBAE46976D29566 /* PreflightCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3A7379AF4D578977A7F232C /* PreflightCheck.swift */; };
 		EBEC37660E6F0B415009674A /* ExpertPrunePlanBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A9A321F7DA1A49E0D7B1188 /* ExpertPrunePlanBuilderTests.swift */; };
+		F04ED74E2EEED5B24207D23D /* IntentPrunePlanGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 935B3378C8436467A0A2404A /* IntentPrunePlanGateTests.swift */; };
 		F2910680EFAE8DFC4A96AE5E /* PythonCLIInvokerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DF21B5106FBBB1A1D4A8921 /* PythonCLIInvokerTests.swift */; };
 		F904F16D695D501680DE6196 /* GenerateModelCardSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F665B5BD78256BE6B512B888 /* GenerateModelCardSheet.swift */; };
 		FBD72AE59BB50D6938084A5A /* good_output in Resources */ = {isa = PBXBuildFile; fileRef = 9BFBF624AEDB08DD5F8CDCD7 /* good_output */; };
@@ -98,11 +104,13 @@
 		0DF21B5106FBBB1A1D4A8921 /* PythonCLIInvokerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonCLIInvokerTests.swift; sourceTree = "<group>"; };
 		1161C47A976A61EB4165DBF0 /* BundleResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleResolver.swift; sourceTree = "<group>"; };
 		128EC0EE82BC7231E539241C /* AdoptionServicesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdoptionServicesTests.swift; sourceTree = "<group>"; };
+		17C23E723AD17FD782740DE9 /* IntentPruneUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentPruneUITests.swift; sourceTree = "<group>"; };
 		17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParser.swift; sourceTree = "<group>"; };
 		1B32BA9D400197078C4A2AAC /* PostConvertVerifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostConvertVerifierTests.swift; sourceTree = "<group>"; };
 		1E8D05B41D11B2CF1DFB26F2 /* ExamplesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExamplesService.swift; sourceTree = "<group>"; };
-		1CFF5FBF1F7848E4B3E0D217 /* ExpertLabWorkflowFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpertLabWorkflowFlowTests.swift; sourceTree = "<group>"; };
+		22FBFCDC589F9873C3187671 /* IntentPruneModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentPruneModels.swift; sourceTree = "<group>"; };
 		24FFE334F18C9B1B5E7232E9 /* VerifyCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifyCheck.swift; sourceTree = "<group>"; };
+		2508DDCAE117A6C369C494D0 /* IntentPruneCLIArgsBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentPruneCLIArgsBuilder.swift; sourceTree = "<group>"; };
 		2546D3DCECBF31D92E956B39 /* RunStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunStep.swift; sourceTree = "<group>"; };
 		277EB647F5B498995EECE22B /* CLIArgsBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIArgsBuilderTests.swift; sourceTree = "<group>"; };
 		2FCD82303D1FFD41734DCCE7 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
@@ -124,12 +132,14 @@
 		59F644F50402BD3021339580 /* RecommendationServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationServiceTests.swift; sourceTree = "<group>"; };
 		5B4B6490B253FA54266EA0EF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlanTests.swift; sourceTree = "<group>"; };
+		61651B35549A2F02F9FFCD3B /* IntentPruneViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentPruneViewModel.swift; sourceTree = "<group>"; };
 		648254A39ECAE196FCF4B915 /* QuantizationGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantizationGuide.swift; sourceTree = "<group>"; };
 		65E6BD1572E3801538830D75 /* JANGStudioUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JANGStudioUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6828352632D9B1B484170875 /* ProgressEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressEvent.swift; sourceTree = "<group>"; };
 		68500C2831E621A2FA30AB41 /* PythonCLIInvoker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PythonCLIInvoker.swift; sourceTree = "<group>"; };
 		70BDD0C1E07DF29BE7178909 /* CapabilitiesServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitiesServiceTests.swift; sourceTree = "<group>"; };
 		72D077557A5F5B98F08D9071 /* InferenceRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InferenceRunnerTests.swift; sourceTree = "<group>"; };
+		7A9C3D1E232290DFC9A24A3C /* IntentPruneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentPruneView.swift; sourceTree = "<group>"; };
 		7D9E8AB3CFC6B682FDFB777D /* jang-runtime */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "jang-runtime"; path = "../jang-runtime"; sourceTree = SOURCE_ROOT; };
 		7DBFFA8816FEFBC7EFF5FF5D /* PublishService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PublishService.swift; sourceTree = "<group>"; };
 		7E007B276BE6D5E6BBD83A3F /* PreflightRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightRunner.swift; sourceTree = "<group>"; };
@@ -137,6 +147,7 @@
 		9015C471C0991F1FE5A7C449 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
 		9041F5409595020F642815F2 /* .keep */ = {isa = PBXFileReference; path = .keep; sourceTree = "<group>"; };
 		91EAD76714231E2F6319E452 /* PrequantPruneSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrequantPruneSheet.swift; sourceTree = "<group>"; };
+		935B3378C8436467A0A2404A /* IntentPrunePlanGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentPrunePlanGateTests.swift; sourceTree = "<group>"; };
 		993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightRunnerTests.swift; sourceTree = "<group>"; };
 		9BFBF624AEDB08DD5F8CDCD7 /* good_output */ = {isa = PBXFileReference; lastKnownFileType = folder; name = good_output; path = Tests/JANGStudioTests/Fixtures/good_output; sourceTree = SOURCE_ROOT; };
 		A296D1F2C5FAC2A4BE0DF86B /* UsageExamplesSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageExamplesSheet.swift; sourceTree = "<group>"; };
@@ -160,6 +171,7 @@
 		E1A1EBBC25F8952FDB89345F /* TestInferenceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestInferenceViewModel.swift; sourceTree = "<group>"; };
 		E694F8C56C73EE3B6ADC6A9F /* ConversionPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversionPlan.swift; sourceTree = "<group>"; };
 		EF811908F2588183C287B65E /* InfoHint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfoHint.swift; sourceTree = "<group>"; };
+		F49A8697679D397C8728D18C /* ExpertLabWorkflowFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpertLabWorkflowFlowTests.swift; sourceTree = "<group>"; };
 		F665B5BD78256BE6B512B888 /* GenerateModelCardSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerateModelCardSheet.swift; sourceTree = "<group>"; };
 		FD0847B837227099F36E3E49 /* QuantizationGuidanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantizationGuidanceTests.swift; sourceTree = "<group>"; };
 		FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONLProgressParserTests.swift; sourceTree = "<group>"; };
@@ -214,9 +226,11 @@
 				5D102D611AAAC43B29E3FE7C /* ConversionPlanTests.swift */,
 				3CC6104D9F16F4EA5D5BDCBD /* CoverageMatrixTests.swift */,
 				3D18912DEAFDE1D0067DF29B /* DiagnosticsBundleTests.swift */,
-				1CFF5FBF1F7848E4B3E0D217 /* ExpertLabWorkflowFlowTests.swift */,
+				F49A8697679D397C8728D18C /* ExpertLabWorkflowFlowTests.swift */,
 				4A9A321F7DA1A49E0D7B1188 /* ExpertPrunePlanBuilderTests.swift */,
 				72D077557A5F5B98F08D9071 /* InferenceRunnerTests.swift */,
+				935B3378C8436467A0A2404A /* IntentPrunePlanGateTests.swift */,
+				17C23E723AD17FD782740DE9 /* IntentPruneUITests.swift */,
 				FE633F589A45A657C4535447 /* JSONLProgressParserTests.swift */,
 				1B32BA9D400197078C4A2AAC /* PostConvertVerifierTests.swift */,
 				993FD9B9F5E20A193DCF1127 /* PreflightRunnerTests.swift */,
@@ -237,6 +251,9 @@
 				4C296A3B1A49CC4E9F66206B /* ExpertLabSheet.swift */,
 				F665B5BD78256BE6B512B888 /* GenerateModelCardSheet.swift */,
 				EF811908F2588183C287B65E /* InfoHint.swift */,
+				22FBFCDC589F9873C3187671 /* IntentPruneModels.swift */,
+				7A9C3D1E232290DFC9A24A3C /* IntentPruneView.swift */,
+				61651B35549A2F02F9FFCD3B /* IntentPruneViewModel.swift */,
 				91EAD76714231E2F6319E452 /* PrequantPruneSheet.swift */,
 				AA263C1681E544386558CE46 /* PublishToHuggingFaceSheet.swift */,
 				648254A39ECAE196FCF4B915 /* QuantizationGuide.swift */,
@@ -315,6 +332,7 @@
 				3A5660F31C79379125E9A6E4 /* DiagnosticsBundle.swift */,
 				1E8D05B41D11B2CF1DFB26F2 /* ExamplesService.swift */,
 				D730781F656472007CB478AD /* InferenceRunner.swift */,
+				2508DDCAE117A6C369C494D0 /* IntentPruneCLIArgsBuilder.swift */,
 				17D4CD2B12CA4893F70B34D5 /* JSONLProgressParser.swift */,
 				E15422D1BC7171E8BB13BA57 /* ModelCardService.swift */,
 				CB6996C22CD2CF0F5D29A975 /* ProfilesService.swift */,
@@ -533,9 +551,11 @@
 				92DC4A57B84EA364FB2BB56A /* ConversionPlanTests.swift in Sources */,
 				3BAE0452A404B4F7316D7DD9 /* CoverageMatrixTests.swift in Sources */,
 				B42A3411A8AD04D61E2AE441 /* DiagnosticsBundleTests.swift in Sources */,
-				0F6AB92BB6E64D6AB7636E21 /* ExpertLabWorkflowFlowTests.swift in Sources */,
+				24AAFCAE1FAB83029D95D1F6 /* ExpertLabWorkflowFlowTests.swift in Sources */,
 				EBEC37660E6F0B415009674A /* ExpertPrunePlanBuilderTests.swift in Sources */,
 				583FD10F8DF5B8B59A65E87D /* InferenceRunnerTests.swift in Sources */,
+				F04ED74E2EEED5B24207D23D /* IntentPrunePlanGateTests.swift in Sources */,
+				822F743644F7DC4E6206745A /* IntentPruneUITests.swift in Sources */,
 				3932B7208FB8F9E9F0C718E5 /* JSONLProgressParserTests.swift in Sources */,
 				CF1F4BFE4733DB3C025BEA58 /* PostConvertVerifierTests.swift in Sources */,
 				6B9F115F2F6B1C5BF471445D /* PreflightRunnerTests.swift in Sources */,
@@ -564,6 +584,10 @@
 				F904F16D695D501680DE6196 /* GenerateModelCardSheet.swift in Sources */,
 				411D22571A36869118D0CB81 /* InferenceRunner.swift in Sources */,
 				66088183C87E8C622FB3A00A /* InfoHint.swift in Sources */,
+				926025EF1F0ACF5EB34C94A9 /* IntentPruneCLIArgsBuilder.swift in Sources */,
+				1350DC561DC1FA5F6526A645 /* IntentPruneModels.swift in Sources */,
+				D98417FDCFA1538BC4E3881E /* IntentPruneView.swift in Sources */,
+				7155D2E71F2E7AD410654781 /* IntentPruneViewModel.swift in Sources */,
 				8073F87A5DB5F74B4455F991 /* JANGStudioApp.swift in Sources */,
 				9480E209FB0E63DFC3C755D1 /* JSONLProgressParser.swift in Sources */,
 				9A50B4212901B90908B5BD5D /* ModelCardService.swift in Sources */,

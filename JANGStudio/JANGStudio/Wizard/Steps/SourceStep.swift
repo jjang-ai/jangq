@@ -28,6 +28,7 @@ struct SourceStep: View {
     @State private var errorText: String?
     @State private var recommendation: Recommendation?
     @State private var showingPrequantPrune = false
+    @State private var showingIntentPrune = false
     @State private var autoOpenedAttachedPlan = false
     /// M135 (iter 57): stale-task handle tracking. User picks folder A →
     /// detection starts (Task A, ~5s) → user changes mind, picks folder B →
@@ -126,6 +127,8 @@ struct SourceStep: View {
                 Section {
                     if detected.isMoE {
                         // PR3: required segmented control — Convert is default primary path.
+                        // Expert Lab remains available as Advanced; Intent Prune is the
+                        // preferred Qwen MoE prune entry (IP4).
                         Picker("Workflow", selection: Binding(
                             get: { coord.plan.workflowMode },
                             set: { newMode in
@@ -143,8 +146,58 @@ struct SourceStep: View {
                         }
                         .pickerStyle(.segmented)
 
-                        if coord.plan.workflowMode == .convert {
-                            Text("Profile → quantize → verify. Skip expert prune.")
+                        if supportsIntentPrune(detected) {
+                            // IP4 primary path: Intent Prune (capability + CRACK stance).
+                            ExpertLabConsoleCard(accent: ExpertLabVisual.accent) {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    ExpertLabKicker(text: "Intent Prune")
+                                    Label("Shape model (Intent Prune)", systemImage: "slider.horizontal.3")
+                                        .font(.title3.weight(.semibold))
+                                    Text("Choose capabilities (coding, math, …), safety stance Keep / Balanced / CRACK, and a size budget. Hybrid scoring + hard-prune produce a smaller BF16/F16 source, then Convert as usual.")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    ExpertLabWorkflowStrip(
+                                        steps: ["Intents", "Score", "Hard Prune", "Verify", "Convert"],
+                                        activeIndex: 0
+                                    )
+                                    HStack(spacing: 8) {
+                                        Label(
+                                            detected.routedExpertTotal.map { "\($0) routed slots" } ?? "\(detected.numExperts) experts",
+                                            systemImage: "square.grid.3x3"
+                                        )
+                                        Label("source stays immutable", systemImage: "lock.shield")
+                                        Label("prune before quantize", systemImage: "scissors")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                    Button {
+                                        showingIntentPrune = true
+                                    } label: {
+                                        Label("Shape model (Intent Prune)", systemImage: "slider.horizontal.3")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.large)
+                                    .disabled(!canPrequantPrune(detected))
+                                }
+                            }
+
+                            Button {
+                                goDirectConvert()
+                            } label: {
+                                Label("Direct Convert", systemImage: "arrow.right.circle")
+                            }
+                            .controlSize(.large)
+
+                            if !canPrequantPrune(detected) {
+                                Label("Intent Prune hard-prune needs a raw BF16/F16 Qwen MoE source.",
+                                      systemImage: "info.circle")
+                                    .font(.caption)
+                            }
+                        } else if detected.isMoE {
+                            Label("Intent Prune coming for this architecture. Use Direct Convert, or Advanced Expert Lab where supported.",
+                                  systemImage: "info.circle")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Button {
@@ -154,13 +207,14 @@ struct SourceStep: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
+                        }
 
-                            Button {
-                                coord.enterExpertLabReview()
-                            } label: {
-                                Label("Analyze Experts Before Pruning", systemImage: "point.3.connected.trianglepath.dotted")
+                        if coord.plan.workflowMode == .convert {
+                            if !supportsIntentPrune(detected) {
+                                Text("Profile → quantize → verify. Skip expert prune.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
-                            .disabled(!canPrepareExpertLabBundle(detected))
                         } else {
                             ExpertLabConsoleCard {
                                 VStack(alignment: .leading, spacing: 12) {
@@ -221,41 +275,59 @@ struct SourceStep: View {
                                 .truncationMode(.middle)
                         }
 
-                        // Router-only prune stays under Convert (non-reviewed escape hatch).
-                        if coord.plan.workflowMode == .convert || attachedReviewPlanURL != nil {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Button {
-                                    if attachedReviewPlanURL != nil {
-                                        coord.plan.workflowMode = .expertLab
-                                        coord.ensureActiveIsVisible()
-                                        if coord.canActivate(.pruneReview) {
-                                            coord.active = .pruneReview
-                                        }
-                                    } else {
-                                        showingPrequantPrune = true
-                                    }
-                                } label: {
-                                    Label(attachedReviewPlanURL == nil ? "Router-Only Prune..." : "Open Reviewed Prune Plan",
-                                          systemImage: "scissors")
-                                }
-                                .disabled(!canPrequantPrune(detected))
-                                .fixedSize(horizontal: false, vertical: true)
+                        // Advanced: Expert Lab + router-only escape hatch (demoted from primary).
+                        DisclosureGroup("Advanced") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Power-user atlas / mask path and non-reviewed router-only prune.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
 
-                                if canPrequantPrune(detected), attachedReviewPlanURL == nil {
-                                    Label("Fallback uses router-row strength only; it does not probe prompts. It cannot unlock final quantization.",
-                                          systemImage: "exclamationmark.triangle.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(ExpertLabVisual.warm)
+                                Button {
+                                    coord.enterExpertLabReview()
+                                } label: {
+                                    Label("Advanced Expert Lab", systemImage: "point.3.connected.trianglepath.dotted")
+                                }
+                                .disabled(!canPrepareExpertLabBundle(detected))
+
+                                // Router-only prune stays under Convert (non-reviewed escape hatch).
+                                if coord.plan.workflowMode == .convert || attachedReviewPlanURL != nil {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Button {
+                                            if attachedReviewPlanURL != nil {
+                                                coord.plan.workflowMode = .expertLab
+                                                coord.ensureActiveIsVisible()
+                                                if coord.canActivate(.pruneReview) {
+                                                    coord.active = .pruneReview
+                                                }
+                                            } else {
+                                                showingPrequantPrune = true
+                                            }
+                                        } label: {
+                                            Label(attachedReviewPlanURL == nil ? "Router-Only Prune..." : "Open Reviewed Prune Plan",
+                                                  systemImage: "scissors")
+                                        }
+                                        .disabled(!canPrequantPrune(detected))
                                         .fixedSize(horizontal: false, vertical: true)
+
+                                        if canPrequantPrune(detected), attachedReviewPlanURL == nil {
+                                            Label("Fallback uses router-row strength only; it does not probe prompts. It cannot unlock final quantization.",
+                                                  systemImage: "exclamationmark.triangle.fill")
+                                                .font(.caption)
+                                                .foregroundStyle(ExpertLabVisual.warm)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                    }
+                                }
+
+                                if !canPrequantPrune(detected) {
+                                    Label("Pre-quant source pruning is currently wired for qwen3_5_moe/qwen3_5_moe_text raw MoE sources. You can still inspect Expert Lab traces, but hard pruning should wait for a supported source-prune adapter.",
+                                          systemImage: "info.circle")
+                                        .font(.caption)
                                 }
                             }
+                            .padding(.vertical, 4)
                         }
 
-                        if !canPrequantPrune(detected) {
-                            Label("Pre-quant source pruning is currently wired for qwen3_5_moe/qwen3_5_moe_text raw MoE sources. You can still inspect Expert Lab traces, but hard pruning should wait for a supported source-prune adapter.",
-                                  systemImage: "info.circle")
-                                .font(.caption)
-                        }
                     } else {
                         Label("No routed experts were detected, so Expert Lab is not available. Continue with Convert: Profile → Run → Verify.",
                               systemImage: "info.circle")
@@ -414,6 +486,20 @@ struct SourceStep: View {
                 }
             }
         }
+        .sheet(isPresented: $showingIntentPrune) {
+            if let url = coord.plan.sourceURL, let detected = coord.plan.detected {
+                IntentPruneView(
+                    sourceURL: url,
+                    detected: detected,
+                    onAdoptPrunedSource: { prunedURL in
+                        adoptReviewedPrunedSource(url: prunedURL)
+                    },
+                    onOpenAdvancedExpertLab: {
+                        coord.enterExpertLabReview()
+                    }
+                )
+            }
+        }
         .task(id: coord.plan.expertReviewPlanURL) {
             if attachedReviewPlanURL != nil, !autoOpenedAttachedPlan {
                 autoOpenedAttachedPlan = true
@@ -495,6 +581,11 @@ struct SourceStep: View {
 
     private func canPrepareExpertLabBundle(_ detected: ArchitectureSummary) -> Bool {
         SourceStepExpertPruneSupport.supportsRawQwenPrequantPrune(detected)
+    }
+
+    /// Intent Prune v1: Qwen MoE BF16/F16 only (same gate as hard-prune adapter).
+    private func supportsIntentPrune(_ detected: ArchitectureSummary) -> Bool {
+        IntentPruneCLIArgsBuilder.supportsIntentPrune(detected)
     }
 
     private var attachedReviewPlanURL: URL? {
