@@ -63,7 +63,7 @@ Documentation = "https://github.com/jjang-ai/jangq#readme"
 include = ["jang_tools*"]
 
 [tool.setuptools.package-data]
-jang_tools = ["templates/*.jinja"]
+jang_tools = ["templates/*.jinja", "intent_prune/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "jang_tools/dsv4/tests"]

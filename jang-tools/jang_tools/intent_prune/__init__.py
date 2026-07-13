@@ -1,9 +1,33 @@
-"""Intent Prune helpers: transitions, path graph, hybrid_v1 scoring.
+"""Intent Prune helpers: transitions, path graph, hybrid_v1 scoring, CRACK pack.
 
 PR-IP0: transition emission + adjacency building.
 PR-IP1: power-iteration path scores + hybrid fusion + plan emit.
+PR-IP2: CRACK probe pack assets, fingerprint, metrics, naming.
 """
 
+from .crack import (
+    CRACK_CLASSES,
+    CRACK_PACK_FILENAME,
+    CRACK_PACK_NAME,
+    CRACK_PACK_VERSION,
+    CRACK_STANCE,
+    CRACK_SUFFIX,
+    MAX_CRACK_PROBES,
+    MIN_CRACK_PROBES,
+    apply_crack_suffix,
+    content_sha256,
+    crack_pack_fingerprint,
+    crack_pack_meta,
+    default_crack_pack_path,
+    file_sha256,
+    has_crack_suffix,
+    intent_prune_artifact_name,
+    is_crack_stance,
+    join_intent_slugs,
+    load_crack_pack,
+    normalize_intent_slug,
+    resolve_crack_pack_for_plan,
+)
 from .graph import (
     build_row_stochastic,
     build_sparse_operator,
@@ -15,6 +39,17 @@ from .graph import (
     power_iteration,
     power_iteration_sparse,
     stationary_from_adjacency,
+)
+from .metrics import (
+    RESPONSE_LABELS,
+    aggregate_crack_metrics,
+    classify_response,
+    crack_eval_gate,
+    crack_metrics_delta,
+    is_refusal,
+    is_refusal_or_partial,
+    score_crack_eval_row,
+    score_crack_pack_responses,
 )
 from .score import (
     BALANCED_WEIGHTS,
@@ -107,4 +142,36 @@ __all__ = [
     "score_transitions_to_plan",
     "select_keep_k",
     "write_prune_plan",
+    # crack pack + naming
+    "CRACK_CLASSES",
+    "CRACK_PACK_FILENAME",
+    "CRACK_PACK_NAME",
+    "CRACK_PACK_VERSION",
+    "CRACK_STANCE",
+    "CRACK_SUFFIX",
+    "MAX_CRACK_PROBES",
+    "MIN_CRACK_PROBES",
+    "apply_crack_suffix",
+    "content_sha256",
+    "crack_pack_fingerprint",
+    "crack_pack_meta",
+    "default_crack_pack_path",
+    "file_sha256",
+    "has_crack_suffix",
+    "intent_prune_artifact_name",
+    "is_crack_stance",
+    "join_intent_slugs",
+    "load_crack_pack",
+    "normalize_intent_slug",
+    "resolve_crack_pack_for_plan",
+    # metrics
+    "RESPONSE_LABELS",
+    "aggregate_crack_metrics",
+    "classify_response",
+    "crack_eval_gate",
+    "crack_metrics_delta",
+    "is_refusal",
+    "is_refusal_or_partial",
+    "score_crack_eval_row",
+    "score_crack_pack_responses",
 ]

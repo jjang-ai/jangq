@@ -12,6 +12,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from .crack import is_crack_stance, resolve_crack_pack_for_plan
 from .graph import DEFAULT_MAX_ITER, DEFAULT_TELEPORT, DEFAULT_TOL
 from .score import (
     PLAN_SCHEMA,
@@ -141,6 +142,19 @@ def register(subparsers) -> None:
         type=int,
         default=0,
         help="Suite prompt count recorded under plan.suite",
+    )
+    p.add_argument(
+        "--crack-pack",
+        default="",
+        help=(
+            "Path to CRACK probe pack JSONL. When --safety-stance=crack and "
+            "this is omitted, the shipped crack_probes_v1 pack is attached."
+        ),
+    )
+    p.add_argument(
+        "--no-default-crack-pack",
+        action="store_true",
+        help="Do not auto-attach the shipped CRACK pack when stance is crack",
     )
     p.set_defaults(func=_cmd_intent_prune_score, json=True)
 

@@ -28,6 +28,7 @@ from .graph import (
     path_scores_from_transitions,
     stationary_from_adjacency,
 )
+from .crack import resolve_crack_pack_for_plan
 from .transitions import (
     CRACK_PROBE_MARKERS,
     SAFETY_PROBE_MARKERS,
@@ -564,13 +565,20 @@ def build_prune_plan(
     backend: str | None = None,
     suite: Mapping[str, Any] | None = None,
     crack_pack: Mapping[str, Any] | None = None,
+    crack_pack_path: str | Path | None = None,
+    attach_default_crack_pack: bool = True,
     trained_top_k: int | None = None,
     comparison_summary: Mapping[str, Any] | None = None,
     eval_index: Mapping[str, Any] | None = None,
     created_at: str | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Emit a ``jang-intent-prune-plan-v1`` document from a score result."""
+    """Emit a ``jang-intent-prune-plan-v1`` document from a score result.
+
+    When ``safety_stance`` is ``crack`` and no explicit ``crack_pack`` is
+    provided, the shipped CRACK probe pack metadata is attached automatically
+    (name / sha256 / prompt_count) unless ``attach_default_crack_pack=False``.
+    """
     top_k = int(trained_top_k) if trained_top_k is not None else None
     issues: list[str] = []
     if top_k is not None and result.keep_k < top_k:
@@ -578,6 +586,13 @@ def build_prune_plan(
             f"keep_experts_per_layer={result.keep_k} < trained_top_k={top_k}"
         )
     safety_passed = len(issues) == 0
+
+    crack_meta = resolve_crack_pack_for_plan(
+        result.safety_stance,
+        crack_pack,
+        crack_pack_path=crack_pack_path,
+        attach_default=attach_default_crack_pack,
+    )
 
     plan: dict[str, Any] = {
         "schema": PLAN_SCHEMA,
@@ -592,7 +607,7 @@ def build_prune_plan(
         "num_experts_source": int(result.num_experts),
         "num_layers": int(result.num_layers),
         "suite": dict(suite) if suite else {},
-        "crack_pack": dict(crack_pack) if crack_pack else {},
+        "crack_pack": crack_meta,
         "safety": {
             "passed": safety_passed,
             "minimum_active_experts_per_layer": int(result.keep_k),
@@ -638,6 +653,8 @@ def score_transitions_to_plan(
     backend: str | None = None,
     suite: Mapping[str, Any] | None = None,
     crack_pack: Mapping[str, Any] | None = None,
+    crack_pack_path: str | Path | None = None,
+    attach_default_crack_pack: bool = True,
     trained_top_k: int | None = None,
     teleport: float = DEFAULT_TELEPORT,
 ) -> dict[str, Any]:
@@ -661,6 +678,8 @@ def score_transitions_to_plan(
         backend=backend,
         suite=suite,
         crack_pack=crack_pack,
+        crack_pack_path=crack_pack_path,
+        attach_default_crack_pack=attach_default_crack_pack,
         trained_top_k=trained_top_k,
         extra={"transitions": str(Path(transitions_path).expanduser())},
     )
