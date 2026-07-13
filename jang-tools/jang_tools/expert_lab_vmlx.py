@@ -1871,15 +1871,21 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
     generations_path = out_dir / "generations.jsonl"
     summary_path = out_dir / "summary.json"
     # Path transitions for Intent Prune hybrid scoring (PR-IP0).
-    emit_transitions = bool(
-        getattr(args, "emit_transitions", False) or getattr(args, "emit_token_trace", False)
-    )
-    # Transitions need ordered per-layer selections; force token_trace collection.
-    emit_token_trace = bool(getattr(args, "emit_token_trace", False) or emit_transitions)
+    # --emit-transitions is opt-in (does not auto-fire from --emit-token-trace).
+    # Transitions still require collecting token_trace in memory for path build.
+    emit_transitions = bool(getattr(args, "emit_transitions", False))
+    persist_token_trace = bool(getattr(args, "emit_token_trace", False))
+    collect_token_trace = bool(persist_token_trace or emit_transitions)
     transitions_path = out_dir / "expert_transitions.jsonl"
     transition_records: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     t0 = time.perf_counter()
+
+    if emit_transitions:
+        from .intent_prune.transitions import (
+            build_transition_records_for_prompt,
+            write_transitions_jsonl,
+        )
 
     with generations_path.open("w", encoding="utf-8") as fh:
         for index, prompt in enumerate(prompts):
@@ -1887,7 +1893,7 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
             context = ExpertTraceContext(
                 disabled_by_layer=disabled_by_layer,
                 top_k_override=top_k_override,
-                emit_token_trace=emit_token_trace,
+                emit_token_trace=collect_token_trace,
                 max_trace_tokens=args.max_trace_tokens,
             )
             global _ACTIVE_TRACE
@@ -1921,7 +1927,7 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError(f"{let_issue} for prompt {prompt.get('id')!r}")
             if let_issue := _token_trace_evidence_issue(
                 context,
-                emit_token_trace=emit_token_trace,
+                emit_token_trace=collect_token_trace,
                 disabled_by_layer=disabled_by_layer,
                 top_k_override=top_k_override,
             ):
@@ -1929,12 +1935,18 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
 
             elapsed = max(time.perf_counter() - started, 0.000001)
             generation_tokens = int(getattr(final, "generation_tokens", 0) or 0)
-            token_trace = context.token_trace if emit_token_trace else None
-            if emit_transitions and token_trace:
-                from .intent_prune.transitions import build_transition_records_for_prompt
-
+            collected_trace = context.token_trace if collect_token_trace else None
+            # Persist full token_trace only when explicitly requested; transitions
+            # alone keep paths in expert_transitions.jsonl to limit disk use.
+            token_trace_out = collected_trace if persist_token_trace else None
+            if emit_transitions and collected_trace:
+                fallback_id = f"prompt-{index}"
                 transition_records.extend(
-                    build_transition_records_for_prompt(prompt, token_trace)
+                    build_transition_records_for_prompt(
+                        prompt,
+                        collected_trace,
+                        fallback_id=fallback_id,
+                    )
                 )
             row = {
                 "schema": "jang-expert-lab-vmlx-generation-v1",
@@ -1952,7 +1964,7 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
                         else "max_tokens"
                     ),
                     "layer_stats": context.layer_stats(),
-                    "token_trace": token_trace,
+                    "token_trace": token_trace_out,
                     "runtime_info": runtime,
                 },
             }
@@ -1961,8 +1973,6 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
             fh.flush()
 
     if emit_transitions:
-        from .intent_prune.transitions import write_transitions_jsonl
-
         write_transitions_jsonl(transitions_path, transition_records)
 
     summary = {
@@ -2028,13 +2038,21 @@ def register(subparsers) -> None:
     parser.add_argument("--output", required=True, help="Directory for run artifacts")
     parser.add_argument("--mask", help="ExpertLab mask artifact JSON")
     parser.add_argument("--max-tokens", type=int, default=64)
-    parser.add_argument("--emit-token-trace", action="store_true")
+    parser.add_argument(
+        "--emit-token-trace",
+        action="store_true",
+        help=(
+            "Persist full per-layer token_trace inside generations.jsonl. "
+            "Does not write expert_transitions.jsonl; use --emit-transitions for path scoring."
+        ),
+    )
     parser.add_argument(
         "--emit-transitions",
         action="store_true",
         help=(
-            "Write expert_transitions.jsonl (ordered per-token layer paths). "
-            "Implies collecting token_trace routing evidence."
+            "Write expert_transitions.jsonl (ordered per-token layer paths for Intent Prune). "
+            "Collects token_trace in memory for path build; does not embed it in "
+            "generations.jsonl unless --emit-token-trace is also set."
         ),
     )
     parser.add_argument("--max-trace-tokens", type=int, default=32768)

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
+
+import pytest
 
 from jang_tools.intent_prune.transitions import (
     ADJACENCY_SCHEMA,
     TRANSITION_SCHEMA,
+    _cmd_build_adjacency,
+    _cmd_build_transitions,
     build_adjacency_from_jsonl,
     build_adjacency_from_transitions,
     build_transition_records,
     build_transition_records_for_prompt,
+    iter_transition_records,
     path_from_token_trace,
     prompt_transition_meta,
     transitions_from_generation_row,
@@ -146,6 +152,42 @@ def test_prompt_transition_meta_infers_safety_and_crack_flags():
     )
     assert explicit["safety_probe"] is False
     assert explicit["domains"] == ["code"]
+
+    # First present key wins even when a later alias is True.
+    multi = prompt_transition_meta(
+        {
+            "id": "multi",
+            "domains": ["code"],
+            "safety_probe": False,
+            "is_safety_probe": True,
+            "text": "code",
+        }
+    )
+    assert multi["safety_probe"] is False
+
+    # Bare medical/legal domain labels are not safety probes by themselves.
+    legal_code = prompt_transition_meta(
+        {
+            "id": "legal_code",
+            "domains": ["legal", "medical"],
+            "text": "Parse a statute.",
+        }
+    )
+    assert legal_code["safety_probe"] is False
+
+    # Canonical taxonomy slug still marks safety.
+    canonical = prompt_transition_meta(
+        {
+            "id": "canonical_safety",
+            "domains": ["safety_medical_legal_sensitive"],
+            "text": "Sensitive guidance.",
+        }
+    )
+    assert canonical["safety_probe"] is True
+
+    # Fallback id when suite id is missing.
+    fallback = prompt_transition_meta({"domains": ["code"], "text": "x"}, fallback_id="prompt-3")
+    assert fallback["prompt_id"] == "prompt-3"
 
 
 def test_build_transition_records_for_prompt_uses_suite_row():
@@ -350,7 +392,7 @@ def test_synthetic_highway_adjacency_prefers_path_experts():
         weight_by_gate=True,
     )
     edges = {
-        (e["from_expert"], e["to_expert"]): e["weight"]
+        (e["from_expert"], e["to_expert"]): e
         for e in adjacency["edges"]
         if e["from_layer"] == 0 and e["to_layer"] == 1
     }
@@ -358,4 +400,173 @@ def test_synthetic_highway_adjacency_prefers_path_experts():
     assert (0, 1) in edges
     # Highway edge is present for path scoring even though mass on 0/1 is larger.
     assert float(adjacency["mass"]["0"]["0"]) > float(adjacency["mass"]["0"]["7"])
-    assert edges[(7, 13)] > 0.0
+    assert abs(edges[(7, 13)]["weight"] - (3 * 0.95 * 0.90)) < 1e-9
+    assert edges[(7, 13)]["count"] == 3
+
+
+def test_zero_and_short_scores_do_not_inflate_edge_weight():
+    records = [
+        {
+            "schema": TRANSITION_SCHEMA,
+            "prompt_id": "z",
+            "domains": [],
+            "safety_probe": False,
+            "crack_probe": False,
+            "token_index": 0,
+            "path": [
+                # Expert 2 has score 0.0 → product with 3 is 0 → edge omitted.
+                {"layer": 0, "experts": [1, 2], "scores": [0.9, 0.0]},
+                {"layer": 1, "experts": [3], "scores": [0.5]},
+            ],
+        }
+    ]
+    adjacency = build_adjacency_from_transitions(records, weight_by_gate=True)
+    by_pair = {
+        (e["from_expert"], e["to_expert"]): e["weight"] for e in adjacency["edges"]
+    }
+    assert (1, 3) in by_pair
+    assert abs(by_pair[(1, 3)] - (0.9 * 0.5)) < 1e-9
+    assert (2, 3) not in by_pair
+
+    # Short scores pad missing slots with 1.0 (unweighted), not 0.0.
+    short = [
+        {
+            "schema": TRANSITION_SCHEMA,
+            "prompt_id": "short",
+            "domains": [],
+            "safety_probe": False,
+            "crack_probe": False,
+            "token_index": 0,
+            "path": [
+                {"layer": 0, "experts": [1, 2], "scores": [0.9]},
+                {"layer": 1, "experts": [3], "scores": [0.5]},
+            ],
+        }
+    ]
+    adj_short = build_adjacency_from_transitions(short, weight_by_gate=True)
+    short_pairs = {
+        (e["from_expert"], e["to_expert"]): e["weight"] for e in adj_short["edges"]
+    }
+    assert abs(short_pairs[(1, 3)] - (0.9 * 0.5)) < 1e-9
+    # Missing score for expert 2 → default 1.0 * 0.5
+    assert abs(short_pairs[(2, 3)] - (1.0 * 0.5)) < 1e-9
+
+
+def test_duplicate_layer_hops_are_deduped_last_write_wins():
+    record = {
+        "schema": TRANSITION_SCHEMA,
+        "prompt_id": "dup",
+        "domains": [],
+        "safety_probe": False,
+        "crack_probe": False,
+        "token_index": 0,
+        "path": [
+            {"layer": 0, "experts": [1], "scores": [0.4]},
+            {"layer": 0, "experts": [2], "scores": [0.8]},  # last write for layer 0
+            {"layer": 1, "experts": [3], "scores": [0.5]},
+        ],
+    }
+    adjacency = build_adjacency_from_transitions([record], weight_by_gate=True)
+    pairs = {
+        (e["from_expert"], e["to_expert"]): e["weight"] for e in adjacency["edges"]
+    }
+    assert (2, 3) in pairs
+    assert (1, 3) not in pairs
+    assert abs(pairs[(2, 3)] - (0.8 * 0.5)) < 1e-9
+    # Mass only from the surviving hop for layer 0.
+    assert "1" not in adjacency["mass"]["0"]
+    assert abs(float(adjacency["mass"]["0"]["2"]) - 0.8) < 1e-9
+
+
+def test_num_experts_too_small_raises():
+    records = build_transition_records(
+        prompt_id="p",
+        domains=["code"],
+        token_trace=_flat_token_trace(),  # experts include 19
+    )
+    with pytest.raises(ValueError, match="num_experts=8 is too small"):
+        build_adjacency_from_transitions(records, num_experts=8)
+
+
+def test_empty_transitions_jsonl_builds_empty_adjacency(tmp_path: Path):
+    path = tmp_path / "expert_transitions.jsonl"
+    path.write_text("", encoding="utf-8")
+    adjacency = build_adjacency_from_jsonl(path)
+    assert adjacency["record_count"] == 0
+    assert adjacency["edge_count"] == 0
+    assert adjacency["edges"] == []
+
+
+def test_iter_transition_records_rejects_invalid_json(tmp_path: Path):
+    path = tmp_path / "bad.jsonl"
+    path.write_text("{not-json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid JSON"):
+        list(iter_transition_records(path))
+
+
+def test_generations_missing_token_trace_yield_no_records(tmp_path: Path):
+    gen = tmp_path / "generations.jsonl"
+    gen.write_text(
+        json.dumps(
+            {
+                "prompt": {"id": "p0", "domain": "code", "prompt": "hi"},
+                "result": {"text": "ok", "tokens": 1},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert transitions_from_generations_jsonl(gen) == []
+
+
+def test_cli_build_transitions_empty_exits_nonzero(tmp_path: Path, capsys):
+    gen = tmp_path / "generations.jsonl"
+    gen.write_text("", encoding="utf-8")
+    out = tmp_path / "expert_transitions.jsonl"
+    with pytest.raises(SystemExit) as exc:
+        _cmd_build_transitions(Namespace(generations=str(gen), output=str(out)))
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["record_count"] == 0
+    assert "token_trace" in payload["reason"]
+
+
+def test_cli_build_adjacency_empty_exits_nonzero(tmp_path: Path, capsys):
+    transitions = tmp_path / "expert_transitions.jsonl"
+    transitions.write_text("", encoding="utf-8")
+    out = tmp_path / "adjacency.json"
+    with pytest.raises(SystemExit) as exc:
+        _cmd_build_adjacency(
+            Namespace(
+                transitions=str(transitions),
+                output=str(out),
+                num_experts=0,
+                uniform_weight=False,
+            )
+        )
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["record_count"] == 0
+
+
+def test_cli_missing_generations_file_raises(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        _cmd_build_transitions(
+            Namespace(
+                generations=str(tmp_path / "missing.jsonl"),
+                output=str(tmp_path / "out.jsonl"),
+            )
+        )
+
+
+def test_fallback_id_from_prompt_index_without_prompt_id():
+    row = {
+        "prompt_index": 7,
+        "prompt": {"domain": "code", "prompt": "hi"},  # no id
+        "result": {"token_trace": _flat_token_trace()},
+    }
+    records = transitions_from_generation_row(row)
+    assert records
+    assert records[0]["prompt_id"] == "prompt-7"

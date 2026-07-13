@@ -33,13 +33,20 @@ Adjacency (offline)
 -------------------
 ``build_adjacency_from_transitions`` counts layer→layer expert edges for
 path scoring. With ``num_experts=E``, nodes are layer-prefixed:
-``node = layer * E + expert``. Edge weight defaults to the product of the
-two gate scores (or 1.0 when scores are missing).
+``node = layer * E + expert``. ``E`` must be strictly greater than every
+observed expert id (use the model expert width); omit to infer
+``max_seen+1`` (safe for node uniqueness, not a substitute for model ``E``
+when reshaping path scores to ``[L, E]``).
+
+Edge weight defaults to the product of the two gate scores. Missing score
+slots default to ``1.0`` (unweighted). Zero/negative products do **not**
+inflate to ``1.0`` — those edges are omitted.
 """
 
 from __future__ import annotations
 
 import json
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
@@ -47,6 +54,47 @@ from typing import Any, Iterable, Iterator, Sequence
 TRANSITION_SCHEMA = "jang-expert-transitions-v1"
 ADJACENCY_SCHEMA = "jang-expert-adjacency-v1"
 EXPERT_TRANSITIONS_FILENAME = "expert_transitions.jsonl"
+
+# Canonical / safety-taxonomy markers only (not bare "medical"/"legal").
+# Suite rows usually already carry safety_medical_legal_sensitive via
+# prequant_prune_qwen_moe._suite_semantic_domains.
+_SAFETY_PROBE_MARKERS = {
+    "safety",
+    "safety_medical_legal_sensitive",
+    "safety-medical-legal-sensitive",
+    "safety-sensitive",
+    "safety_sensitive",
+    "model-safety",
+    "model_safety",
+    "medicine-safety",
+    "medicine_safety",
+    "medical-sensitive",
+    "medical_sensitive",
+    "legal-sensitive",
+    "legal_sensitive",
+    "finance-safety",
+    "finance_safety",
+}
+_CRACK_PROBE_MARKERS = {
+    "crack",
+    "abliteration",
+    "refusal",
+    "jailbreak_probe",
+    "jailbreak-probe",
+}
+_SAFETY_PROBE_KEYS = (
+    "safety_probe",
+    "safetyProbe",
+    "is_safety_probe",
+    "isSafetyProbe",
+)
+_CRACK_PROBE_KEYS = (
+    "crack_probe",
+    "crackProbe",
+    "is_crack_probe",
+    "isCrackProbe",
+)
+_PROMPT_ID_KEYS = ("id", "prompt_id", "promptID")
 
 
 def _coerce_bool(raw: Any, default: bool = False) -> bool:
@@ -139,54 +187,67 @@ def _domains_from_prompt(prompt: dict[str, Any]) -> list[str]:
     return sorted(set(tags))
 
 
+def _first_present_bool(prompt: dict[str, Any], keys: Sequence[str]) -> bool | None:
+    """Return the first explicitly present key as bool; None if none present."""
+    for key in keys:
+        if key in prompt:
+            return _coerce_bool(prompt[key])
+    return None
+
+
+def _normalized_marker(raw: str) -> str:
+    return str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+
+
 def _infer_safety_probe(prompt: dict[str, Any], domains: Sequence[str]) -> bool:
-    if any(
-        key in prompt
-        for key in ("safety_probe", "safetyProbe", "is_safety_probe", "isSafetyProbe")
-    ):
-        return _coerce_bool(
-            prompt.get("safety_probe")
-            or prompt.get("safetyProbe")
-            or prompt.get("is_safety_probe")
-            or prompt.get("isSafetyProbe")
-        )
-    safety_markers = {
-        "safety",
-        "safety_medical_legal_sensitive",
-        "safety-medical-legal-sensitive",
-        "medical",
-        "legal",
-        "sensitive",
-    }
-    lowered = {str(d).strip().lower().replace(" ", "_") for d in domains}
-    tags = {t.strip().lower().replace(" ", "_") for t in _string_list(prompt.get("tags"))}
-    return bool(lowered.intersection(safety_markers) or tags.intersection(safety_markers))
+    explicit = _first_present_bool(prompt, _SAFETY_PROBE_KEYS)
+    if explicit is not None:
+        return explicit
+    # Prefer canonical taxonomy markers; bare medical/legal are not enough alone
+    # (suite helper already maps sensitive tags → safety_medical_legal_sensitive).
+    markers = {_normalized_marker(d) for d in domains}
+    tags = {_normalized_marker(t) for t in _string_list(prompt.get("tags"))}
+    # Also accept hyphenated forms stored as-is before normalize.
+    combined = markers | tags
+    return bool(combined.intersection({_normalized_marker(m) for m in _SAFETY_PROBE_MARKERS}))
 
 
 def _infer_crack_probe(prompt: dict[str, Any], domains: Sequence[str]) -> bool:
-    if any(
-        key in prompt
-        for key in ("crack_probe", "crackProbe", "is_crack_probe", "isCrackProbe")
-    ):
-        return _coerce_bool(
-            prompt.get("crack_probe")
-            or prompt.get("crackProbe")
-            or prompt.get("is_crack_probe")
-            or prompt.get("isCrackProbe")
-        )
-    crack_markers = {"crack", "abliteration", "refusal", "jailbreak_probe"}
-    lowered = {str(d).strip().lower().replace(" ", "_") for d in domains}
-    tags = {t.strip().lower().replace(" ", "_") for t in _string_list(prompt.get("tags"))}
-    return bool(lowered.intersection(crack_markers) or tags.intersection(crack_markers))
+    explicit = _first_present_bool(prompt, _CRACK_PROBE_KEYS)
+    if explicit is not None:
+        return explicit
+    markers = {_normalized_marker(d) for d in domains}
+    tags = {_normalized_marker(t) for t in _string_list(prompt.get("tags"))}
+    combined = markers | tags
+    return bool(combined.intersection({_normalized_marker(m) for m in _CRACK_PROBE_MARKERS}))
 
 
-def prompt_transition_meta(prompt: dict[str, Any]) -> dict[str, Any]:
-    """Extract prompt_id / domains / probe flags for transition records."""
-    prompt_id = (
-        str(prompt.get("id") or prompt.get("prompt_id") or prompt.get("promptID") or "").strip()
-    )
+def _prompt_id_from_mapping(prompt: dict[str, Any]) -> str | None:
+    for key in _PROMPT_ID_KEYS:
+        if key not in prompt:
+            continue
+        value = str(prompt.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def prompt_transition_meta(
+    prompt: dict[str, Any],
+    *,
+    fallback_id: str | None = None,
+) -> dict[str, Any]:
+    """Extract prompt_id / domains / probe flags for transition records.
+
+    If the prompt has no id, ``fallback_id`` is used when provided; otherwise
+    raises ``ValueError``.
+    """
+    prompt_id = _prompt_id_from_mapping(prompt)
     if not prompt_id:
-        raise ValueError("prompt is missing a non-empty id / prompt_id")
+        fallback = str(fallback_id or "").strip()
+        if not fallback:
+            raise ValueError("prompt is missing a non-empty id / prompt_id")
+        prompt_id = fallback
     domains = _domains_from_prompt(prompt)
     return {
         "prompt_id": prompt_id,
@@ -206,12 +267,13 @@ def _hop_from_trace_row(row: dict[str, Any]) -> dict[str, Any] | None:
     if not experts:
         return None
     scores = _as_float_list(row.get("scores") or row.get("selected_scores") or row.get("weights"))
-    if scores and len(scores) != len(experts):
-        # Keep alignment: truncate/pad rather than drop the hop.
+    if scores:
+        # Align length without inventing zero scores (zeros would drop or
+        # formerly inflate edges). Missing slots default to 1.0 at edge time.
         if len(scores) > len(experts):
             scores = scores[: len(experts)]
-        else:
-            scores = scores + [0.0] * (len(experts) - len(scores))
+        elif len(scores) < len(experts):
+            scores = scores + [1.0] * (len(experts) - len(scores))
     layer_raw = row.get("layer")
     if layer_raw is None:
         return None
@@ -226,6 +288,14 @@ def _hop_from_trace_row(row: dict[str, Any]) -> dict[str, Any] | None:
     if scores:
         hop["scores"] = scores
     return hop
+
+
+def _dedupe_hops_by_layer(hops: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One hop per layer (last write wins), sorted by ascending layer."""
+    by_layer: dict[int, dict[str, Any]] = {}
+    for hop in hops:
+        by_layer[int(hop["layer"])] = hop
+    return [by_layer[layer] for layer in sorted(by_layer)]
 
 
 def path_from_token_trace(token_trace: Sequence[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -251,11 +321,7 @@ def path_from_token_trace(token_trace: Sequence[dict[str, Any]]) -> dict[int, li
 
     paths: dict[int, list[dict[str, Any]]] = {}
     for token_index, hops in by_token.items():
-        # One hop per layer (last write wins if hooks double-fire).
-        by_layer: dict[int, dict[str, Any]] = {}
-        for hop in hops:
-            by_layer[int(hop["layer"])] = hop
-        ordered = [by_layer[layer] for layer in sorted(by_layer)]
+        ordered = _dedupe_hops_by_layer(hops)
         if ordered:
             paths[int(token_index)] = ordered
     return paths
@@ -299,11 +365,13 @@ def build_transition_records(
 def build_transition_records_for_prompt(
     prompt: dict[str, Any],
     token_trace: Sequence[dict[str, Any]] | None,
+    *,
+    fallback_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Convenience: suite prompt row + vMLX token_trace → transition records."""
     if not token_trace:
         return []
-    meta = prompt_transition_meta(prompt)
+    meta = prompt_transition_meta(prompt, fallback_id=fallback_id)
     return build_transition_records(
         prompt_id=meta["prompt_id"],
         domains=meta["domains"],
@@ -339,7 +407,11 @@ def iter_transition_records(path: str | Path) -> Iterator[dict[str, Any]]:
         yield row
 
 
-def transitions_from_generation_row(row: dict[str, Any]) -> list[dict[str, Any]]:
+def transitions_from_generation_row(
+    row: dict[str, Any],
+    *,
+    fallback_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Build transitions from one ``generations.jsonl`` row (vMLX schema)."""
     if not isinstance(row, dict):
         raise ValueError("generation row must be a JSON object")
@@ -351,20 +423,31 @@ def transitions_from_generation_row(row: dict[str, Any]) -> list[dict[str, Any]]
             "domain": row.get("domain"),
             "domains": row.get("domains") or row.get("semantic_domains") or row.get("semanticDomains"),
             "tags": row.get("tags"),
-            "safety_probe": row.get("safety_probe", row.get("safetyProbe")),
-            "crack_probe": row.get("crack_probe", row.get("crackProbe")),
         }
+        if "safety_probe" in row or "safetyProbe" in row:
+            prompt["safety_probe"] = row.get("safety_probe", row.get("safetyProbe"))
+        if "crack_probe" in row or "crackProbe" in row:
+            prompt["crack_probe"] = row.get("crack_probe", row.get("crackProbe"))
     result = row.get("result") if isinstance(row.get("result"), dict) else row
     token_trace = result.get("token_trace") if isinstance(result, dict) else None
     if not isinstance(token_trace, list):
         return []
-    return build_transition_records_for_prompt(prompt, token_trace)
+    synthetic = fallback_id
+    if synthetic is None and "prompt_index" in row:
+        synthetic = f"prompt-{row['prompt_index']}"
+    return build_transition_records_for_prompt(
+        prompt,
+        token_trace,
+        fallback_id=synthetic,
+    )
 
 
 def transitions_from_generations_jsonl(path: str | Path) -> list[dict[str, Any]]:
     """Rebuild expert transitions from a vMLX ``generations.jsonl`` artifact."""
     records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(Path(path).expanduser().read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(
+        Path(path).expanduser().read_text(encoding="utf-8").splitlines(), start=1
+    ):
         if not line.strip():
             continue
         try:
@@ -372,7 +455,12 @@ def transitions_from_generations_jsonl(path: str | Path) -> list[dict[str, Any]]
         except json.JSONDecodeError as exc:
             raise ValueError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
         try:
-            records.extend(transitions_from_generation_row(row))
+            records.extend(
+                transitions_from_generation_row(
+                    row,
+                    fallback_id=f"prompt-{line_number - 1}",
+                )
+            )
         except ValueError as exc:
             raise ValueError(f"{path}:{line_number}: {exc}") from exc
     return records
@@ -389,8 +477,8 @@ def _path_hops(record: dict[str, Any]) -> list[dict[str, Any]]:
         hop = _hop_from_trace_row(entry)
         if hop is not None:
             hops.append(hop)
-    hops.sort(key=lambda item: int(item["layer"]))
-    return hops
+    # Match emit-time path_from_token_trace: one hop per layer, last wins.
+    return _dedupe_hops_by_layer(hops)
 
 
 def _edge_weight(
@@ -402,13 +490,15 @@ def _edge_weight(
     weight_by_gate: bool,
 ) -> Iterator[tuple[int, int, float]]:
     for i, expert_a in enumerate(experts_a):
+        # Missing scores → unweighted 1.0 (not zero; zero products are omitted).
         score_a = float(scores_a[i]) if i < len(scores_a) else 1.0
         for j, expert_b in enumerate(experts_b):
             score_b = float(scores_b[j]) if j < len(scores_b) else 1.0
             if weight_by_gate:
                 weight = max(score_a, 0.0) * max(score_b, 0.0)
                 if weight <= 0.0:
-                    weight = 1.0
+                    # Do not inflate zero products to 1.0; skip the edge.
+                    continue
             else:
                 weight = 1.0
             yield int(expert_a), int(expert_b), float(weight)
@@ -426,8 +516,13 @@ def build_adjacency_from_transitions(
 
     * ``edges`` — list of ``{from_layer, from_expert, to_layer, to_expert, weight, count}``
     * ``transition_counts`` — nested map ``from_layer → to_layer → from_expert → to_expert → weight``
-    * ``nodes`` — optional layer-prefixed node ids when ``num_experts`` is set
+    * ``nodes`` — layer-prefixed node ids when expert width is known
     * ``mass`` — per-layer expert selection mass (gate sum or hit count)
+
+    When ``num_experts`` is provided it must satisfy
+    ``num_experts >= max_observed_expert_id + 1`` so layer-prefixed nodes
+    cannot collide. Omitting it infers ``max_seen + 1`` (unique nodes only;
+    not a substitute for model expert width when reshaping π to ``[L, E]``).
     """
     # transition_counts[from_layer][to_layer][from_expert][to_expert] = weight
     transition_counts: dict[int, dict[int, dict[int, dict[int, float]]]] = defaultdict(
@@ -462,7 +557,7 @@ def build_adjacency_from_transitions(
         for left, right in zip(hops, hops[1:]):
             from_layer = int(left["layer"])
             to_layer = int(right["layer"])
-            # Skip non-forward edges (should not happen with sorted hops).
+            # Skip non-forward edges (should not happen with sorted/deduped hops).
             if to_layer <= from_layer:
                 continue
             for expert_a, expert_b, weight in _edge_weight(
@@ -478,7 +573,18 @@ def build_adjacency_from_transitions(
                 max_expert_seen = max(max_expert_seen, expert_a, expert_b)
 
     inferred_experts = max_expert_seen + 1 if max_expert_seen >= 0 else 0
-    expert_width = int(num_experts) if num_experts and num_experts > 0 else inferred_experts
+    if num_experts is not None and int(num_experts) > 0:
+        expert_width = int(num_experts)
+        if max_expert_seen >= 0 and expert_width <= max_expert_seen:
+            raise ValueError(
+                f"num_experts={expert_width} is too small for observed expert id "
+                f"{max_expert_seen}; layer-prefixed nodes would collide across layers. "
+                f"Pass num_experts >= {max_expert_seen + 1} (model expert width), "
+                f"or omit to infer max_seen+1={inferred_experts} "
+                f"(infer mode is not a substitute for model E when reshaping π to [L, E])."
+            )
+    else:
+        expert_width = inferred_experts
 
     edges: list[dict[str, Any]] = []
     for (from_layer, from_expert, to_layer, to_expert), count in sorted(edge_counts.items()):
@@ -609,7 +715,10 @@ def register(subparsers) -> None:
         "--num-experts",
         type=int,
         default=0,
-        help="Expert width E for layer-prefixed node ids (0 = infer from data)",
+        help=(
+            "Model expert width E for layer-prefixed node ids "
+            "(must be > max observed expert id; 0 = infer max_seen+1)"
+        ),
     )
     adj.add_argument(
         "--uniform-weight",
@@ -626,6 +735,8 @@ def _generations_path(raw: str | Path) -> Path:
         if not candidate.is_file():
             raise FileNotFoundError(f"generations.jsonl not found under {path}")
         return candidate
+    if not path.is_file():
+        raise FileNotFoundError(f"generations path not found: {path}")
     return path
 
 
@@ -633,31 +744,49 @@ def _cmd_build_transitions(args) -> None:
     generations = _generations_path(args.generations)
     records = transitions_from_generations_jsonl(generations)
     count = write_transitions_jsonl(args.output, records)
-    summary = {
-        "ok": True,
+    summary: dict[str, Any] = {
+        "ok": count > 0,
         "schema": TRANSITION_SCHEMA,
         "generations": str(generations),
         "output": str(Path(args.output).expanduser()),
         "record_count": count,
     }
+    if count == 0:
+        summary["reason"] = (
+            "no transition records produced; generations lack token_trace "
+            "(re-run expert-lab-vmlx with --emit-token-trace and/or --emit-transitions)"
+        )
+        warnings.warn(summary["reason"], stacklevel=1)
     print(json.dumps(summary, sort_keys=True))
+    if count == 0:
+        raise SystemExit(2)
 
 
 def _cmd_build_adjacency(args) -> None:
+    transitions_path = Path(args.transitions).expanduser()
+    if not transitions_path.is_file():
+        raise FileNotFoundError(f"transitions path not found: {transitions_path}")
     num_experts = int(args.num_experts) if args.num_experts and args.num_experts > 0 else None
     adjacency = build_adjacency_from_jsonl(
-        args.transitions,
+        transitions_path,
         num_experts=num_experts,
         weight_by_gate=not bool(args.uniform_weight),
     )
     write_adjacency_json(args.output, adjacency)
-    summary = {
-        "ok": True,
+    summary: dict[str, Any] = {
+        "ok": adjacency["record_count"] > 0,
         "schema": ADJACENCY_SCHEMA,
-        "transitions": str(Path(args.transitions).expanduser()),
+        "transitions": str(transitions_path),
         "output": str(Path(args.output).expanduser()),
         "record_count": adjacency["record_count"],
         "edge_count": adjacency["edge_count"],
         "num_experts": adjacency["num_experts"],
     }
+    if adjacency["record_count"] == 0:
+        summary["reason"] = (
+            "no path records in expert_transitions.jsonl; adjacency is empty"
+        )
+        warnings.warn(summary["reason"], stacklevel=1)
     print(json.dumps(summary, sort_keys=True))
+    if adjacency["record_count"] == 0:
+        raise SystemExit(2)
