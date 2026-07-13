@@ -18,6 +18,8 @@ from .graph import (
 )
 from .score import (
     BALANCED_WEIGHTS,
+    DEFAULT_PRESET,
+    DEFAULT_SAFETY_STANCE,
     HIGHWAY_E,
     HIGHWAY_H,
     HIGHWAY_L,
@@ -85,6 +87,8 @@ __all__ = [
     "stationary_from_adjacency",
     # score
     "BALANCED_WEIGHTS",
+    "DEFAULT_PRESET",
+    "DEFAULT_SAFETY_STANCE",
     "HIGHWAY_E",
     "HIGHWAY_H",
     "HIGHWAY_L",

@@ -14,6 +14,8 @@ from typing import Any
 
 from .graph import DEFAULT_MAX_ITER, DEFAULT_TELEPORT, DEFAULT_TOL
 from .score import (
+    DEFAULT_PRESET,
+    DEFAULT_SAFETY_STANCE,
     PLAN_SCHEMA,
     PRESET_WEIGHTS,
     SAFETY_STANCES,
@@ -68,15 +70,18 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--preset",
-        default="balanced",
+        default=DEFAULT_PRESET,
         choices=sorted(PRESET_WEIGHTS),
-        help="Fusion weight preset (default: balanced)",
+        help=f"Fusion weight preset (SHIP DEFAULT: {DEFAULT_PRESET})",
     )
     p.add_argument(
         "--safety-stance",
-        default="balanced",
+        default=DEFAULT_SAFETY_STANCE,
         choices=list(SAFETY_STANCES),
-        help="Safety stance: keep | balanced | crack (default: balanced)",
+        help=(
+            f"Safety stance: keep | balanced | crack "
+            f"(SHIP DEFAULT: {DEFAULT_SAFETY_STANCE})"
+        ),
     )
     p.add_argument(
         "--intent",
