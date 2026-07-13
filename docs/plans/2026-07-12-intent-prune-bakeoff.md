@@ -295,3 +295,37 @@ For each arm: pruned size / K, keep-intent suite scores, safety/CRACK pack metri
 ---
 
 *End of IP5 bake-off ship report.*
+
+---
+
+## Live dogfood — Qwen3.6-35B-A3B (2026-07-13)
+
+Source: Portable2TB BF16 tree (40×256). Transitions: **3032** records from prior validator51 baseline `generations.jsonl` (token_trace present).
+
+### Scoring
+
+| Plan | K | Stance | safety.passed | Notes |
+|---|---:|---|---|---|
+| hybrid coding/math | 192 | keep | yes | intents code+coding+math |
+| hybrid coding/math | 192 | crack | yes | crack_probes_v1 attached |
+
+Artifacts: `/Volumes/Portable2TB/HermesVault/Artifacts/jang-intent-prune-dogfood-20260713/`
+
+### Live keep-set Jaccard (K=192)
+
+| Pair | Mean over 40 layers |
+|---|---:|
+| mass vs hybrid | 0.9992 |
+| path vs hybrid | 0.9992 |
+| mass vs path | 1.0000 |
+| Keep plan vs CRACK plan | 0.9686 |
+
+Layer 0 hybrid swaps 3 experts vs pure mass. At 75% keep fraction, rankings are highly correlated; hybrid still differs at the margin. Stronger TRACE separation needs lower K and/or intent-stratified generation.
+
+### Hard prune
+
+`prequant-prune-qwen-moe` started with hybrid Keep plan → `Qwen3.6-35B-A3B-intent-coding-math-k192` (see `hard-prune.log`).
+
+### Draft PR
+
+https://github.com/jjang-ai/jangq/pull/20
