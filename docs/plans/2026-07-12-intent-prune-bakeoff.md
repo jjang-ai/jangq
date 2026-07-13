@@ -322,10 +322,49 @@ Artifacts: `/Volumes/Portable2TB/HermesVault/Artifacts/jang-intent-prune-dogfood
 
 Layer 0 hybrid swaps 3 experts vs pure mass. At 75% keep fraction, rankings are highly correlated; hybrid still differs at the margin. Stronger TRACE separation needs lower K and/or intent-stratified generation.
 
-### Hard prune
+### Hard prune — COMPLETE
 
-`prequant-prune-qwen-moe` started with hybrid Keep plan → `Qwen3.6-35B-A3B-intent-coding-math-k192` (see `hard-prune.log`).
+`prequant-prune-qwen-moe` with hybrid Keep plan → `Qwen3.6-35B-A3B-intent-coding-math-k192`
 
-### Draft PR
+| Field | Value |
+|---|---|
+| Experts | 256 → **192** |
+| Size | ~67 GB → **~52 GB** BF16 |
+| Verification | config / index / router / expert rows **ok** |
+
+### Same-suite TRACE on pruned BF16 — COMPLETE
+
+```bash
+python -m jang_tools expert-lab-vmlx \
+  …/Qwen3.6-35B-A3B-intent-coding-math-k192 \
+  --suite suite-validator51.jsonl \
+  --output …/pruned-trace-validator51 \
+  --max-tokens 24 --temperature 0 --emit-token-trace --emit-transitions
+```
+
+| Field | Value |
+|---|---|
+| Prompts | 51 (same suite sha as baseline) |
+| Hook coverage | 40/40 |
+| Transitions | 3032; expert ids 0–191 |
+| Exact greedy text vs full-256 baseline | **44 / 51 (86%)** at max_tokens=24 |
+| Domain notes | code/math/format/inst exact; short diffs on reason/safety/noneng |
+
+### JANG_4K quant — COMPLETE
+
+```bash
+python -m jang_tools convert …/intent-coding-math-k192 \
+  -o …/intent-coding-math-k192-JANG_4K -p JANG_4K -m mse
+```
+
+| Field | Value |
+|---|---|
+| Actual bits | **3.98** |
+| Size | **14.36 GB** |
+| Validate | **VALID** |
+
+**Compression path:** 67 GB full BF16 → 52 GB pruned BF16 → **14.36 GB JANG_4K**.
+
+### PR
 
 https://github.com/jjang-ai/jangq/pull/20
