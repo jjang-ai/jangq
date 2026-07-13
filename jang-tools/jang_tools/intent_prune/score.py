@@ -51,7 +51,19 @@ _SAFETY_DOMAIN_MARKERS = frozenset(
 PLAN_SCHEMA = "jang-intent-prune-plan-v1"
 SCORER_NAME = "hybrid_v1"
 
-# Balanced preset (default) — plan §10.2 / §11.6
+# ---------------------------------------------------------------------------
+# SHIP DEFAULTS — frozen hybrid_v1 fusion weights (IP5 / PR-IP5)
+#
+# Do not retune casually. These constants are the Studio/CLI ship defaults for
+# Intent Prune until a new bake-off re-opens the matrix.
+#
+# Evidence and freeze rationale:
+#   docs/plans/2026-07-12-intent-prune-bakeoff.md
+# Normative formulas:
+#   docs/plans/2026-07-12-jang-studio-intent-prune-crack.md §10.2 / §11.6
+# ---------------------------------------------------------------------------
+
+# SHIP DEFAULTS — Balanced preset (Studio/CLI default for hybrid_v1)
 BALANCED_WEIGHTS: dict[str, float] = {
     "path": 0.30,
     "mass": 0.20,
@@ -63,7 +75,7 @@ BALANCED_WEIGHTS: dict[str, float] = {
     "safety_crack": 0.25,
 }
 
-# Specialist preset — plan §11.6
+# SHIP DEFAULTS — Specialist preset (intent-heavy; same safety terms as Balanced)
 SPECIALIST_WEIGHTS: dict[str, float] = {
     "path": 0.20,
     "mass": 0.15,
@@ -75,10 +87,15 @@ SPECIALIST_WEIGHTS: dict[str, float] = {
     "safety_crack": 0.25,
 }
 
+# SHIP DEFAULTS — preset registry; default key is "balanced"
 PRESET_WEIGHTS: dict[str, dict[str, float]] = {
     "balanced": BALANCED_WEIGHTS,
     "specialist": SPECIALIST_WEIGHTS,
 }
+
+# SHIP DEFAULTS — default preset and safety stance for scorer entry points
+DEFAULT_PRESET = "balanced"
+DEFAULT_SAFETY_STANCE = "balanced"
 
 SAFETY_STANCES = ("keep", "balanced", "crack")
 
@@ -169,8 +186,8 @@ def _matrix_has_positive(matrix: Sequence[Sequence[float]]) -> bool:
     return False
 
 
-def resolve_weights(preset: str = "balanced") -> dict[str, float]:
-    key = (preset or "balanced").strip().lower()
+def resolve_weights(preset: str = DEFAULT_PRESET) -> dict[str, float]:
+    key = (preset or DEFAULT_PRESET).strip().lower()
     if key not in PRESET_WEIGHTS:
         raise ValueError(
             f"unknown preset {preset!r}; expected one of {sorted(PRESET_WEIGHTS)}"
@@ -186,11 +203,11 @@ def fusion_score_layer(
     pi_s: Sequence[float] | None = None,
     *,
     weights: Mapping[str, float] | None = None,
-    safety_stance: str = "balanced",
+    safety_stance: str = DEFAULT_SAFETY_STANCE,
 ) -> list[float]:
     """Hybrid fusion for one layer (plan §11.6)."""
     w = dict(weights or BALANCED_WEIGHTS)
-    stance = (safety_stance or "balanced").strip().lower()
+    stance = (safety_stance or DEFAULT_SAFETY_STANCE).strip().lower()
     if stance not in SAFETY_STANCES:
         raise ValueError(
             f"unknown safety_stance {safety_stance!r}; expected one of {SAFETY_STANCES}"
@@ -337,8 +354,8 @@ def score_hybrid(
     keep_k: int,
     intents_keep: Sequence[str] | None = None,
     intents_drop: Sequence[str] | None = None,
-    safety_stance: str = "balanced",
-    preset: str = "balanced",
+    safety_stance: str = DEFAULT_SAFETY_STANCE,
+    preset: str = DEFAULT_PRESET,
     weights: Mapping[str, float] | None = None,
     weight_by_gate: bool = True,
     teleport: float = DEFAULT_TELEPORT,
@@ -353,12 +370,12 @@ def score_hybrid(
 ) -> HybridScoreResult:
     """Score experts with hybrid_v1 and select uniform keep-K per layer."""
     w = dict(weights) if weights is not None else resolve_weights(preset)
-    stance = (safety_stance or "balanced").strip().lower()
+    stance = (safety_stance or DEFAULT_SAFETY_STANCE).strip().lower()
     if stance not in SAFETY_STANCES:
         raise ValueError(
             f"unknown safety_stance {safety_stance!r}; expected one of {SAFETY_STANCES}"
         )
-    preset_key = (preset or "balanced").strip().lower()
+    preset_key = (preset or DEFAULT_PRESET).strip().lower()
 
     keep_intents = [str(x) for x in (intents_keep or []) if str(x).strip()]
     drop_intents = [str(x) for x in (intents_drop or []) if str(x).strip()]
@@ -646,8 +663,8 @@ def score_transitions_to_plan(
     num_layers: int | None = None,
     intents_keep: Sequence[str] | None = None,
     intents_drop: Sequence[str] | None = None,
-    safety_stance: str = "balanced",
-    preset: str = "balanced",
+    safety_stance: str = DEFAULT_SAFETY_STANCE,
+    preset: str = DEFAULT_PRESET,
     weight_by_gate: bool = True,
     source_model: str | None = None,
     backend: str | None = None,
