@@ -227,11 +227,26 @@ def _cmd_intent_prune_score(args) -> None:
         int(args.trained_top_k) if args.trained_top_k and args.trained_top_k > 0 else None
     )
 
+    crack_pack_raw = str(getattr(args, "crack_pack", "") or "").strip()
+    crack_pack_path = Path(crack_pack_raw).expanduser() if crack_pack_raw else None
+    if crack_pack_path is not None and not crack_pack_path.is_file():
+        raise FileNotFoundError(f"CRACK pack not found: {crack_pack_path}")
+    attach_default = not bool(getattr(args, "no_default_crack_pack", False))
+    crack_pack = resolve_crack_pack_for_plan(
+        str(args.safety_stance),
+        None,
+        crack_pack_path=crack_pack_path,
+        attach_default=attach_default,
+    )
+
     plan = build_prune_plan(
         result,
         source_model=str(args.source_model or ""),
         backend=str(args.backend or ""),
         suite=suite or None,
+        crack_pack=crack_pack or None,
+        crack_pack_path=crack_pack_path,
+        attach_default_crack_pack=attach_default,
         trained_top_k=trained_top_k,
         extra={
             "transitions": str(Path(transitions_raw).expanduser()) if transitions_raw else "",
@@ -254,6 +269,14 @@ def _cmd_intent_prune_score(args) -> None:
         "intents_keep": plan["intents_keep"],
         "safety_passed": plan["safety"]["passed"],
         "record_count": result.meta.get("record_count", 0),
+        "crack_pack": {
+            "name": plan.get("crack_pack", {}).get("name", ""),
+            "sha256": plan.get("crack_pack", {}).get("sha256", ""),
+            "prompt_count": plan.get("crack_pack", {}).get("prompt_count", 0),
+        }
+        if plan.get("crack_pack")
+        else {},
+        "is_crack": is_crack_stance(plan.get("safety_stance")),
     }
     # Sample first layer keep list for CLI visibility
     if plan.get("layers"):
