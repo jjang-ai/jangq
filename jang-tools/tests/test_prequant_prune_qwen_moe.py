@@ -370,3 +370,56 @@ def test_prequant_prune_rejects_output_inside_or_above_source_tree(tmp_path):
         assert (src / "model.safetensors.index.json").exists()
 
     assert not nested_output.exists()
+
+
+def test_prequant_prune_accepts_intent_plan_flat_keep_lists(tmp_path):
+    """jang-intent-prune-plan-v1 uses flat keep lists per layer and scalar trained_top_k."""
+    src = _make_qwen_moe_source(tmp_path)
+    keep_map = tmp_path / "intent-plan.json"
+    keep_map.write_text(json.dumps({
+        "schema": "jang-intent-prune-plan-v1",
+        "schema_version": 1,
+        "scorer": "hybrid_v1",
+        "source_model": str(src.resolve()),
+        "keep_experts_per_layer": 2,
+        "num_experts_source": 4,
+        "num_layers": 1,
+        "safety_stance": "balanced",
+        "suite": {"name": "Reviewed Prune 50", "prompt_count": 50},
+        "safety": {
+            "passed": True,
+            "minimum_active_experts_per_layer": 2,
+            "trained_top_k": 1,
+            "issues": [],
+        },
+        "layers": {
+            "0": [0, 2],
+        },
+    }))
+    dst = tmp_path / "qwen-intent-pruned"
+
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jang_tools",
+            "--quiet-text",
+            "prequant-prune-qwen-moe",
+            str(src),
+            str(dst),
+            "--keep-map",
+            str(keep_map),
+            "--json",
+        ],
+        env=_env(),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    summary = json.loads(r.stdout)
+    assert summary["method"] == "hybrid_v1"
+    assert summary["num_experts"] == 2
+
+    manifest = json.loads((dst / "expert_prune_manifest.json").read_text())
+    assert manifest["layers"]["0"]["keep"] == [0, 2]
+

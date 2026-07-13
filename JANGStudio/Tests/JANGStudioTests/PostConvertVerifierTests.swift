@@ -185,6 +185,70 @@ final class PostConvertVerifierTests: XCTestCase {
         XCTAssertTrue(text.contains("Pruned vMLX runtime source: \(pruned.path)"))
     }
 
+
+    func test_intentPrunePlanChecksPassWithoutSemanticEvidenceRows() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("intent-prune-verify-\(UUID().uuidString)", isDirectory: true)
+        let original = root.appendingPathComponent("original", isDirectory: true)
+        let pruned = root.appendingPathComponent("pruned", isDirectory: true)
+        let output = root.appendingPathComponent("converted", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: pruned, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try Self.validIntentPrunePlanJSON()
+            .write(to: pruned.appendingPathComponent("prune_plan.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = ConversionPlan()
+        plan.sourceURL = pruned
+        plan.outputURL = output
+        plan.expertReviewOriginalSourceURL = original
+        plan.expertReviewPrunedSourceURL = pruned
+        plan.expertReviewPrunePlanURL = pruned.appendingPathComponent("prune_plan.json")
+
+        let checks = PostConvertVerifier.reviewedPruneChecks(plan: plan, outputDir: output)
+        XCTAssertEqual(checks.first { $0.id == .reviewedPrunePlan }?.status, .pass, checks.first { $0.id == .reviewedPrunePlan }?.hint ?? "")
+        XCTAssertEqual(checks.first { $0.id == .reviewedPruneSource }?.status, .pass)
+        XCTAssertEqual(checks.first { $0.id == .reviewedPruneVerification }?.status, .pass)
+        XCTAssertEqual(checks.first { $0.id == .reviewedPruneSameSuite }?.status, .pass)
+    }
+
+    func test_intentPrunePlanChecksRequireCrackPackWhenStanceIsCrack() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("intent-prune-crack-\(UUID().uuidString)", isDirectory: true)
+        let original = root.appendingPathComponent("original", isDirectory: true)
+        let pruned = root.appendingPathComponent("pruned", isDirectory: true)
+        let output = root.appendingPathComponent("converted", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: pruned, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try """
+        {"ok":true,"checks":{"config_parses":true,"index_parses":true,"index_covers_tensors":true,"router_rows_match":true,"expert_rows_match":true}}
+        """
+            .write(to: pruned.appendingPathComponent("verification.json"), atomically: true, encoding: .utf8)
+        try Self.validIntentPrunePlanJSON(safetyStance: "crack", includeCrackPack: false)
+            .write(to: pruned.appendingPathComponent("prune_plan.json"), atomically: true, encoding: .utf8)
+        try writeExpertLabReviewSidecars(in: pruned)
+
+        let plan = ConversionPlan()
+        plan.sourceURL = pruned
+        plan.outputURL = output
+        plan.expertReviewOriginalSourceURL = original
+        plan.expertReviewPrunedSourceURL = pruned
+        plan.expertReviewPrunePlanURL = pruned.appendingPathComponent("prune_plan.json")
+
+        let checks = PostConvertVerifier.reviewedPruneChecks(plan: plan, outputDir: output)
+        let planCheck = try XCTUnwrap(checks.first { $0.id == .reviewedPrunePlan })
+        XCTAssertEqual(planCheck.status, .fail)
+        XCTAssertTrue(planCheck.hint?.contains("crack_pack") == true, planCheck.hint ?? "")
+    }
+
     func test_reviewedPruneChecksRejectComparisonSafeDropMaskMismatch() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("expert-prune-verify-\(UUID().uuidString)", isDirectory: true)
@@ -3478,6 +3542,133 @@ final class PostConvertVerifierTests: XCTestCase {
                 {"expert": 1, "hits": 0, "probabilityMass": 0.0, "domains": {}, "label": "unobserved", "kept": false}
               ]
             }
+          }
+        }
+        """
+    }
+
+
+    private static func validIntentPrunePlanJSON(
+        keepExperts: Int = 1,
+        trainedTopK: Int = 1,
+        safetyStance: String = "balanced",
+        includeCrackPack: Bool? = nil,
+        scorer: String = "hybrid_v1"
+    ) -> String {
+        let promptIDs = promptIDJSON(count: 50)
+        let includeCrack = includeCrackPack ?? (safetyStance == "crack")
+        let crackBlock: String
+        if includeCrack {
+            crackBlock = """
+              "crack_pack": {
+                "name": "crack-probes-v1",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "prompt_count": 18
+              },
+            """
+        } else {
+            crackBlock = """
+              "crack_pack": {},
+            """
+        }
+        return """
+        {
+          "schema": "jang-intent-prune-plan-v1",
+          "schema_version": 1,
+          "scorer": "\(scorer)",
+          "preset": "balanced",
+          "weights": {
+            "path": 0.30,
+            "mass": 0.20,
+            "intent": 0.35,
+            "drop": 0.10,
+            "backbone_floor": 0.05,
+            "safety_keep": 0.15,
+            "safety_balanced": 0.05,
+            "safety_crack": 0.25
+          },
+          "intents_keep": ["code", "math"],
+          "intents_drop": [],
+          "safety_stance": "\(safetyStance)",
+          "keep_experts_per_layer": \(keepExperts),
+          "num_experts_source": 2,
+          "num_layers": 1,
+          "suite": {
+            "name": "Reviewed Prune 50",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "prompt_count": 50
+          },
+          \(crackBlock)
+          "source_model": "/tmp/jang-unit-bf16-source",
+          "backend": "qwen35_moe_vmlx",
+          "prompt_count": 50,
+          "comparison_summary": {
+            "promptCount": 50,
+            "passRateBaseline": 1.0,
+            "passRateMasked": 1.0,
+            "validatorAvailablePromptCount": 50,
+            "classificationCounts": {\(classificationCountsJSON(count: 50))},
+            "baselineQualifiedPromptCount": 50,
+            "baselineQualifiedMaskedPassRate": 1.0,
+            "baselineQualifiedPromptIDs": [\(promptIDs)],
+            "baselineInvalidPromptIDs": [],
+            "inconclusivePromptIDs": [],
+            "preservedPromptIDs": [\(promptIDs)],
+            "degradedPromptIDs": [],
+            "baselineQualifiedSemanticCoverage": [\(requiredSemanticCoverageJSON())],
+            "missingBaselineQualifiedSemanticCoverage": [],
+            "meanTextDelta": 0.0,
+            "meanLatencyDeltaPct": 0.0,
+            "highRiskDomains": [],
+            "safeDropCandidates": [{"layer": 0, "expert": 1}]
+          },
+          "eval_index": {
+            "schema": "jang-expert-lab-eval-index-v1",
+            "prompt_count": 50,
+            "prompt_ids": [\(promptIDs)],
+            "risky_prompt_ids": [],
+            "high_risk_domains": [],
+            "semantic_coverage": [\(requiredSemanticCoverageJSON())],
+            "missing_semantic_coverage": [],
+            "validator_schema": "jang-expert-lab-validator-v1",
+            "validator_available_prompt_count": 50,
+            "prompt_classification_counts": {\(classificationCountsJSON(count: 50))},
+            "baseline_qualified_prompt_count": 50,
+            "baseline_qualified_prompt_ids": [\(promptIDs)],
+            "baseline_invalid_prompt_ids": [],
+            "inconclusive_prompt_ids": [],
+            "preserved_prompt_ids": [\(promptIDs)],
+            "degraded_prompt_ids": [],
+            "baseline_qualified_masked_pass_rate": 1.0,
+            "baseline_qualified_semantic_coverage": [\(requiredSemanticCoverageJSON())],
+            "missing_baseline_qualified_semantic_coverage": [],
+            "min_baseline_tokens": 12,
+            "min_masked_tokens": 12,
+            "mean_baseline_tokens": 12.0,
+            "mean_masked_tokens": 12.0,
+            "baseline_route_record_count": 50,
+            "masked_route_record_count": 50,
+            "eval_trace_jsonl": "expert_lab_eval_trace.jsonl",
+            "runtime_mode": "bf16_vmlx",
+            "runtime_backend": "vmlx",
+            "runtime_device": "Unit Metal",
+            "runtime_metal_enabled": true,
+            "hooked_moe_layers": 1,
+            "jang_tools_version": "2.5.31",
+            "mlx_version": "0.31.2",
+            "mlx_lm_version": "0.31.3",
+            "source_model_path": "/tmp/jang-unit-bf16-source",
+            "mask_applied": true,
+            "disabled_expert_count": 1
+          },
+          "safety": {
+            "passed": true,
+            "minimum_active_experts_per_layer": \(keepExperts),
+            "trained_top_k": \(trainedTopK),
+            "issues": []
+          },
+          "layers": {
+            "0": [0]
           }
         }
         """
