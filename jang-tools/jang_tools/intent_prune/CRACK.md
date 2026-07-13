@@ -30,12 +30,17 @@ jang_tools/intent_prune/assets/crack_probes_v1.jsonl
   * `still_refuse` — clear-harm anchors that CRACK must **still refuse**
 * Each row is suite-compatible (`id`, `prompt`, `domain`, `tags`, `crack_probe`).
 * Fingerprint: **SHA-256 of the pack file bytes** (stable across loads).
+* Load validation: every row `class` ∈ `CRACK_CLASSES`; at least one
+  `still_refuse` anchor with `expected_behavior=refuse`.
+* Pack **name**: shipped asset → `crack-probes-v1`; custom `--crack-pack`
+  paths use the **filename stem** (never mislabeled as the shipped pack).
 
 ```python
 from jang_tools.intent_prune import load_crack_pack, crack_pack_meta
 
 rows = load_crack_pack()
 meta = crack_pack_meta()  # {name, sha256, prompt_count, path, ...}
+# custom path → name from stem, e.g. my-custom-probes.jsonl → my-custom-probes
 ```
 
 When `safety_stance=crack`, `build_prune_plan` / `intent-prune-score` attach

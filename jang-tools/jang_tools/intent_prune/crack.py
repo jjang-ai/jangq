@@ -38,9 +38,25 @@ EXPECTED_BEHAVIORS = ("comply", "refuse")
 # Stable size bounds for the shipped pack
 MIN_CRACK_PROBES = 15
 MAX_CRACK_PROBES = 30
+# At least one still-should-refuse anchor (plan §7.4)
+MIN_STILL_REFUSE_ANCHORS = 1
 
 _INTENT_SLUG_RE = re.compile(r"[^a-z0-9]+")
 _MAX_INTENT_SLUG_LEN = 48
+
+# Accept common hyphen/alias spellings, map to CRACK_CLASSES
+_CLASS_ALIASES: dict[str, str] = {
+    "overrefusal": "over_refusal",
+    "over_refusals": "over_refusal",
+    "benign_dualuse": "benign_dual_use",
+    "dual_use": "benign_dual_use",
+    "dualuse": "benign_dual_use",
+    "policy": "policy_edge",
+    "policy_edge_case": "policy_edge",
+    "still_should_refuse": "still_refuse",
+    "should_refuse": "still_refuse",
+    "anchor": "still_refuse",
+}
 
 
 def default_crack_pack_path() -> Path:
@@ -51,6 +67,41 @@ def default_crack_pack_path() -> Path:
 def is_crack_stance(safety_stance: str | None) -> bool:
     """True when the safety stance is CRACK abliteration."""
     return (safety_stance or "").strip().lower() == CRACK_STANCE
+
+
+def is_default_crack_pack_path(path: str | Path | None) -> bool:
+    """True when ``path`` is the shipped default asset (or omitted)."""
+    if path is None:
+        return True
+    try:
+        return Path(path).expanduser().resolve() == default_crack_pack_path().resolve()
+    except OSError:
+        return False
+
+
+def crack_pack_name_for_path(path: str | Path | None = None) -> str:
+    """Pack display name: shipped asset → ``crack-probes-v1``; else filename stem.
+
+    Custom ``--crack-pack`` paths must not claim the shipped pack name.
+    Stem hyphens/underscores preserved; ``.jsonl`` suffix stripped.
+    """
+    if path is None or is_default_crack_pack_path(path):
+        return CRACK_PACK_NAME
+    pack_path = Path(path).expanduser()
+    stem = pack_path.stem.strip()
+    if not stem:
+        return CRACK_PACK_NAME
+    # Normalize underscores to hyphens for stable plan labels
+    return stem.replace("_", "-")
+
+
+def normalize_crack_class(raw: Any) -> str:
+    """Map a row ``class`` value to a canonical CRACK_CLASSES member (or '')."""
+    value = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not value:
+        return ""
+    value = _CLASS_ALIASES.get(value, value)
+    return value if value in CRACK_CLASSES else value
 
 
 def file_sha256(path: str | Path) -> str:
@@ -87,11 +138,35 @@ def crack_pack_fingerprint(
     return file_sha256(pack_path)
 
 
+def _row_expected_behavior(row: Mapping[str, Any], *, probe_class: str) -> str:
+    raw = (
+        row.get("expected_behavior")
+        or row.get("expectedBehavior")
+        or row.get("expected")
+        or ""
+    )
+    value = str(raw).strip().lower()
+    if value in {"refuse", "refusal", "deny", "block"}:
+        return "refuse"
+    if value in {"comply", "answer", "allow", "help"}:
+        return "comply"
+    if probe_class == "still_refuse":
+        return "refuse"
+    return "comply"
+
+
 def load_crack_pack(path: str | Path | None = None) -> list[dict[str, Any]]:
     """Load and validate CRACK probe pack JSONL.
 
     Compatible with Expert Lab / expert_lab_vmlx suite rows: each object has
     at least ``id`` and ``prompt`` (or ``text``).
+
+    Structural checks (plan §7.4):
+
+    * size in ``[MIN_CRACK_PROBES, MAX_CRACK_PROBES]``
+    * every row ``class`` ∈ :data:`CRACK_CLASSES`
+    * at least :data:`MIN_STILL_REFUSE_ANCHORS` rows with ``class=still_refuse``
+      and expected refuse behavior
     """
     pack_path = Path(path).expanduser() if path is not None else default_crack_pack_path()
     if not pack_path.is_file():
@@ -118,10 +193,20 @@ def load_crack_pack(path: str | Path | None = None) -> list[dict[str, Any]]:
         prompt_text = str(row.get("prompt") or "").strip()
         if not prompt_text:
             raise ValueError(f"CRACK pack line {line_number} id {prompt_id!r} has empty prompt")
+
+        probe_class = normalize_crack_class(row.get("class") or row.get("probe_class"))
+        if probe_class not in CRACK_CLASSES:
+            raise ValueError(
+                f"CRACK pack line {line_number} id {prompt_id!r} has invalid class "
+                f"{row.get('class')!r}; expected one of {CRACK_CLASSES}"
+            )
+
         # Normalize flags so transition emission treats rows as crack probes
         row = dict(row)
         row["id"] = prompt_id
         row["prompt"] = prompt_text
+        row["class"] = probe_class
+        row["expected_behavior"] = _row_expected_behavior(row, probe_class=probe_class)
         row.setdefault("crack_probe", True)
         row.setdefault("safety_probe", False)
         tags = row.get("tags")
@@ -140,19 +225,36 @@ def load_crack_pack(path: str | Path | None = None) -> list[dict[str, Any]]:
             f"CRACK pack size {n} outside allowed range "
             f"[{MIN_CRACK_PROBES}, {MAX_CRACK_PROBES}]"
         )
+
+    anchors = [
+        r
+        for r in prompts
+        if r.get("class") == "still_refuse" and r.get("expected_behavior") == "refuse"
+    ]
+    if len(anchors) < MIN_STILL_REFUSE_ANCHORS:
+        raise ValueError(
+            f"CRACK pack requires at least {MIN_STILL_REFUSE_ANCHORS} "
+            f"still_refuse anchor(s) with expected_behavior=refuse; found {len(anchors)}"
+        )
     return prompts
 
 
 def crack_pack_meta(
     path: str | Path | None = None,
     *,
-    name: str = CRACK_PACK_NAME,
+    name: str | None = None,
 ) -> dict[str, Any]:
-    """Plan-ready ``crack_pack`` block: name, sha256, prompt_count, path."""
+    """Plan-ready ``crack_pack`` block: name, sha256, prompt_count, path.
+
+    When ``name`` is omitted, the shipped default pack is labeled
+    ``crack-probes-v1``; any other path uses the file stem so custom
+    ``--crack-pack`` paths are not mislabeled as the shipped pack.
+    """
     pack_path = Path(path).expanduser() if path is not None else default_crack_pack_path()
     rows = load_crack_pack(pack_path)
+    pack_name = name if name is not None and str(name).strip() else crack_pack_name_for_path(pack_path)
     return {
-        "name": name,
+        "name": pack_name,
         "version": CRACK_PACK_VERSION,
         "sha256": crack_pack_fingerprint(pack_path),
         "prompt_count": len(rows),
@@ -174,6 +276,7 @@ def resolve_crack_pack_for_plan(
     * Non-CRACK stance → ``{}`` unless an explicit pack dict/path is passed.
     * CRACK stance → explicit meta, or default shipped pack when
       ``attach_default`` is true.
+    * Custom paths never claim ``crack-probes-v1`` unless that is their stem.
     """
     if crack_pack:
         out = dict(crack_pack)
@@ -181,7 +284,12 @@ def resolve_crack_pack_for_plan(
             out["sha256"] = crack_pack_fingerprint(crack_pack_path)
         if "prompt_count" not in out and crack_pack_path is not None:
             out["prompt_count"] = len(load_crack_pack(crack_pack_path))
-        out.setdefault("name", CRACK_PACK_NAME)
+        if "name" not in out or not str(out.get("name") or "").strip():
+            out["name"] = (
+                crack_pack_name_for_path(crack_pack_path)
+                if crack_pack_path is not None
+                else CRACK_PACK_NAME
+            )
         return out
 
     if crack_pack_path is not None:

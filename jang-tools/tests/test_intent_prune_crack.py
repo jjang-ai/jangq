@@ -17,6 +17,7 @@ from jang_tools.intent_prune.crack import (
     apply_crack_suffix,
     crack_pack_fingerprint,
     crack_pack_meta,
+    crack_pack_name_for_path,
     default_crack_pack_path,
     has_crack_suffix,
     intent_prune_artifact_name,
@@ -61,6 +62,10 @@ def test_default_crack_pack_exists_and_in_range():
     benign = [r for r in rows if r.get("class") != "still_refuse"]
     assert all(r.get("expected_behavior") == "comply" for r in benign)
     assert all(r.get("crack_probe") is True for r in rows)
+    # No placeholder domain values (review Issue 2)
+    assert all(str(r.get("domain") or "").strip().lower() not in {"", "domain"} for r in rows)
+    by_id = {r["id"]: r for r in rows}
+    assert by_id["crack-v1-011"]["domain"] == "knowledge"
 
 
 def test_crack_pack_fingerprint_stable():
@@ -94,6 +99,36 @@ def test_fingerprint_changes_when_content_changes(tmp_path: Path):
     assert crack_pack_fingerprint(mutated) != original
 
 
+def _write_minimal_valid_pack(
+    path: Path,
+    *,
+    n: int = MIN_CRACK_PROBES,
+    include_still_refuse: bool = True,
+    bad_class: str | None = None,
+) -> None:
+    """Write a pack that satisfies size + class + optional still_refuse rules."""
+    lines: list[str] = []
+    for i in range(n):
+        if include_still_refuse and i == 0:
+            cls = "still_refuse"
+            expected = "refuse"
+        else:
+            cls = bad_class or "over_refusal"
+            expected = "comply"
+        lines.append(
+            json.dumps(
+                {
+                    "id": f"p{i:02d}",
+                    "prompt": f"Probe prompt number {i} with enough text for eval.",
+                    "class": cls,
+                    "expected_behavior": expected,
+                    "domain": "knowledge",
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def test_load_rejects_out_of_range_pack(tmp_path: Path):
     tiny = tmp_path / "tiny.jsonl"
     tiny.write_text(
@@ -110,6 +145,40 @@ def test_load_rejects_out_of_range_pack(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="outside allowed range"):
         load_crack_pack(tiny)
+
+
+def test_load_rejects_invalid_class(tmp_path: Path):
+    pack = tmp_path / "bad_class.jsonl"
+    _write_minimal_valid_pack(pack, bad_class="not_a_real_class")
+    with pytest.raises(ValueError, match="invalid class"):
+        load_crack_pack(pack)
+
+
+def test_load_rejects_missing_still_refuse_anchors(tmp_path: Path):
+    pack = tmp_path / "no_anchors.jsonl"
+    _write_minimal_valid_pack(pack, include_still_refuse=False)
+    with pytest.raises(ValueError, match="still_refuse anchor"):
+        load_crack_pack(pack)
+
+
+def test_custom_crack_pack_name_from_filename_stem(tmp_path: Path):
+    """Custom --crack-pack must not hardcode name crack-probes-v1."""
+    pack = tmp_path / "my_custom_probes.jsonl"
+    _write_minimal_valid_pack(pack)
+    assert crack_pack_name_for_path(pack) == "my-custom-probes"
+    meta = crack_pack_meta(pack)
+    assert meta["name"] == "my-custom-probes"
+    assert meta["name"] != CRACK_PACK_NAME
+    assert meta["filename"] == "my_custom_probes.jsonl"
+    assert meta["sha256"] == crack_pack_fingerprint(pack)
+
+    resolved = resolve_crack_pack_for_plan("crack", None, crack_pack_path=pack)
+    assert resolved["name"] == "my-custom-probes"
+    assert resolved["sha256"] == meta["sha256"]
+
+    # Default shipped pack still uses the canonical product name
+    assert crack_pack_name_for_path() == CRACK_PACK_NAME
+    assert crack_pack_meta()["name"] == CRACK_PACK_NAME
 
 
 def test_is_crack_stance():
