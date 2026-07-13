@@ -1,10 +1,6 @@
 // JANGStudio/JANGStudio/Wizard/IntentPruneViewModel.swift
-// Sheet ViewModel for Intent Prune (plan §6, §12 IP4).
-//
-// Pipeline (when transitions exist):
-//   intent-prune-score → prequant-prune-qwen-moe (hard prune + structural verify)
-// Without transitions: dry-runable structure with clear guidance; CLI args
-// still build for Preview / when the user attaches expert_transitions.jsonl.
+// Sheet ViewModel for Intent Prune quality loop:
+//   Evidence → Shape (keep/drop) → Score + Hard Prune → Quality note → Convert
 import Foundation
 import Observation
 
@@ -26,9 +22,9 @@ enum IntentPruneError: Error, LocalizedError {
             }
             return "Intent Prune CLI exited \(code): \(trimmed)"
         case .missingTransitions:
-            return "Need expert_transitions.jsonl from a Reviewed 50 BF16/vMLX trace. Choose a transitions file, or open Advanced Expert Lab to run the suite first."
+            return "Need expert_transitions.jsonl from a real-domain BF16/vMLX trace. Attach a file or open Advanced Expert Lab to generate evidence first."
         case .noCapabilitySelected:
-            return "Select at least one capability chip (e.g. Coding)."
+            return "Select at least one Keep capability (green panel)."
         case .crackConfirmRequired:
             return "CRACK abliteration requires the confirmation checkbox."
         case .outputConflictsWithSource:
@@ -47,12 +43,16 @@ final class IntentPruneViewModel {
     let sourceURL: URL
     let detected: ArchitectureSummary
 
+    // MARK: - Workflow
+    var stage: IntentPruneStage = .shape
+
     // MARK: - User selections
-    var selectedChips: Set<IntentPruneChip> = [.coding]
+    var selectedChips: Set<IntentPruneChip> = [.coding, .math]
+    var dropChips: Set<IntentPruneDropChip> = []
     var safetyStance: IntentPruneSafetyStance = .keep
     var crackConfirmed: Bool = false
     var budget: IntentPruneBudget = .standard
-    /// Path to `expert_transitions.jsonl` (or adjacency). Optional until Run.
+    /// Path to `expert_transitions.jsonl` (or adjacency). Required for score/prune.
     var transitionsURL: URL?
     var adjacencyURL: URL?
 
@@ -67,9 +67,9 @@ final class IntentPruneViewModel {
     var prunedVerified = false
     var lastScoreSummary: String?
     var runTask: Task<Void, Never>?
-
-    /// Structural hard-prune JSON summary (when prune completes).
     var pruneSummaryJSON: [String: Any]?
+    /// User acknowledged holdout quality step (full auto holdout suite is CLI-side today).
+    var qualityAcknowledged = false
 
     init(sourceURL: URL, detected: ArchitectureSummary) {
         self.sourceURL = sourceURL
@@ -80,18 +80,21 @@ final class IntentPruneViewModel {
         )
         self.outputURL = Self.defaultOutputURL(
             sourceURL: sourceURL,
-            chips: [.coding],
+            chips: [.coding, .math],
+            dropChips: [],
             keepK: k,
             safetyStance: .keep
         )
-        // Auto-discover transitions near source if present.
         self.transitionsURL = Self.discoverTransitions(near: sourceURL)
+        if transitionsURL != nil {
+            // Evidence already present — stay on Shape for selections.
+            stage = .shape
+        }
     }
 
     // MARK: - Derived
 
     var expertsPerLayer: Int { max(detected.numExperts, 1) }
-
     var trainedTopK: Int { max(detected.numExpertsPerTok ?? 1, 1) }
 
     var keepK: Int {
@@ -102,20 +105,45 @@ final class IntentPruneViewModel {
         IntentPruneCLIArgsBuilder.domainKeys(for: selectedChips)
     }
 
+    var dropDomainKeys: [String] {
+        IntentPruneCLIArgsBuilder.dropDomainKeys(for: dropChips)
+    }
+
+    var hasEvidence: Bool {
+        transitionsURL != nil || adjacencyURL != nil
+    }
+
+    var shapeComplete: Bool {
+        !selectedChips.isEmpty && (!safetyStance.isCrack || crackConfirmed)
+    }
+
+    var canEnterStage: (IntentPruneStage) -> Bool {
+        { stage in
+            switch stage {
+            case .evidence, .shape:
+                return true
+            case .prune:
+                return self.hasEvidence && self.shapeComplete
+            case .quality:
+                return self.prunedVerified
+            case .convert:
+                return self.canAdopt && self.qualityAcknowledged
+            }
+        }
+    }
+
     var canRun: Bool {
         guard !isRunning else { return false }
-        guard !selectedChips.isEmpty else { return false }
-        if safetyStance.isCrack, !crackConfirmed { return false }
-        guard transitionsURL != nil || adjacencyURL != nil else { return false }
+        guard shapeComplete else { return false }
+        guard hasEvidence else { return false }
         guard !outputConflictsWithSource else { return false }
         return true
     }
 
     var canPreviewScores: Bool {
         guard !isRunning else { return false }
-        guard !selectedChips.isEmpty else { return false }
-        if safetyStance.isCrack, !crackConfirmed { return false }
-        return transitionsURL != nil || adjacencyURL != nil
+        guard shapeComplete else { return false }
+        return hasEvidence
     }
 
     var canAdopt: Bool {
@@ -138,11 +166,15 @@ final class IntentPruneViewModel {
     }
 
     var evidenceLine: String {
-        var parts = ["Evidence: Reviewed Prune 50 (required)"]
-        if safetyStance.isCrack {
-            parts.append("CRACK pack: crack-probes-v1 (auto-attached)")
+        if hasEvidence {
+            let name = transitionsURL?.lastPathComponent ?? adjacencyURL?.lastPathComponent ?? "evidence"
+            var parts = ["Evidence: \(name)"]
+            if safetyStance.isCrack {
+                parts.append("CRACK pack auto-attached on score")
+            }
+            return parts.joined(separator: " · ")
         }
-        return parts.joined(separator: " · ")
+        return "Evidence: attach expert_transitions.jsonl (real-domain preferred)"
     }
 
     var keepSummaryLine: String {
@@ -154,14 +186,66 @@ final class IntentPruneViewModel {
         return "\(sourceURL.lastPathComponent) · \(layers) · \(expertsPerLayer) experts/layer · \(detected.dtype.rawValue.uppercased())"
     }
 
+    var planSummaryLine: String {
+        let keep = selectedChips.map(\.title).sorted().joined(separator: ", ")
+        let drop = dropChips.filter { !$0.switchesToCrackStance }.map(\.title).sorted().joined(separator: ", ")
+        var parts = ["Keep: \(keep.isEmpty ? "—" : keep)"]
+        if !drop.isEmpty { parts.append("Drop: \(drop)") }
+        parts.append("K=\(keepK)")
+        parts.append(safetyStance.title)
+        return parts.joined(separator: " · ")
+    }
+
     // MARK: - Mutations
+
+    func goToStage(_ next: IntentPruneStage) {
+        guard canEnterStage(next) || next == .evidence || next == .shape else { return }
+        stage = next
+    }
 
     func toggleChip(_ chip: IntentPruneChip) {
         if selectedChips.contains(chip) {
             selectedChips.remove(chip)
         } else {
             selectedChips.insert(chip)
+            // Keep wins over drop for the same semantic area when possible.
+            if chip == .multilingual { dropChips.remove(.multilingual) }
+            if chip == .tools { dropChips.remove(.tools) }
+            if chip == .longContext { dropChips.remove(.longContext) }
         }
+        qualityAcknowledged = false
+        refreshDefaultOutputURL()
+    }
+
+    func toggleDropChip(_ chip: IntentPruneDropChip) {
+        if chip.switchesToCrackStance {
+            setSafetyStance(.crack)
+            return
+        }
+        if dropChips.contains(chip) {
+            dropChips.remove(chip)
+        } else {
+            dropChips.insert(chip)
+            if chip == .multilingual { selectedChips.remove(.multilingual) }
+            if chip == .tools { selectedChips.remove(.tools) }
+            if chip == .longContext { selectedChips.remove(.longContext) }
+            if chip == .chinese { selectedChips.remove(.multilingual) }
+        }
+        qualityAcknowledged = false
+        refreshDefaultOutputURL()
+    }
+
+    func applyPreset(_ preset: IntentPrunePreset) {
+        selectedChips = preset.keep
+        dropChips = preset.drop.filter { !$0.switchesToCrackStance }
+        qualityAcknowledged = false
+        refreshDefaultOutputURL()
+    }
+
+    func clearSelections() {
+        selectedChips = []
+        dropChips = []
+        qualityAcknowledged = false
         refreshDefaultOutputURL()
     }
 
@@ -169,12 +253,17 @@ final class IntentPruneViewModel {
         safetyStance = stance
         if !stance.isCrack {
             crackConfirmed = false
+            dropChips.remove(.safetyHeavy)
+        } else {
+            dropChips.insert(.safetyHeavy)
         }
+        qualityAcknowledged = false
         refreshDefaultOutputURL()
     }
 
     func setBudget(_ budget: IntentPruneBudget) {
         self.budget = budget
+        qualityAcknowledged = false
         refreshDefaultOutputURL()
     }
 
@@ -182,9 +271,17 @@ final class IntentPruneViewModel {
         outputURL = Self.defaultOutputURL(
             sourceURL: sourceURL,
             chips: Array(selectedChips),
+            dropChips: Array(dropChips),
             keepK: keepK,
             safetyStance: safetyStance
         )
+    }
+
+    func acknowledgeQuality() {
+        qualityAcknowledged = true
+        if canAdopt {
+            stage = .convert
+        }
     }
 
     func cancelRun() {
@@ -192,7 +289,7 @@ final class IntentPruneViewModel {
         runTask?.cancel()
     }
 
-    // MARK: - CLI preview (no I/O)
+    // MARK: - CLI
 
     func buildScoreArgs(planPath: String) -> [String] {
         IntentPruneCLIArgsBuilder.scoreArgs(
@@ -204,6 +301,7 @@ final class IntentPruneViewModel {
             keepK: keepK,
             safetyStance: safetyStance,
             intentsKeep: intentDomainKeys,
+            intentsDrop: dropDomainKeys,
             sourceModelPath: sourceURL.path,
             trainedTopK: trainedTopK
         )
@@ -221,11 +319,13 @@ final class IntentPruneViewModel {
     // MARK: - Pipeline
 
     func previewScores() {
+        stage = .prune
         runTask?.cancel()
         runTask = Task { await runPipeline(hardPrune: false) }
     }
 
     func runIntentPrune() {
+        stage = .prune
         runTask?.cancel()
         runTask = Task { await runPipeline(hardPrune: true) }
     }
@@ -235,6 +335,7 @@ final class IntentPruneViewModel {
         lastScoreSummary = nil
         prunedVerified = false
         pruneSummaryJSON = nil
+        qualityAcknowledged = false
         cancelRequested = false
         isRunning = true
         phase = .preparing
@@ -277,7 +378,6 @@ final class IntentPruneViewModel {
             guard FileManager.default.fileExists(atPath: planPath.path) else {
                 throw IntentPruneError.planNotWritten(planPath)
             }
-            // Sidecar plan next to output for adoptReviewedPrunedSource rails.
             try? FileManager.default.createDirectory(
                 at: outputURL,
                 withIntermediateDirectories: true
@@ -314,7 +414,6 @@ final class IntentPruneViewModel {
                     atPath: outputURL.appendingPathComponent("config.json").path
                 )
             } else {
-                // Some prune builds return non-JSON diagnostics; accept tree presence.
                 prunedVerified = FileManager.default.fileExists(
                     atPath: outputURL.appendingPathComponent("config.json").path
                 )
@@ -325,7 +424,6 @@ final class IntentPruneViewModel {
                 }
             }
 
-            // Copy plan into pruned tree so adopt / preflight can find prune_plan.json.
             let destPlan = outputURL.appendingPathComponent("prune_plan.json")
             if FileManager.default.fileExists(atPath: destPlan.path) {
                 try? FileManager.default.removeItem(at: destPlan)
@@ -333,8 +431,9 @@ final class IntentPruneViewModel {
             try? FileManager.default.copyItem(at: planPath, to: destPlan)
 
             phase = .ready
+            stage = .quality
             statusDetail = prunedVerified
-                ? "Pruned source ready. Convert uses this folder as the new source."
+                ? "Structural prune OK. Review quality checklist before Convert."
                 : "Prune finished; review structural verification before Convert."
         } catch is CancellationError {
             phase = .failed
@@ -371,6 +470,7 @@ final class IntentPruneViewModel {
     static func defaultOutputURL(
         sourceURL: URL,
         chips: [IntentPruneChip],
+        dropChips: [IntentPruneDropChip],
         keepK: Int,
         safetyStance: IntentPruneSafetyStance
     ) -> URL {
@@ -378,7 +478,8 @@ final class IntentPruneViewModel {
             sourceBaseName: sourceURL.lastPathComponent,
             chips: chips,
             keepK: keepK,
-            safetyStance: safetyStance
+            safetyStance: safetyStance,
+            dropChips: dropChips
         )
         return sourceURL.deletingLastPathComponent().appendingPathComponent(name)
     }

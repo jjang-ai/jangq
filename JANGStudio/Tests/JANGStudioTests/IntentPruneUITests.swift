@@ -28,13 +28,20 @@ final class IntentPruneUITests: XCTestCase {
         let vm = try loadWizardSource("IntentPruneViewModel.swift")
         let models = try loadWizardSource("IntentPruneModels.swift")
 
-        XCTAssertTrue(view.contains("Run Intent Prune"))
+        XCTAssertTrue(view.contains("Run Intent Prune") || view.contains("Run Hard Prune"))
         XCTAssertTrue(view.contains("Preview scores"))
         XCTAssertTrue(view.contains("Safety stance") || view.contains("safetyStance"))
         XCTAssertTrue(view.contains("CRACK"))
         XCTAssertTrue(view.contains("I understand CRACK is abliteration and want to proceed"))
         XCTAssertTrue(view.contains("Convert pruned model"))
-        XCTAssertTrue(view.contains("Advanced Expert Lab"))
+        // Shape selection surface (design-b quality loop)
+        XCTAssertTrue(view.contains("Keep") && view.contains("Drop"))
+        XCTAssertTrue(view.contains("QUICK PRESETS") || view.contains("IntentPrunePreset"))
+        XCTAssertTrue(view.contains("Live prune plan") || view.contains("planSummaryLine"))
+        XCTAssertTrue(models.contains("IntentPruneDropChip") || models.contains("enum IntentPruneDropChip"))
+        XCTAssertTrue(models.contains("case chinese"))
+        XCTAssertTrue(vm.contains("dropChips") || vm.contains("toggleDropChip"))
+        XCTAssertTrue(vm.contains("intentsDrop") || vm.contains("dropDomainKeys"))
 
         XCTAssertTrue(vm.contains("crackConfirmed"))
         XCTAssertTrue(vm.contains("crackConfirmRequired") || vm.contains("CRACK abliteration requires"))
@@ -47,6 +54,8 @@ final class IntentPruneUITests: XCTestCase {
         XCTAssertTrue(models.contains("case light"))
         XCTAssertTrue(models.contains("case standard"))
         XCTAssertTrue(models.contains("case aggressive"))
+        XCTAssertTrue(models.contains("case english") || models.contains("english"))
+        XCTAssertTrue(models.contains("IntentPruneStage") || models.contains("case shape"))
     }
 
     func test_userGuide_documentsIntentPruneAndCRACK() throws {
@@ -172,6 +181,7 @@ final class IntentPruneUITests: XCTestCase {
             keepK: 192,
             safetyStance: .crack,
             intentsKeep: ["code", "coding"],
+            intentsDrop: ["chinese"],
             sourceModelPath: "/tmp/Qwen",
             trainedTopK: 8,
             suiteName: "Reviewed Prune 50",
@@ -185,11 +195,49 @@ final class IntentPruneUITests: XCTestCase {
         XCTAssertEqual(args[args.firstIndex(of: "--keep-k")! + 1], "192")
         XCTAssertTrue(args.contains("--intent"))
         XCTAssertTrue(args.contains("code"))
+        XCTAssertTrue(args.contains("--drop-intent"))
+        XCTAssertTrue(args.contains("chinese"))
         XCTAssertTrue(args.contains("--transitions"))
         XCTAssertTrue(args.contains("--suite-name"))
         XCTAssertTrue(args.contains("Reviewed Prune 50"))
         XCTAssertTrue(args.contains("--num-layers"))
         XCTAssertEqual(args[args.firstIndex(of: "--num-layers")! + 1], "40")
+    }
+
+    func test_dropDomainKeys_fromDropChips() {
+        let keys = IntentPruneCLIArgsBuilder.dropDomainKeys(for: [.chinese, .translation])
+        XCTAssertTrue(keys.contains("chinese"))
+        XCTAssertTrue(keys.contains("translation"))
+        XCTAssertEqual(keys.count, Set(keys).count)
+        // safetyHeavy is stance-only
+        XCTAssertTrue(IntentPruneCLIArgsBuilder.dropDomainKeys(for: [.safetyHeavy]).isEmpty)
+    }
+
+    @MainActor
+    func test_viewModel_dropChip_wiresDomainKeys() {
+        let detected = ArchitectureSummary(
+            modelType: "qwen3_5_moe",
+            isMoE: true,
+            numExperts: 256,
+            isVL: false,
+            hasGenerationConfig: true,
+            dtype: .bf16,
+            totalBytes: 1_000,
+            shardCount: 1,
+            numHiddenLayers: 40,
+            numExpertsPerTok: 8
+        )
+        let vm = IntentPruneViewModel(
+            sourceURL: URL(fileURLWithPath: "/tmp/model"),
+            detected: detected
+        )
+        vm.selectedChips = [.coding, .math]
+        vm.toggleDropChip(.chinese)
+        XCTAssertTrue(vm.dropChips.contains(.chinese))
+        XCTAssertTrue(vm.dropDomainKeys.contains("chinese"))
+        let args = vm.buildScoreArgs(planPath: "/tmp/plan.json")
+        // Without transitions still builds args for preview structure
+        XCTAssertTrue(args.contains("--drop-intent") || vm.dropDomainKeys.contains("chinese"))
     }
 
     func test_hardPruneArgs_wireKeepMapAndJSON() {

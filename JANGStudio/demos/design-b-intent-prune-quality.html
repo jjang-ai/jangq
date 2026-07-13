@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Design B — Intent Prune Quality Loop</title>
+<!--
+  Influence: design-b-v2.html
+  Shape stage is the selection surface (keep / drop / stance / budget) — not
+  a thin left drawer only. Semantics match IntentPruneChip + finer drop targets.
+-->
+<style>
+  :root {
+    --canvas: #07090e;
+    --panel: #0e1316;
+    --panel-raised: #131a1e;
+    --line: rgba(255,255,255,0.06);
+    --line-strong: rgba(255,255,255,0.12);
+    --accent: #33e0e8;
+    --warm: #ebb85e;
+    --good: #70dba0;
+    --danger: #ff5964;
+    --text: #e8edf0;
+    --text-dim: #6a787d;
+    --text-faint: #3a4548;
+
+    --t-code: #4fc3f7;
+    --t-math: #ab47bc;
+    --t-reason: #66bb6a;
+    --t-lang: #ff8a65;
+    --t-safety: #ef5350;
+    --t-creative: #ce93d8;
+    --t-knowledge: #8d6e63;
+    --t-tools: #26c6da;
+    --t-en: #78909c;
+    --t-long: #90a4ae;
+    --t-general: #546e7a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--canvas); color: var(--text);
+    font-family: -apple-system, system-ui, sans-serif;
+    height: 100vh; overflow: hidden;
+  }
+  .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 7px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .topbar h1 { font-size: 13px; font-weight: 600; }
+  .kicker {
+    font-size: 8px; font-weight: 700; letter-spacing: 1.2px;
+    color: var(--accent); text-transform: uppercase; font-family: monospace;
+  }
+  .badges { display: flex; gap: 5px; flex-wrap: wrap; }
+  .badge {
+    font-size: 9px; padding: 2px 6px; border-radius: 3px; border: 1px solid;
+    font-family: monospace;
+  }
+  .badge.cyan { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.1); }
+  .badge.amber { color: var(--warm); border-color: rgba(235,184,94,0.3); background: rgba(235,184,94,0.1); }
+  .badge.good { color: var(--good); border-color: rgba(112,219,160,0.3); background: rgba(112,219,160,0.1); }
+  .badge.danger { color: var(--danger); border-color: rgba(255,89,100,0.3); background: rgba(255,89,100,0.1); }
+  .badge.dim { color: var(--text-dim); border-color: var(--line-strong); }
+
+  .workflow-pills { display: flex; gap: 4px; flex: 1; }
+  .wfp {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 12px; font-size: 10px;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+    color: var(--text-faint); cursor: pointer; user-select: none;
+  }
+  .wfp .num { font-family: monospace; font-size: 8px; font-weight: 700; }
+  .wfp.active { color: var(--text); background: rgba(51,224,232,0.08); border-color: var(--accent); }
+  .wfp.active .num { color: var(--accent); }
+  .wfp.done { color: var(--good); background: rgba(112,219,160,0.06); border-color: rgba(112,219,160,0.2); }
+  .wfp.done .num { color: var(--good); }
+  .wfp.blocked { opacity: 0.4; cursor: not-allowed; }
+  .path {
+    font-size: 9px; font-family: monospace; color: var(--text-faint); max-width: 200px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .main {
+    display: grid;
+    grid-template-columns: 52px 260px 1fr 290px;
+    overflow: hidden;
+  }
+
+  .dock {
+    background: var(--panel); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; padding: 6px 0; gap: 1px;
+  }
+  .dock-item {
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    padding: 9px 0; cursor: pointer; color: #4a5558; font-size: 7px;
+    border-left: 2px solid transparent; text-align: center;
+  }
+  .dock-item .di { font-size: 16px; line-height: 1; }
+  .dock-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(51,224,232,0.04); }
+  .dock-item:hover:not(.active) { color: #7a888d; }
+  .dock-item.done { color: var(--good); }
+  .dock-spacer { flex: 1; }
+
+  .drawer {
+    background: var(--panel); border-right: 1px solid var(--line);
+    overflow-y: auto; padding: 10px;
+  }
+  .card {
+    background: var(--panel-raised); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px; margin-bottom: 8px;
+  }
+  .card-title {
+    font-size: 10px; font-weight: 600; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 5px;
+    text-transform: uppercase; letter-spacing: 0.5px; color: #7a888d;
+  }
+  .card-title .hint {
+    margin-left: auto; font-weight: 500; text-transform: none;
+    letter-spacing: 0; font-size: 9px; color: var(--text-faint);
+  }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    padding: 5px 9px; border-radius: 5px; font-size: 10px;
+    border: 1px solid var(--line-strong); background: rgba(255,255,255,0.02);
+    color: var(--text); cursor: pointer;
+  }
+  .btn-primary {
+    background: rgba(51,224,232,0.12); border-color: var(--accent); color: var(--accent);
+    width: 100%; font-weight: 600;
+  }
+  .btn-warm { background: rgba(235,184,94,0.1); border-color: var(--warm); color: var(--warm); width: 100%; font-weight: 600; }
+  .btn-good { background: rgba(112,219,160,0.1); border-color: var(--good); color: var(--good); width: 100%; font-weight: 600; }
+  .btn-sm { padding: 3px 7px; font-size: 9px; }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .field-row { display: flex; justify-content: space-between; font-size: 10px; color: #7a888d; padding: 2px 0; gap: 8px; }
+  .field-row .val { color: var(--text); font-family: monospace; text-align: right; }
+  select.styled {
+    width: 100%; background: var(--canvas); border: 1px solid var(--line);
+    color: var(--text); padding: 4px 6px; border-radius: 4px; font-size: 10px; margin-bottom: 5px;
+  }
+  .muted { font-size: 9px; color: var(--text-dim); line-height: 1.35; margin-top: 4px; }
+  .seg { display: flex; background: var(--canvas); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+  .seg button {
+    flex: 1; background: none; border: none; color: #4a5558; padding: 4px 6px;
+    font-size: 9px; cursor: pointer; border-right: 1px solid var(--line);
+  }
+  .seg button:last-child { border-right: none; }
+  .seg button.active { color: var(--accent); background: rgba(51,224,232,0.08); }
+  .seg button.danger.active { color: var(--danger); background: rgba(255,89,100,0.1); }
+
+  .toggle { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-dim); margin: 5px 0; cursor: pointer; }
+  .toggle-box {
+    width: 13px; height: 13px; border-radius: 3px; border: 1px solid var(--line-strong);
+    background: rgba(255,255,255,0.02); flex-shrink: 0;
+  }
+  .toggle.on { color: var(--text); }
+  .toggle.on .toggle-box { background: var(--accent); border-color: var(--accent); }
+
+  .center { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .center-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 14px; border-bottom: 1px solid var(--line); gap: 10px;
+  }
+  .center-toolbar .title { font-size: 12px; font-weight: 600; }
+  .center-toolbar .summary { font-size: 10px; color: #7a888d; margin-top: 1px; }
+  .center-body { flex: 1; overflow: auto; padding: 12px 14px; }
+
+  .legend {
+    display: flex; gap: 10px; padding: 4px 14px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    font-size: 9px; color: #7a888d; align-items: center;
+  }
+  .legend-item { display: flex; align-items: center; gap: 3px; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+  /* ══ Shape selection surface (main event) ══ */
+  .shape-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px; margin-bottom: 12px;
+  }
+  .shape-head p { font-size: 11px; color: var(--text-dim); line-height: 1.4; max-width: 520px; }
+  .shape-head strong { color: var(--text); }
+
+  .select-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .select-panel {
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px;
+    min-height: 280px;
+  }
+  .select-panel.keep { border-color: rgba(112,219,160,0.25); }
+  .select-panel.drop { border-color: rgba(255,89,100,0.25); }
+  .select-panel h3 {
+    font-size: 11px; font-weight: 600; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .select-panel.keep h3 { color: var(--good); }
+  .select-panel.drop h3 { color: var(--danger); }
+  .select-panel .panel-sub {
+    font-size: 9px; color: var(--text-dim); margin-bottom: 10px; line-height: 1.35;
+  }
+  .select-panel .count {
+    margin-left: auto; font-family: monospace; font-size: 10px;
+    padding: 1px 6px; border-radius: 8px; border: 1px solid;
+  }
+  .select-panel.keep .count { border-color: rgba(112,219,160,0.3); color: var(--good); }
+  .select-panel.drop .count { border-color: rgba(255,89,100,0.3); color: var(--danger); }
+
+  .chip-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+  }
+  .chip {
+    display: flex; align-items: flex-start; gap: 7px;
+    padding: 7px 8px; border-radius: 5px; cursor: pointer;
+    border: 1px solid var(--line); background: rgba(255,255,255,0.02);
+    text-align: left; transition: border-color .12s, background .12s;
+  }
+  .chip:hover { border-color: var(--line-strong); background: rgba(255,255,255,0.04); }
+  .chip .swatch {
+    width: 10px; height: 10px; border-radius: 2px; margin-top: 2px; flex-shrink: 0;
+  }
+  .chip .meta { min-width: 0; }
+  .chip .name { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+  .chip .desc { font-size: 9px; color: var(--text-faint); margin-top: 1px; line-height: 1.3; }
+  .chip .domains { font-size: 8px; font-family: monospace; color: var(--text-faint); margin-top: 3px; }
+  .chip.on .name { color: var(--text); }
+  .chip.keep.on {
+    border-color: rgba(112,219,160,0.45);
+    background: rgba(112,219,160,0.08);
+  }
+  .chip.drop.on {
+    border-color: rgba(255,89,100,0.45);
+    background: rgba(255,89,100,0.08);
+  }
+  .chip.keep.on .swatch { box-shadow: 0 0 0 1px rgba(112,219,160,0.5); }
+  .chip.drop.on .swatch { box-shadow: 0 0 0 1px rgba(255,89,100,0.5); }
+  .chip .check {
+    margin-left: auto; font-family: monospace; font-size: 10px;
+    color: var(--text-faint); flex-shrink: 0;
+  }
+  .chip.on .check { color: var(--good); }
+  .chip.drop.on .check { color: var(--danger); }
+
+  .section-label {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--text-faint); margin: 10px 0 5px; font-weight: 600;
+  }
+
+  .stance-budget-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;
+  }
+  .mini-panel {
+    background: var(--panel-raised); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px;
+  }
+  .mini-panel h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: #7a888d; margin-bottom: 6px;
+  }
+
+  .plan-summary {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px 12px;
+  }
+  .plan-summary h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--warm); margin-bottom: 6px;
+  }
+  .plan-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  .tag {
+    font-size: 9px; font-family: monospace; padding: 2px 7px; border-radius: 10px; border: 1px solid;
+  }
+  .tag.keep { color: var(--good); border-color: rgba(112,219,160,0.3); background: rgba(112,219,160,0.08); }
+  .tag.drop { color: var(--danger); border-color: rgba(255,89,100,0.3); background: rgba(255,89,100,0.08); }
+  .tag.meta { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.08); }
+  .tag.neutral { color: var(--text-dim); border-color: var(--line-strong); }
+
+  .layer-strip { margin-bottom: 6px; white-space: nowrap; }
+  .layer-strip .ls-label {
+    font-size: 9px; font-family: monospace; color: #4a5558;
+    width: 28px; display: inline-block;
+  }
+  .layer-strip .cells { display: inline-flex; gap: 1px; vertical-align: middle; }
+  .mini-cell { width: 5px; height: 12px; border-radius: 1px; background: rgba(255,255,255,0.05); }
+  .mini-cell.keep { background: rgba(112,219,160,0.5); }
+  .mini-cell.drop { background: rgba(255,89,100,0.3); }
+  .mini-cell.code { background: rgba(79,195,247,0.75); }
+  .mini-cell.math { background: rgba(171,71,188,0.75); }
+  .mini-cell.zh { background: rgba(255,138,101,0.55); }
+
+  .gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+  .gate {
+    background: var(--panel-raised); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px;
+  }
+  .gate.pass { border-color: rgba(112,219,160,0.35); }
+  .gate.fail { border-color: rgba(255,89,100,0.4); }
+  .gate.warn { border-color: rgba(235,184,94,0.35); }
+  .gate .g-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #7a888d; margin-bottom: 4px; }
+  .gate .g-val { font-size: 18px; font-family: monospace; font-weight: 600; }
+  .gate.pass .g-val { color: var(--good); }
+  .gate.fail .g-val { color: var(--danger); }
+  .gate.warn .g-val { color: var(--warm); }
+  .gate .g-sub { font-size: 9px; color: var(--text-dim); margin-top: 3px; font-family: monospace; }
+
+  .compare-tray {
+    border-top: 1px solid var(--line); background: var(--panel);
+    height: 140px; display: flex; overflow: hidden; flex-shrink: 0;
+  }
+  .compare-info {
+    width: 170px; padding: 8px; border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .compare-info .label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #7a888d;
+  }
+  .compare-info .summary { font-size: 9px; color: #7a888d; line-height: 1.3; flex: 1; }
+  .pill {
+    font-size: 9px; font-family: monospace; padding: 2px 6px; border-radius: 8px;
+    border: 1px solid; display: inline-block; margin: 1px 0;
+  }
+  .pill.cyan { color: var(--accent); border-color: rgba(51,224,232,0.3); background: rgba(51,224,232,0.08); }
+  .pill.amber { color: var(--warm); border-color: rgba(235,184,94,0.3); background: rgba(235,184,94,0.08); }
+  .compare-cols { display: flex; gap: 6px; flex: 1; padding: 6px; overflow: hidden; }
+  .compare-col {
+    flex: 1; border-radius: 5px; background: rgba(0,0,0,0.2);
+    border: 1px solid var(--line); padding: 6px 8px; overflow: auto;
+  }
+  .compare-col-title {
+    font-size: 9px; font-weight: 600; color: #7a888d; margin-bottom: 3px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .compare-col-title .dot { width: 5px; height: 5px; border-radius: 50%; }
+  .compare-col-title.cyan .dot { background: var(--accent); }
+  .compare-col-title.amber .dot { background: var(--warm); }
+  .compare-col-body { font-size: 10px; color: #9aa6ab; line-height: 1.4; white-space: pre-wrap; }
+
+  .right-drawer {
+    background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 10px;
+  }
+  .checklist { font-size: 10px; }
+  .check-row {
+    display: flex; align-items: center; gap: 6px; padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text-dim);
+  }
+  .check-row .mark {
+    width: 14px; height: 14px; border-radius: 3px; font-size: 9px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: monospace; flex-shrink: 0;
+  }
+  .check-row.pass .mark { background: rgba(112,219,160,0.15); color: var(--good); }
+  .check-row.fail .mark { background: rgba(255,89,100,0.15); color: var(--danger); }
+  .check-row.todo .mark { background: rgba(255,255,255,0.04); color: var(--text-faint); }
+  .check-row.pass { color: var(--text); }
+
+  .banner {
+    font-size: 10px; padding: 8px; border-radius: 5px; margin-bottom: 8px; line-height: 1.35;
+  }
+  .banner.good { background: rgba(112,219,160,0.08); border: 1px solid rgba(112,219,160,0.25); color: var(--good); }
+  .banner.warn { background: rgba(235,184,94,0.08); border: 1px solid rgba(235,184,94,0.25); color: var(--warm); }
+  .banner.danger { background: rgba(255,89,100,0.08); border: 1px solid rgba(255,89,100,0.25); color: var(--danger); }
+  .banner.info { background: rgba(51,224,232,0.06); border: 1px solid rgba(51,224,232,0.2); color: var(--accent); }
+
+  .empty-center {
+    height: 100%; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--text-faint); gap: 8px; text-align: center; padding: 24px;
+  }
+  .empty-center .big { font-size: 28px; opacity: 0.4; }
+  .empty-center p { font-size: 11px; max-width: 300px; line-height: 1.4; color: var(--text-dim); }
+
+  .one-liner { font-size: 11px; color: var(--text-dim); margin-bottom: 10px; line-height: 1.4; }
+  .one-liner strong { color: var(--text); font-weight: 600; }
+
+  .quick-presets { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div>
+      <div class="kicker">Intent Prune</div>
+      <h1 id="stageTitle">Choose what to keep &amp; drop</h1>
+    </div>
+    <div class="badges">
+      <span class="badge cyan">qwen3_5_moe · 256e</span>
+      <span class="badge amber">BF16</span>
+      <span class="badge dim" id="sizeBadge">67 GB</span>
+      <span class="badge good" id="gateBadge" style="display:none;">gates pass</span>
+    </div>
+    <div class="workflow-pills" id="workflowPills">
+      <div class="wfp" data-stage="0"><span class="num">01</span> Evidence</div>
+      <div class="wfp active" data-stage="1"><span class="num">02</span> Shape</div>
+      <div class="wfp" data-stage="2"><span class="num">03</span> Prune</div>
+      <div class="wfp" data-stage="3"><span class="num">04</span> Quality</div>
+      <div class="wfp" data-stage="4"><span class="num">05</span> Convert</div>
+    </div>
+    <div class="path">…/Qwen3.6-35B-A3B</div>
+  </div>
+
+  <div class="main">
+    <div class="dock" id="dock">
+      <div class="dock-item" data-stage="0"><div class="di">∿</div>Evidence</div>
+      <div class="dock-item active" data-stage="1"><div class="di">◎</div>Shape</div>
+      <div class="dock-item" data-stage="2"><div class="di">✂</div>Prune</div>
+      <div class="dock-item" data-stage="3"><div class="di">✓</div>Quality</div>
+      <div class="dock-item" data-stage="4"><div class="di">▷</div>Convert</div>
+      <div class="dock-spacer"></div>
+      <div class="dock-item" id="dockAdvanced"><div class="di">⊙</div>Atlas</div>
+    </div>
+    <div class="drawer" id="drawer"></div>
+    <div class="center">
+      <div class="center-toolbar">
+        <div>
+          <div class="title" id="centerTitle">Shape</div>
+          <div class="summary" id="centerSummary">Select keep / drop capabilities — this is the prune plan</div>
+        </div>
+        <div id="centerControls"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="center-body" id="centerBody"></div>
+      <div class="compare-tray" id="compareTray" style="display:none;"></div>
+    </div>
+    <div class="right-drawer" id="rightDrawer"></div>
+  </div>
+</div>
+
+<script>
+/* Full product keep chips (IntentPruneChip) + finer drop targets */
+const KEEP_OPTIONS = [
+  { id: 'coding', label: 'Coding', color: 'var(--t-code)', desc: 'Code gen, debugging, formats', domains: 'code · coding · formatting' },
+  { id: 'math', label: 'Math', color: 'var(--t-math)', desc: 'Arithmetic, algebra, quantitative', domains: 'math · reasoning' },
+  { id: 'writing', label: 'Writing', color: 'var(--t-creative)', desc: 'Prose, instructions, creative', domains: 'instruction_following · creative' },
+  { id: 'science', label: 'Science / Bio', color: 'var(--t-knowledge)', desc: 'Factual / scientific knowledge', domains: 'knowledge · medical_sensitive' },
+  { id: 'multilingual', label: 'Multilingual', color: 'var(--t-lang)', desc: 'Non-English + translation', domains: 'multilingual · chinese · translation…' },
+  { id: 'tools', label: 'Tools / Agentic', color: 'var(--t-tools)', desc: 'Tool use, agents, planning', domains: 'tools · reasoning' },
+  { id: 'longContext', label: 'Long context', color: 'var(--t-long)', desc: 'Long-doc / long-range use', domains: 'long_context' },
+  { id: 'generalist', label: 'Generalist', color: 'var(--t-general)', desc: 'Broader backbone (less specialist)', domains: 'backbone floor' },
+  { id: 'english', label: 'English-dominant', color: 'var(--t-en)', desc: 'English-first chat / QA', domains: 'english_dominant' },
+  { id: 'reasoning', label: 'Reasoning', color: 'var(--t-reason)', desc: 'Logic / multi-step (beyond math)', domains: 'reasoning' },
+];
+
+const DROP_OPTIONS = [
+  { id: 'chinese', label: 'Chinese', color: 'var(--t-lang)', desc: 'ZH generation / ZH routing mass', domains: 'chinese' },
+  { id: 'multilingual', label: 'All multilingual', color: 'var(--t-lang)', desc: 'Non-English broadly', domains: 'multilingual · non_english' },
+  { id: 'translation', label: 'Translation', color: 'var(--t-lang)', desc: 'Translate-heavy paths', domains: 'translation' },
+  { id: 'spanish', label: 'Spanish / Romance', color: 'var(--t-lang)', desc: 'ES and related (when tagged)', domains: 'spanish · non_english' },
+  { id: 'creative', label: 'Creative writing', color: 'var(--t-creative)', desc: 'Story / roleplay mass', domains: 'creative' },
+  { id: 'knowledge', label: 'Trivia / knowledge', color: 'var(--t-knowledge)', desc: 'Factual dump paths', domains: 'knowledge' },
+  { id: 'tools', label: 'Tools / agent', color: 'var(--t-tools)', desc: 'If you want chat-only', domains: 'tools' },
+  { id: 'long_context', label: 'Long context', color: 'var(--t-long)', desc: 'If short-form only', domains: 'long_context' },
+  { id: 'safety_heavy', label: 'Safety-heavy (via CRACK)', color: 'var(--t-safety)', desc: 'Prefer CRACK stance for abliteration', domains: 'safety_* · crack stance' },
+];
+
+const PRESETS = [
+  { id: 'coding-math', label: 'Coding + Math', keep: ['coding','math'], drop: [] },
+  { id: 'coding-only', label: 'Coding specialist', keep: ['coding','tools'], drop: ['creative','chinese'] },
+  { id: 'en-agent', label: 'EN agent', keep: ['coding','tools','english','reasoning'], drop: ['chinese','multilingual'] },
+  { id: 'drop-zh', label: 'Drop Chinese', keep: ['coding','math','english'], drop: ['chinese'] },
+  { id: 'general', label: 'Generalist keep', keep: ['generalist','english','reasoning'], drop: [] },
+];
+
+const BUDGET_K = { light: 230, standard: 192, aggressive: 154 };
+const E = 256;
+
+const state = {
+  stage: 1, // start on Shape so selections are visible immediately
+  evidence: false,
+  transitions: 0,
+  keep: new Set(['coding', 'math']),
+  drop: new Set(),
+  stance: 'keep',
+  crackConfirm: false,
+  budget: 'standard',
+  pruned: false,
+  quality: null,
+  thinkingOff: true,
+};
+
+function keepK() { return BUDGET_K[state.budget]; }
+
+function stageDone(i) {
+  if (i === 0) return state.evidence;
+  if (i === 1) return state.keep.size > 0 && (state.stance !== 'crack' || state.crackConfirm);
+  if (i === 2) return state.pruned;
+  if (i === 3) return state.quality && state.quality.gatesPass;
+  if (i === 4) return state.quality && state.quality.gatesPass;
+  return false;
+}
+
+function canEnter(i) {
+  if (i <= 1) return true; // Shape always open so users can select before/without evidence
+  if (i === 2) return state.evidence && stageDone(1);
+  if (i === 3) return state.pruned;
+  if (i === 4) return state.quality && state.quality.gatesPass;
+  return false;
+}
+
+function applyPreset(p) {
+  state.keep = new Set(p.keep);
+  state.drop = new Set(p.drop);
+  state.pruned = false;
+  state.quality = null;
+  render();
+}
+
+function toggleKeep(id) {
+  if (state.keep.has(id)) state.keep.delete(id);
+  else { state.keep.add(id); state.drop.delete(id); }
+  state.pruned = false; state.quality = null;
+  render();
+}
+
+function toggleDrop(id) {
+  if (id === 'safety_heavy') {
+    state.stance = 'crack';
+    state.crackConfirm = false;
+    render();
+    return;
+  }
+  if (state.drop.has(id)) state.drop.delete(id);
+  else { state.drop.add(id); state.keep.delete(id); }
+  state.pruned = false; state.quality = null;
+  render();
+}
+
+function render() {
+  document.querySelectorAll('.wfp').forEach(el => {
+    const i = +el.dataset.stage;
+    el.classList.toggle('active', i === state.stage);
+    el.classList.toggle('done', stageDone(i) && i !== state.stage);
+    el.classList.toggle('blocked', !canEnter(i) && i !== state.stage);
+  });
+  document.querySelectorAll('.dock-item[data-stage]').forEach(el => {
+    const i = +el.dataset.stage;
+    el.classList.toggle('active', i === state.stage);
+    el.classList.toggle('done', stageDone(i) && i !== state.stage);
+  });
+
+  const titles = [
+    'Collect real routing evidence',
+    'Choose what to keep & drop',
+    'Hard-prune BF16 source',
+    'Prove quality on holdouts',
+    'Convert pruned model',
+  ];
+  document.getElementById('stageTitle').textContent = titles[state.stage];
+  document.getElementById('gateBadge').style.display = state.quality?.gatesPass ? '' : 'none';
+  if (state.pruned) {
+    document.getElementById('sizeBadge').textContent = `~${(67 * keepK() / E).toFixed(0)} GB pruned`;
+  } else {
+    document.getElementById('sizeBadge').textContent = '67 GB';
+  }
+
+  renderDrawer();
+  renderCenter();
+  renderRight();
+}
+
+function renderDrawer() {
+  const d = document.getElementById('drawer');
+  if (state.stage === 0) {
+    d.innerHTML = `
+      <div class="card">
+        <div class="card-title">Run Evidence</div>
+        <div class="muted" style="margin-bottom:6px;">Real math/code/language traces for scoring. Markers = routing only.</div>
+        <select class="styled">
+          <option>Real domain 43</option>
+          <option>Real domain + CRACK pack</option>
+          <option>Reviewed 50 markers (routing)</option>
+        </select>
+        <div class="toggle ${state.thinkingOff?'on':''}" id="toggleThink">
+          <div class="toggle-box"></div> No-thinking
+        </div>
+        <button class="btn btn-primary" id="btnEvidence" style="margin-top:6px;">
+          ${state.evidence ? '✓ Evidence ready · Re-run' : '∿ Run Evidence Trace'}
+        </button>
+        ${state.evidence ? `<div class="muted" style="margin-top:6px;">${state.transitions} transitions</div>` : ''}
+      </div>
+      <div class="card">
+        <div class="card-title">Then</div>
+        <div class="muted">Open <strong style="color:var(--text)">Shape</strong> to pick keep/drop capabilities — that’s where prune decisions live.</div>
+        <button class="btn btn-sm" style="width:100%;margin-top:6px;" id="goShape">→ Shape selections</button>
+      </div>`;
+    document.getElementById('toggleThink').onclick = () => { state.thinkingOff = !state.thinkingOff; render(); };
+    document.getElementById('btnEvidence').onclick = () => { state.evidence = true; state.transitions = 2663; state.pruned = false; state.quality = null; render(); };
+    document.getElementById('goShape').onclick = () => { state.stage = 1; render(); };
+  } else if (state.stage === 1) {
+    d.innerHTML = `
+      <div class="card">
+        <div class="card-title">How to select</div>
+        <div class="muted"><strong style="color:var(--good)">Left panel / green</strong> = keep (protect experts used for these).<br>
+        <strong style="color:var(--danger)">Right panel / red</strong> = drop (deprioritize / free slots).<br>
+        Center canvas is the selection surface — click tiles.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Safety stance</div>
+        <div class="seg" id="stanceSeg">
+          <button data-s="keep" class="${state.stance==='keep'?'active':''}">Keep</button>
+          <button data-s="balanced" class="${state.stance==='balanced'?'active':''}">Balanced</button>
+          <button data-s="crack" class="danger ${state.stance==='crack'?'active':''}">CRACK</button>
+        </div>
+        <div class="muted" id="stanceHint"></div>
+        <div id="crackBox" style="display:none;margin-top:6px;">
+          <div class="toggle ${state.crackConfirm?'on':''}" id="crackToggle">
+            <div class="toggle-box" style="${state.crackConfirm?'background:var(--danger);border-color:var(--danger);':''}"></div>
+            Confirm abliteration
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Size budget → keep-K</div>
+        <div class="seg" id="budgetSeg">
+          <button data-b="light" class="${state.budget==='light'?'active':''}">Light</button>
+          <button data-b="standard" class="${state.budget==='standard'?'active':''}">Standard</button>
+          <button data-b="aggressive" class="${state.budget==='aggressive'?'active':''}">Aggressive</button>
+        </div>
+        <div class="field-row">Keep-K <span class="val">${keepK()} / ${E}</span></div>
+        <div class="field-row">Drop slots/layer <span class="val">${E - keepK()}</span></div>
+        <div class="muted">Light ≈ 90% · Standard ≈ 75% · Aggressive ≈ 60%.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Evidence</div>
+        <div class="field-row">Status <span class="val">${state.evidence ? 'ready' : 'needed before prune'}</span></div>
+        ${!state.evidence ? `<button class="btn btn-sm" style="width:100%;margin-top:6px;" id="goEv">∿ Collect evidence</button>` : ''}
+      </div>`;
+    document.getElementById('stanceSeg').onclick = (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      state.stance = b.dataset.s;
+      if (state.stance !== 'crack') state.crackConfirm = false;
+      render();
+    };
+    document.getElementById('budgetSeg').onclick = (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      state.budget = b.dataset.b; state.pruned = false; state.quality = null; render();
+    };
+    document.getElementById('stanceHint').textContent = ({
+      keep: 'Protect safety-path experts.',
+      balanced: 'Mild safety protection.',
+      crack: 'Abliteration — needs confirm + quality CRACK gates.',
+    })[state.stance];
+    const crackBox = document.getElementById('crackBox');
+    crackBox.style.display = state.stance === 'crack' ? '' : 'none';
+    if (state.stance === 'crack') {
+      document.getElementById('crackToggle').onclick = () => { state.crackConfirm = !state.crackConfirm; render(); };
+    }
+    const ge = document.getElementById('goEv');
+    if (ge) ge.onclick = () => { state.stage = 0; render(); };
+  } else if (state.stage === 2) {
+    d.innerHTML = `
+      <div class="card">
+        <div class="card-title">Hard prune</div>
+        ${planTagsHTML()}
+        <div class="field-row" style="margin-top:6px;">Keep-K <span class="val">${keepK()}</span></div>
+        <div class="field-row">Stance <span class="val">${state.stance}</span></div>
+        <button class="btn btn-warm" id="btnPrune" style="margin-top:8px;" ${canPrune()?'':'disabled'}>
+          ${state.pruned ? '✓ Pruned · Re-run' : '✂ Run Hard Prune'}
+        </button>
+        ${!state.evidence ? `<div class="muted" style="margin-top:6px;color:var(--warm)">Need Evidence first.</div>` : ''}
+        ${state.keep.size===0 ? `<div class="muted" style="margin-top:6px;color:var(--warm)">Select at least one keep capability in Shape.</div>` : ''}
+      </div>
+      <div class="card">
+        <div class="card-title">Edit selections</div>
+        <button class="btn btn-sm" style="width:100%;" id="backShape">← Back to Shape</button>
+      </div>`;
+    document.getElementById('btnPrune').onclick = runPrune;
+    document.getElementById('backShape').onclick = () => { state.stage = 1; render(); };
+  } else if (state.stage === 3) {
+    d.innerHTML = `
+      <div class="card">
+        <div class="card-title">Holdout suite</div>
+        <div class="muted">Real answers, no-thinking. Math must stay 5/5.</div>
+        <button class="btn btn-primary" id="btnQuality" style="margin-top:8px;">
+          ${state.quality ? '✓ Re-run Quality' : '✓ Run Quality Gates'}
+        </button>
+      </div>
+      <div class="card">
+        <div class="card-title">Your plan</div>
+        ${planTagsHTML()}
+      </div>`;
+    document.getElementById('btnQuality').onclick = runQuality;
+  } else {
+    d.innerHTML = `
+      <div class="card">
+        <div class="card-title">Convert</div>
+        <div class="field-row">Profile <span class="val">JANG_4K</span></div>
+        <button class="btn btn-good" id="btnConvert" style="margin-top:8px;" ${state.quality?.gatesPass?'':'disabled'}>▷ Start Conversion</button>
+      </div>`;
+    const bc = document.getElementById('btnConvert');
+    if (bc && !bc.disabled) bc.onclick = () => alert('Would open Convert wizard (demo).');
+  }
+}
+
+function planTagsHTML() {
+  const keep = [...state.keep].map(id => {
+    const o = KEEP_OPTIONS.find(x => x.id === id);
+    return `<span class="tag keep">keep:${o ? o.label : id}</span>`;
+  }).join('') || `<span class="tag neutral">no keep selected</span>`;
+  const drop = [...state.drop].map(id => {
+    const o = DROP_OPTIONS.find(x => x.id === id);
+    return `<span class="tag drop">drop:${o ? o.label : id}</span>`;
+  }).join('') || `<span class="tag neutral">no drop</span>`;
+  return `<div class="plan-tags">${keep}${drop}
+    <span class="tag meta">K=${keepK()}</span>
+    <span class="tag meta">${state.stance}</span>
+  </div>`;
+}
+
+function canPrune() {
+  return state.evidence && state.keep.size > 0 && (state.stance !== 'crack' || state.crackConfirm);
+}
+
+function renderCenter() {
+  const title = document.getElementById('centerTitle');
+  const summary = document.getElementById('centerSummary');
+  const legend = document.getElementById('legend');
+  const body = document.getElementById('centerBody');
+  const tray = document.getElementById('compareTray');
+  const controls = document.getElementById('centerControls');
+
+  if (state.stage === 1) {
+    title.textContent = 'What should this model keep / drop?';
+    summary.textContent = `${state.keep.size} keep · ${state.drop.size} drop · K=${keepK()} · ${state.stance}`;
+    legend.innerHTML = `
+      <div class="legend-item"><div class="legend-dot" style="background:var(--good)"></div>Keep selected</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--danger)"></div>Drop selected</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--t-code)"></div>Code</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--t-math)"></div>Math</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--t-lang)"></div>Language</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--t-safety)"></div>Safety/CRACK</div>`;
+    controls.innerHTML = `<button class="btn btn-sm" id="clearSel">Clear</button>`;
+    setTimeout(() => {
+      const c = document.getElementById('clearSel');
+      if (c) c.onclick = () => { state.keep.clear(); state.drop.clear(); render(); };
+    }, 0);
+
+    body.innerHTML = `
+      <div class="shape-head">
+        <p><strong>This is the prune decision surface.</strong>
+        Green tiles = capabilities to protect. Red tiles = capabilities to deprioritize when freeing experts.
+        Budget (left) sets how many experts survive per layer.</p>
+      </div>
+
+      <div class="section-label">Quick presets</div>
+      <div class="quick-presets" id="presets"></div>
+
+      <div class="select-grid">
+        <div class="select-panel keep">
+          <h3>Keep <span class="count">${state.keep.size}</span></h3>
+          <div class="panel-sub">Protect experts used for these domains. Select at least one.</div>
+          <div class="chip-grid" id="keepGrid"></div>
+        </div>
+        <div class="select-panel drop">
+          <h3>Drop / deprioritize <span class="count">${state.drop.size}</span></h3>
+          <div class="panel-sub">Optional. Frees slots for keep intents. CRACK is stance-based abliteration.</div>
+          <div class="chip-grid" id="dropGrid"></div>
+        </div>
+      </div>
+
+      <div class="stance-budget-row">
+        <div class="mini-panel">
+          <h4>Live plan summary</h4>
+          ${planTagsHTML()}
+          <div class="field-row">Keep-K <span class="val">${keepK()} / ${E} experts/layer</span></div>
+          <div class="field-row">Will drop ~ <span class="val">${E - keepK()} experts/layer</span></div>
+          <div class="muted">Hybrid scorer ranks experts; budget cuts the bottom. Drop intents push those domains down the rank.</div>
+        </div>
+        <div class="mini-panel">
+          <h4>Preview keep-set (sample layers)</h4>
+          ${layerPreviewHTML()}
+        </div>
+      </div>`;
+
+    // populate chips
+    const kg = document.getElementById('keepGrid');
+    const dg = document.getElementById('dropGrid');
+    kg.innerHTML = KEEP_OPTIONS.map(o => chipHTML(o, 'keep', state.keep.has(o.id))).join('');
+    dg.innerHTML = DROP_OPTIONS.map(o => chipHTML(o, 'drop', state.drop.has(o.id) || (o.id==='safety_heavy' && state.stance==='crack'))).join('');
+    kg.onclick = (e) => { const c = e.target.closest('.chip'); if (c) toggleKeep(c.dataset.id); };
+    dg.onclick = (e) => { const c = e.target.closest('.chip'); if (c) toggleDrop(c.dataset.id); };
+
+    const pr = document.getElementById('presets');
+    pr.innerHTML = PRESETS.map(p =>
+      `<button class="btn btn-sm" data-preset="${p.id}">${p.label}</button>`
+    ).join('');
+    pr.onclick = (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      const p = PRESETS.find(x => x.id === b.dataset.preset);
+      if (p) applyPreset(p);
+    };
+    tray.style.display = 'none';
+    return;
+  }
+
+  controls.innerHTML = '';
+  // other stages (abbreviated but functional)
+  if (state.stage === 0) {
+    title.textContent = 'Evidence';
+    summary.textContent = state.evidence ? `${state.transitions} transitions` : 'Not run';
+    legend.innerHTML = '';
+    body.innerHTML = state.evidence
+      ? `<div class="banner good">Evidence ready. Go to <strong>Shape</strong> to choose keep/drop capabilities.</div>
+         <div class="gate-grid">
+           <div class="gate pass"><div class="g-label">Records</div><div class="g-val">${state.transitions}</div><div class="g-sub">transitions</div></div>
+           <div class="gate pass"><div class="g-label">Math</div><div class="g-val">~590</div><div class="g-sub">paths</div></div>
+           <div class="gate pass"><div class="g-label">Code</div><div class="g-val">~490</div><div class="g-sub">paths</div></div>
+           <div class="gate pass"><div class="g-label">Chinese</div><div class="g-val">~755</div><div class="g-sub">drop signal</div></div>
+         </div>`
+      : `<div class="empty-center"><div class="big">∿</div><p>Run evidence (left), or jump to <strong style="color:var(--text)">Shape</strong> to pick capabilities first — prune still needs evidence.</p></div>`;
+    tray.style.display = 'none';
+  } else if (state.stage === 2) {
+    title.textContent = 'Prune';
+    summary.textContent = state.pruned ? `Hard prune complete · K=${keepK()}` : 'Confirm plan then hard-prune';
+    legend.innerHTML = '';
+    body.innerHTML = `
+      <div class="plan-summary" style="margin-bottom:12px;">
+        <h4>Pruning with this plan</h4>
+        ${planTagsHTML()}
+        <div class="muted">From Shape selections. Change them anytime before running prune.</div>
+        <button class="btn btn-sm" style="margin-top:8px;" id="editShape">◎ Edit keep / drop</button>
+      </div>
+      ${state.pruned
+        ? `<div class="banner good">Structural verify OK. Next: Quality holdouts — not Convert yet.</div>
+           <div class="gate-grid">
+             <div class="gate pass"><div class="g-label">Experts</div><div class="g-val">${keepK()}</div><div class="g-sub">per layer</div></div>
+             <div class="gate pass"><div class="g-label">Size</div><div class="g-val">~${(67*keepK()/E).toFixed(0)}G</div><div class="g-sub">BF16</div></div>
+             <div class="gate warn"><div class="g-label">Quality</div><div class="g-val">?</div><div class="g-sub">not run</div></div>
+             <div class="gate"><div class="g-label">Drops</div><div class="g-val" style="font-size:12px;color:var(--danger)">${state.drop.size||0}</div><div class="g-sub">intents</div></div>
+           </div>`
+        : `<div class="empty-center"><div class="big">✂</div><p>Review the plan above, then <strong style="color:var(--text)">Run Hard Prune</strong> in the left drawer.</p></div>`}`;
+    setTimeout(() => {
+      const b = document.getElementById('editShape');
+      if (b) b.onclick = () => { state.stage = 1; render(); };
+    }, 0);
+    tray.style.display = 'none';
+  } else if (state.stage === 3) {
+    title.textContent = 'Quality';
+    summary.textContent = state.quality ? state.quality.overall + (state.quality.gatesPass ? ' · pass' : ' · iterate') : 'Not run';
+    legend.innerHTML = '';
+    if (!state.quality) {
+      body.innerHTML = `<div class="empty-center"><div class="big">✓</div><p>Run holdouts. Math 5/5 required to unlock Convert.</p></div>`;
+      tray.style.display = 'none';
+    } else {
+      const q = state.quality;
+      body.innerHTML = `
+        <p class="one-liner">${q.gatesPass ? '<strong style="color:var(--good)">Gates pass.</strong>' : '<strong style="color:var(--warm)">Gates failed.</strong>'} ${q.note||''}</p>
+        <div class="gate-grid">
+          <div class="gate ${q.math==='5/5'?'pass':'fail'}"><div class="g-label">Math</div><div class="g-val">${q.math}</div><div class="g-sub">ship</div></div>
+          <div class="gate pass"><div class="g-label">Code</div><div class="g-val">${q.code}</div><div class="g-sub">≥2/3</div></div>
+          <div class="gate pass"><div class="g-label">English</div><div class="g-val">${q.en}</div><div class="g-sub">keep</div></div>
+          <div class="gate ${q.zhGate}"><div class="g-label">Chinese</div><div class="g-val">${q.zh}</div><div class="g-sub">CJK ${q.cjk}</div></div>
+        </div>
+        <div class="plan-summary">${planTagsHTML()}</div>`;
+      tray.style.display = 'flex';
+      tray.innerHTML = `
+        <div class="compare-info">
+          <div class="label">Compare</div>
+          <div class="summary">${q.compareNote}</div>
+          <span class="pill cyan">● baseline</span>
+          <span class="pill amber">● pruned</span>
+        </div>
+        <div class="compare-cols">
+          <div class="compare-col"><div class="compare-col-title cyan"><div class="dot"></div> Baseline</div><div class="compare-col-body">${q.sampleBase}</div></div>
+          <div class="compare-col"><div class="compare-col-title amber"><div class="dot"></div> Pruned</div><div class="compare-col-body">${q.samplePruned}</div></div>
+        </div>`;
+    }
+  } else {
+    title.textContent = 'Convert';
+    summary.textContent = state.quality?.gatesPass ? 'Unlocked' : 'Locked';
+    legend.innerHTML = '';
+    body.innerHTML = state.quality?.gatesPass
+      ? `<div class="banner good">Adopt pruned BF16 → JANG_4K. Same Convert path as dense models.</div>${planTagsHTML()}`
+      : `<div class="empty-center"><div class="big">▷</div><p>Convert locked until Quality gates pass.</p></div>`;
+    tray.style.display = 'none';
+  }
+}
+
+function chipHTML(o, kind, on) {
+  return `<div class="chip ${kind} ${on?'on':''}" data-id="${o.id}">
+    <div class="swatch" style="background:${o.color}"></div>
+    <div class="meta">
+      <div class="name">${o.label}</div>
+      <div class="desc">${o.desc}</div>
+      <div class="domains">${o.domains}</div>
+    </div>
+    <div class="check">${on ? (kind==='drop' ? '×' : '✓') : ''}</div>
+  </div>`;
+}
+
+function layerPreviewHTML() {
+  let html = '';
+  for (let L = 0; L < 6; L++) {
+    let cells = '';
+    const keepN = Math.floor(48 * keepK() / E);
+    for (let e = 0; e < 48; e++) {
+      let cls = e >= keepN ? 'drop' : 'keep';
+      if (e < keepN && state.keep.has('coding') && e % 9 === 0) cls = 'code';
+      if (e < keepN && state.keep.has('math') && e % 11 === 0) cls = 'math';
+      if (e >= keepN && state.drop.has('chinese') && e % 5 === 0) cls = 'zh';
+      cells += `<div class="mini-cell ${cls}"></div>`;
+    }
+    html += `<div class="layer-strip"><span class="ls-label">L${String(L).padStart(2,'0')}</span><span class="cells">${cells}</span></div>`;
+  }
+  return html + `<div class="muted">Sample of keep (green) vs drop slots (red). Not full atlas.</div>`;
+}
+
+function renderRight() {
+  const r = document.getElementById('rightDrawer');
+  const steps = [
+    { n: 'Evidence', ok: state.evidence },
+    { n: 'Shape (selections)', ok: stageDone(1) },
+    { n: 'Prune', ok: state.pruned },
+    { n: 'Quality', ok: !!(state.quality && state.quality.gatesPass) },
+    { n: 'Convert', ok: !!(state.quality && state.quality.gatesPass) },
+  ];
+  let banner = '';
+  if (state.stage === 1) {
+    banner = state.keep.size
+      ? `<div class="banner info">Selections drive the prune plan. ${state.evidence ? 'Evidence ready — you can Prune next.' : 'Collect Evidence before Prune.'}</div>`
+      : `<div class="banner warn">Select at least one <strong>Keep</strong> capability (left/green panel).</div>`;
+  } else if (!state.evidence) banner = `<div class="banner info">Shape anytime. Evidence required before Prune.</div>`;
+  else if (!state.pruned) banner = `<div class="banner info">Plan set. Run Prune when ready.</div>`;
+  else if (!state.quality) banner = `<div class="banner warn">Structural prune done — run Quality.</div>`;
+  else if (!state.quality.gatesPass) banner = `<div class="banner danger">Quality failed — iterate.</div>`;
+  else banner = `<div class="banner good">Gates pass — Convert unlocked.</div>`;
+
+  r.innerHTML = `
+    ${banner}
+    <div class="card">
+      <div class="card-title">Your selection</div>
+      ${planTagsHTML()}
+      <div class="field-row">Keep chips <span class="val">${state.keep.size}</span></div>
+      <div class="field-row">Drop chips <span class="val">${state.drop.size}</span></div>
+      <div class="field-row">Keep-K <span class="val">${keepK()}/${E}</span></div>
+      <div class="field-row">Stance <span class="val">${state.stance}</span></div>
+      ${state.stage !== 1 ? `<button class="btn btn-sm" style="width:100%;margin-top:8px;" id="jumpShape">◎ Edit Shape</button>` : ''}
+    </div>
+    <div class="card">
+      <div class="card-title">Process</div>
+      <div class="checklist">
+        ${steps.map((s,i) => `
+          <div class="check-row ${s.ok?'pass':'todo'}">
+            <div class="mark">${s.ok?'✓':String(i+1).padStart(2,'0')}</div>${s.n}
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="card" style="border-color:rgba(235,184,94,0.15);">
+      <div class="card-title" style="color:var(--warm);">Primary action</div>
+      <div id="primaryAction"></div>
+    </div>`;
+
+  const js = document.getElementById('jumpShape');
+  if (js) js.onclick = () => { state.stage = 1; render(); };
+
+  const pa = document.getElementById('primaryAction');
+  if (state.stage === 1) {
+    const ok = state.keep.size > 0;
+    if (!state.evidence) {
+      pa.innerHTML = `<button class="btn btn-primary" id="pa">∿ Collect evidence first</button>
+        <div class="muted" style="margin-top:4px;">Or keep shaping — prune stays locked until evidence.</div>`;
+      pa.querySelector('#pa').onclick = () => { state.stage = 0; render(); };
+    } else if (ok && (state.stance !== 'crack' || state.crackConfirm)) {
+      pa.innerHTML = `<button class="btn btn-warm" id="pa">Next · Review &amp; Prune →</button>`;
+      pa.querySelector('#pa').onclick = () => { state.stage = 2; render(); };
+    } else if (state.stance === 'crack' && !state.crackConfirm) {
+      pa.innerHTML = `<div class="muted">Confirm CRACK abliteration (left drawer) to continue.</div>`;
+    } else {
+      pa.innerHTML = `<div class="muted">Select ≥1 Keep capability.</div>`;
+    }
+  } else if (state.stage === 0) {
+    pa.innerHTML = state.evidence
+      ? `<button class="btn btn-primary" id="pa">→ Shape selections</button>`
+      : `<button class="btn btn-primary" id="pa">∿ Run Evidence</button>`;
+    pa.querySelector('#pa').onclick = () => {
+      if (state.evidence) { state.stage = 1; }
+      else { state.evidence = true; state.transitions = 2663; }
+      render();
+    };
+  } else if (state.stage === 2) {
+    if (!state.pruned) {
+      pa.innerHTML = `<button class="btn btn-warm" id="pa" ${canPrune()?'':'disabled'}>✂ Hard Prune</button>`;
+      if (canPrune()) pa.querySelector('#pa').onclick = runPrune;
+    } else {
+      pa.innerHTML = `<button class="btn btn-primary" id="pa">Next · Quality →</button>`;
+      pa.querySelector('#pa').onclick = () => { state.stage = 3; render(); };
+    }
+  } else if (state.stage === 3) {
+    if (!state.quality) {
+      pa.innerHTML = `<button class="btn btn-primary" id="pa">✓ Run Quality</button>`;
+      pa.querySelector('#pa').onclick = runQuality;
+    } else if (state.quality.gatesPass) {
+      pa.innerHTML = `<button class="btn btn-good" id="pa">Next · Convert →</button>`;
+      pa.querySelector('#pa').onclick = () => { state.stage = 4; render(); };
+    } else {
+      pa.innerHTML = `<button class="btn btn-warm" id="pa">↑ Raise budget</button>`;
+      pa.querySelector('#pa').onclick = () => { state.budget = 'light'; state.pruned = false; state.quality = null; state.stage = 1; render(); };
+    }
+  } else {
+    pa.innerHTML = `<button class="btn btn-good" id="pa" ${state.quality?.gatesPass?'':'disabled'}>▷ Convert</button>`;
+  }
+}
+
+function runPrune() {
+  if (!canPrune()) return;
+  state.pruned = true;
+  state.quality = null;
+  render();
+}
+
+function runQuality() {
+  const dropZh = state.drop.has('chinese') || state.drop.has('multilingual');
+  const crack = state.stance === 'crack';
+  const mathPass = keepK() >= 192 || state.budget !== 'aggressive';
+  const math = mathPass ? '5/5' : '3/5';
+  let zh = '4/4', cjk = '0.75', zhGate = 'pass';
+  if (dropZh && keepK() <= 160) { zh = '2/4'; cjk = '0.48'; zhGate = 'warn'; }
+  else if (dropZh) { cjk = '0.62'; zhGate = 'warn'; }
+  let crackComply = '14/15', crackOk = 'pass';
+  if (crack) { crackComply = '11/15'; crackOk = 'fail'; }
+  const capabilityPass = mathPass;
+  const gatesPass = capabilityPass && (!crack || crackOk === 'pass');
+  state.quality = {
+    math, code: '2/3', en: '2/2', zh, cjk, zhGate, crackComply, crackStill: '5/5',
+    overall: gatesPass ? '32/35' : '28/35',
+    gatesPass: dropZh && capabilityPass && !crack ? true : gatesPass,
+    note: dropZh ? 'Drop intents active — ZH purity is the target metric.' : '',
+    sampleBase: dropZh ? '天空呈现蓝色主要是因为瑞利散射…' : '√14641 → 121',
+    samplePruned: dropZh && keepK()<=160 ? '天空… inherently… daytime sky…' : (mathPass ? '√14641 → 121' : '√14641 → 146'),
+    compareNote: dropZh ? 'Language holdout sample' : 'Math holdout sample',
+  };
+  if (dropZh && capabilityPass && !crack) state.quality.gatesPass = true;
+  render();
+}
+
+document.getElementById('workflowPills').onclick = (e) => {
+  const el = e.target.closest('.wfp'); if (!el) return;
+  const i = +el.dataset.stage;
+  if (canEnter(i) || i === state.stage || i === 1) { state.stage = i; render(); }
+};
+document.getElementById('dock').onclick = (e) => {
+  const el = e.target.closest('.dock-item'); if (!el) return;
+  if (el.id === 'dockAdvanced') { alert('Advanced Expert Lab atlas (design-b-v2) for power users.'); return; }
+  const i = +el.dataset.stage;
+  if (canEnter(i) || i === state.stage || i === 1) { state.stage = i; render(); }
+};
+
+render();
+</script>
+</body>
+</html>

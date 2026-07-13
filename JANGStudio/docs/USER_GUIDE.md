@@ -55,15 +55,18 @@ Post-convert checklist (schema, tokenizer, shards, capabilities, optional Expert
 
 For raw BF16/F16 `qwen3_5_moe` / `qwen3_5_moe_text` sources, Source shows **Shape model (Intent Prune)** as the primary prune CTA.
 
-1. Multi-select **capability chips** (Coding, Math, Writing, Science/Bio, Multilingual, Tools/Agentic, Long context, Generalist).
-2. Choose **safety stance**:
-   - **Keep** (default) — protect safety-path experts
-   - **Balanced** — mild protection
-   - **CRACK** — abliteration / reduced refusal-path specialization; requires an explicit confirmation checkbox; output folders use a `-CRACK` suffix
-3. Pick a **size budget** (Light / Standard / Aggressive) → uniform keep-K experts per layer.
-4. Attach `expert_transitions.jsonl` from a **Reviewed Prune 50** BF16/vMLX run (or generate it via Advanced Expert Lab).
-5. **Preview scores** runs `intent-prune-score`; **Run Intent Prune** scores then hard-prunes a new BF16/F16 tree.
-6. **Convert pruned model** adopts the pruned folder, sets workflow to Convert, and continues Profile → Run → Verify.
+Workflow (design-b quality loop): **Evidence → Shape → Prune → Quality → Convert**.
+
+1. **Evidence** — attach `expert_transitions.jsonl` from a **real-domain** BF16/vMLX trace (preferred over marker-only suites). Generate via Advanced Expert Lab if needed.
+2. **Shape** — main selection surface:
+   - **Keep** tiles (green): Coding, Math, Writing, Science/Bio, Multilingual, Tools/Agentic, Long context, Generalist, English-dominant, Reasoning
+   - **Drop** tiles (red): Chinese, multilingual, translation, Spanish, creative, knowledge, tools, long context; Safety-heavy switches to CRACK stance
+   - Quick presets (Coding+Math, Drop Chinese, EN agent, …)
+   - **Safety stance**: Keep (default) / Balanced / **CRACK** (confirm required; `-CRACK` folder suffix)
+   - **Size budget**: Light / Standard / Aggressive → keep-K
+3. **Prune** — **Preview scores** (`intent-prune-score` with `--intent` + `--drop-intent`) then **Run Hard Prune**. Structural verify only.
+4. **Quality** — explicit holdout checklist before Convert (math/code/language; CRACK anchors if CRACK). Acknowledge to unlock Convert.
+5. **Convert pruned model** adopts the pruned folder and continues Profile → Run → Verify.
 
 Unsupported MoE architectures show Direct Convert plus “Intent Prune coming for this architecture.”
 

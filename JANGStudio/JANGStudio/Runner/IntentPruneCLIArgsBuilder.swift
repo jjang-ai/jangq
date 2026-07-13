@@ -98,19 +98,28 @@ enum IntentPruneCLIArgsBuilder {
         ]
     }
 
-    /// Artifact folder basename: `{source}-intent-{slugs}-k{K}[-CRACK]`.
+    /// Artifact folder basename: `{source}-intent-{slugs}[-drop-{drops}]-k{K}[-CRACK]`.
     static func artifactFolderName(
         sourceBaseName: String,
         chips: [IntentPruneChip],
         keepK: Int,
-        safetyStance: IntentPruneSafetyStance
+        safetyStance: IntentPruneSafetyStance,
+        dropChips: [IntentPruneDropChip] = []
     ) -> String {
         let slugs = chips
             .filter { $0 != .generalist || chips.count == 1 }
             .map(\.artifactSlug)
             .sorted()
         let slugPart = slugs.isEmpty ? "general" : slugs.joined(separator: "-")
-        var name = "\(sourceBaseName)-intent-\(slugPart)-k\(keepK)"
+        var name = "\(sourceBaseName)-intent-\(slugPart)"
+        let dropSlugs = dropChips
+            .filter { !$0.switchesToCrackStance }
+            .map(\.rawValue)
+            .sorted()
+        if !dropSlugs.isEmpty {
+            name += "-drop-\(dropSlugs.joined(separator: "-"))"
+        }
+        name += "-k\(keepK)"
         if safetyStance.isCrack, !name.uppercased().hasSuffix("-CRACK") {
             name += "-CRACK"
         }
@@ -130,6 +139,18 @@ enum IntentPruneCLIArgsBuilder {
                 if seen.insert("general").inserted {
                     keys.append("general")
                 }
+            }
+        }
+        return keys
+    }
+
+    /// Expand drop chips into unique domain keys for `--drop-intent`.
+    static func dropDomainKeys(for chips: Set<IntentPruneDropChip>) -> [String] {
+        var seen = Set<String>()
+        var keys: [String] = []
+        for chip in IntentPruneDropChip.allCases where chips.contains(chip) {
+            for key in chip.domainKeys where seen.insert(key).inserted {
+                keys.append(key)
             }
         }
         return keys

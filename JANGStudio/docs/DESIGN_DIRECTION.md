@@ -4,7 +4,13 @@ The canonical visual reference for upcoming JANG Studio UI work is:
 
 `JANGStudio/demos/design-b-v3.html`
 
-This direction is a compact pro-noir technical console, not a landing page or broad dashboard. The UI should feel like a dense model-inspection instrument: fast to scan, low-friction for repeated runs, and visually centered on the expert atlas.
+**Intent Prune / quality loop** (capability shape → prove holdouts → convert) uses the same design-b language, with flow and copy fixed in:
+
+`JANGStudio/demos/design-b-intent-prune-quality.html`
+
+Influenced by `design-b-v2.html` (dock, drawer, workflow pills, domain colors, compare tray). Expert Lab atlas stays atlas-centric (v3); Intent Prune stays **capability-first** with a quality scoreboard and baseline vs pruned compare tray — not a second full atlas.
+
+This direction is a compact pro-noir technical console, not a landing page or broad dashboard. The UI should feel like a dense model-inspection instrument: fast to scan, low-friction for repeated runs, and visually centered on the expert atlas (Expert Lab) or the gate scoreboard (Intent Prune).
 
 ## Core Layout
 
@@ -56,6 +62,18 @@ Use small radii: 2px for atlas cells, 3-4px for pills/buttons/inputs, 5-6px for 
 - Live prompt probing should create a normal trace artifact and feed the same atlas/evidence/mask/compare pipeline as suite probing.
 - Empty atlas space should clearly indicate that prompts must be run to generate the expert map.
 - Pruning actions stay gated behind trace evidence and A/B comparison.
+
+## Intent Prune quality loop (product path)
+
+Make the dogfood-proven process self-explanatory in the UI (see `design-b-intent-prune-quality.html`):
+
+1. **Evidence** — one primary action: real-domain BF16/vMLX trace + transitions (no-thinking). Do not require hand-picking `expert_transitions.jsonl` as the happy path. Marker Reviewed 50 is routing-only, labeled as such.
+2. **Shape** — keep chips, optional **drop** chips (e.g. Chinese), safety stance (Keep / Balanced / CRACK+confirm), size budget → keep-K.
+3. **Prune** — hard-prune + structural verify only. Copy must say structural OK ≠ quality OK.
+4. **Quality** — holdout scoreboard (math 5/5, code, EN, ZH/CJK, CRACK comply + still-refuse). Compare tray: baseline vs pruned answers (design-b-v2 tray pattern).
+5. **Convert** — unlocked only when capability gates pass. Fail → suggest iterate (raise budget / more CRACK-pack traces).
+
+Workflow pills: `01 Evidence → 02 Shape → 03 Prune → 04 Quality → 05 Convert`. Dock mirrors stages; Atlas remains Advanced Expert Lab escape hatch.
 
 ## SwiftUI Implementation Notes
 
