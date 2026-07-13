@@ -648,21 +648,43 @@ def _load_suite(path: str) -> list[dict[str, Any]]:
     return prompts
 
 
-def _prompt_tokens(tokenizer: Any, prompt: str) -> list[int] | str:
+def _prompt_tokens(
+    tokenizer: Any,
+    prompt: str,
+    *,
+    enable_thinking: bool | None = None,
+) -> list[int] | str:
     messages = [{"role": "user", "content": prompt}]
     apply_template = getattr(tokenizer, "apply_chat_template", None)
     if callable(apply_template):
         try:
-            tokens = apply_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
+            kwargs: dict[str, Any] = {
+                "tokenize": True,
+                "add_generation_prompt": True,
+            }
+            # Qwen3.x chat templates honor enable_thinking; when False they
+            # emit an empty <think></think> so generation spends tokens on the
+            # answer (needed for quality suites, not expert-routing markers).
+            if enable_thinking is not None:
+                kwargs["enable_thinking"] = bool(enable_thinking)
+            tokens = apply_template(messages, **kwargs)
             if isinstance(tokens, dict):
                 tokens = tokens.get("input_ids", tokens)
             return tokens
         except Exception:
-            pass
+            # Retry without enable_thinking if the template rejects the kwarg.
+            if enable_thinking is not None:
+                try:
+                    tokens = apply_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                    )
+                    if isinstance(tokens, dict):
+                        tokens = tokens.get("input_ids", tokens)
+                    return tokens
+                except Exception:
+                    pass
     return prompt
 
 
@@ -1908,10 +1930,15 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 top_k=int(generation_settings["top_k"]),
             )
             try:
+                enable_thinking = getattr(args, "enable_thinking", None)
                 for response in stream_generate(
                     model,
                     tokenizer,
-                    _prompt_tokens(tokenizer, prompt_text),
+                    _prompt_tokens(
+                        tokenizer,
+                        prompt_text,
+                        enable_thinking=enable_thinking,
+                    ),
                     max_tokens=int(generation_settings["max_tokens"]),
                     sampler=sampler,
                 ):
@@ -1992,6 +2019,7 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
             "top_p": float(args.top_p),
             "top_k": int(args.top_k),
             "top_k_override": int(top_k_override) if top_k_override else None,
+            "enable_thinking": getattr(args, "enable_thinking", None),
         },
         "prompt_count": len(rows),
         "hooked_moe_layers": hooked_layers,
@@ -2060,7 +2088,26 @@ def register(subparsers) -> None:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-k-override", type=int, default=0)
-    parser.set_defaults(func=cmd_expert_lab_vmlx)
+    thinking = parser.add_mutually_exclusive_group()
+    thinking.add_argument(
+        "--no-thinking",
+        dest="enable_thinking",
+        action="store_const",
+        const=False,
+        help=(
+            "Disable chain-of-thought for models whose chat template supports "
+            "enable_thinking=false (e.g. Qwen3.x). Prefer this for quality suites "
+            "so max_tokens is spent on the final answer."
+        ),
+    )
+    thinking.add_argument(
+        "--enable-thinking",
+        dest="enable_thinking",
+        action="store_const",
+        const=True,
+        help="Force enable_thinking=true when applying the chat template.",
+    )
+    parser.set_defaults(func=cmd_expert_lab_vmlx, enable_thinking=None)
 
     eval_parser = subparsers.add_parser(
         "expert-lab-vmlx-build-eval",
