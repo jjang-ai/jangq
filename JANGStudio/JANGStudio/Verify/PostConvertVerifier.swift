@@ -902,6 +902,69 @@ struct PostConvertVerifier {
     private static let minimumReviewedPrunePromptCount = 50
     private static let minimumReviewedPruneMeanTokens: Double = 8
 
+    /// Intent Prune plans (`jang-intent-prune-plan-v1`) share the reviewed hard-prune path.
+    /// Hybrid scorer fields are evidence; `layers` keep lists are operational.
+    private static let intentPrunePlanSchema = "jang-intent-prune-plan-v1"
+
+    private static func isIntentPrunePlan(_ plan: [String: Any]) -> Bool {
+        if let schema = stringValue(plan["schema"]), schema == intentPrunePlanSchema {
+            return true
+        }
+        if stringValue(plan["scorer"]) != nil, stringValue(plan["method"]) == nil {
+            return true
+        }
+        return false
+    }
+
+    private static func planTracedPromptCount(_ plan: [String: Any]) -> Int? {
+        if let count = intValue(plan["promptCount"] ?? plan["prompt_count"]) {
+            return count
+        }
+        if let suite = plan["suite"] as? [String: Any] {
+            return intValue(suite["prompt_count"] ?? suite["promptCount"])
+        }
+        return nil
+    }
+
+    private static func intentPruneFingerprintIssue(_ plan: [String: Any]) -> String? {
+        guard isIntentPrunePlan(plan) else { return nil }
+
+        if let suite = plan["suite"] as? [String: Any], !suite.isEmpty {
+            let hasName = stringValue(suite["name"])?.isEmpty == false
+            let hasSHA = stringValue(suite["sha256"])?.isEmpty == false
+            let hasCount = intValue(suite["prompt_count"] ?? suite["promptCount"]) != nil
+            if !hasName && !hasSHA && !hasCount {
+                return "suite fingerprint is incomplete (need name, sha256, or prompt_count)"
+            }
+        }
+
+        let stance = (stringValue(plan["safety_stance"] ?? plan["safetyStance"]) ?? "").lowercased()
+        let crackPack = plan["crack_pack"] as? [String: Any]
+        let crackNonEmpty = crackPack.map { !$0.isEmpty } ?? false
+
+        if stance == "crack" {
+            guard let crackPack, crackNonEmpty else {
+                return "intent prune plan with safety_stance=crack is missing crack_pack fingerprint"
+            }
+            let hasName = stringValue(crackPack["name"])?.isEmpty == false
+            let hasSHA = stringValue(crackPack["sha256"])?.isEmpty == false
+            let hasCount = intValue(crackPack["prompt_count"] ?? crackPack["promptCount"]) != nil
+            if !hasName {
+                return "crack_pack is missing name"
+            }
+            if !hasSHA && !hasCount {
+                return "crack_pack is missing sha256 or prompt_count fingerprint"
+            }
+        } else if crackNonEmpty, let crackPack {
+            let hasName = stringValue(crackPack["name"])?.isEmpty == false
+            let hasSHA = stringValue(crackPack["sha256"])?.isEmpty == false
+            if !hasName && !hasSHA {
+                return "crack_pack fingerprint is incomplete (need name or sha256)"
+            }
+        }
+        return nil
+    }
+
     private static func reviewedPrunePlanIssue(_ plan: [String: Any]?) -> String? {
         guard let plan else {
             return "Reviewed prune plan JSON is unreadable"
@@ -932,32 +995,36 @@ struct PostConvertVerifier {
         if keep < trainedTopK {
             return "plan keeps \(keep) experts but trained top-k is \(trainedTopK)"
         }
-        guard let comparison = plan["comparison_summary"] as? [String: Any] else {
+        if let issue = intentPruneFingerprintIssue(plan) {
+            return issue
+        }
+        guard let comparison = plan["comparison_summary"] as? [String: Any], !comparison.isEmpty else {
             return "prune_plan.json is missing embedded same-suite comparison evidence"
         }
+        let tracedPromptCount = planTracedPromptCount(plan)
         if let issue = reviewedPruneComparisonGateIssue(
             comparison: comparison,
-            tracedPromptCount: intValue(plan["promptCount"] ?? plan["prompt_count"])
+            tracedPromptCount: tracedPromptCount
         ) {
             return issue
         }
         if let issue = reviewedPrunePlanDropEvidenceIssue(plan: plan, comparison: comparison) {
             return issue
         }
-        guard let evalIndex = plan["eval_index"] as? [String: Any] else {
+        guard let evalIndex = plan["eval_index"] as? [String: Any], !evalIndex.isEmpty else {
             return "prune_plan.json is missing embedded per-prompt eval_index evidence"
         }
         if let issue = reviewedPruneEvalIndexIssue(
             index: evalIndex,
             comparedPromptCount: intValue(comparison["promptCount"] ?? comparison["prompt_count"]),
-            tracedPromptCount: intValue(plan["promptCount"] ?? plan["prompt_count"]),
+            tracedPromptCount: tracedPromptCount,
             comparison: comparison,
             sourceModelPath: stringValue(plan["source_model"] ?? plan["sourceModelPath"]),
             expectedLayerCount: expectedReviewedLayerCount(summary: plan)
         ) {
             return issue
         }
-        if let issue = reviewedPruneSemanticEvidenceIssue(plan) {
+        if !isIntentPrunePlan(plan), let issue = reviewedPruneSemanticEvidenceIssue(plan) {
             return issue
         }
         return nil
@@ -1432,17 +1499,52 @@ struct PostConvertVerifier {
         })
     }
 
+    private static func planSourceExpertCount(_ plan: [String: Any], layer: [String: Any]? = nil) -> Int? {
+        if let n = intValue(plan["num_experts_source"] ?? plan["numExpertsSource"] ?? plan["sourceNumExperts"]) {
+            return n
+        }
+        if let layer {
+            return intValue(layer["num_source_experts"] ?? layer["numSourceExperts"])
+        }
+        return nil
+    }
+
+    private static func planLayerKeepList(_ value: Any) -> (layerObject: [String: Any]?, keep: [Int])? {
+        if let layer = value as? [String: Any] {
+            guard let rawKeep = layer["keep"] as? [Any] else { return nil }
+            let keep = rawKeep.compactMap(intValue)
+            guard keep.count == rawKeep.count else { return nil }
+            return (layer, keep)
+        }
+        if let rawKeep = value as? [Any] {
+            let keep = rawKeep.compactMap(intValue)
+            guard keep.count == rawKeep.count else { return nil }
+            return (nil, keep)
+        }
+        return nil
+    }
+
     private static func planDropCoordinateSet(_ plan: [String: Any]) -> Set<String>? {
         guard let layers = plan["layers"] as? [String: Any] else { return nil }
         var coordinates = Set<String>()
         for key in layers.keys {
-            guard let layer = layers[key] as? [String: Any],
-                  let layerID = intValue(layer["layer"]) ?? intValue(key),
-                  let drops = layer["drop"] as? [Any] else {
+            guard let value = layers[key],
+                  let parsed = planLayerKeepList(value),
+                  let layerID = intValue(parsed.layerObject?["layer"]) ?? intValue(key) else {
                 return nil
             }
-            for drop in drops {
-                guard let expert = intValue(drop) else { return nil }
+            if let drops = parsed.layerObject?["drop"] as? [Any] {
+                for drop in drops {
+                    guard let expert = intValue(drop) else { return nil }
+                    coordinates.insert("\(layerID):\(expert)")
+                }
+                continue
+            }
+            guard let numExperts = planSourceExpertCount(plan, layer: parsed.layerObject), numExperts > 0 else {
+                return nil
+            }
+            let keepSet = Set(parsed.keep)
+            for expert in 0..<numExperts where !keepSet.contains(expert) {
                 coordinates.insert("\(layerID):\(expert)")
             }
         }
@@ -1530,16 +1632,15 @@ struct PostConvertVerifier {
         }
         guard let layers = plan["layers"] as? [String: Any] else { return nil }
         let keepCounts = Set(layers.values.compactMap { value -> Int? in
-            guard let layer = value as? [String: Any],
-                  let keep = layer["keep"] as? [Any] else {
-                return nil
-            }
-            return keep.count
+            planLayerKeepList(value)?.keep.count
         })
         return keepCounts.count == 1 ? keepCounts.first : nil
     }
 
     private static func maxTrainedTopK(in safety: [String: Any]) -> Int? {
+        if let scalar = intValue(safety["trained_top_k"] ?? safety["trainedTopK"]) {
+            return scalar
+        }
         let raw = safety["trained_top_k_by_layer"] ?? safety["trainedTopKByLayer"]
         guard let topKByLayer = raw as? [String: Any] else { return nil }
         let values = topKByLayer.values.compactMap(intValue)
@@ -4644,7 +4745,7 @@ struct PostConvertVerifier {
     }
 
     private static func expectedReviewedLayerCount(summary: [String: Any]) -> Int? {
-        if let layerCount = intValue(summary["layer_count"] ?? summary["layerCount"]),
+        if let layerCount = intValue(summary["layer_count"] ?? summary["layerCount"] ?? summary["num_layers"] ?? summary["numLayers"]),
            layerCount > 0 {
             return layerCount
         }

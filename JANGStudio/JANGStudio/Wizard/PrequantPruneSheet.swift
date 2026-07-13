@@ -104,6 +104,17 @@ struct PrequantPruneSheet: View {
                         LabeledContent("User-forced drop", value: "\(prunePlanSummary.userForcedDropCount) experts")
                         LabeledContent("Evidence rows", value: "\(prunePlanSummary.evidenceCount)")
                         LabeledContent("Safety", value: prunePlanSummary.safetyDescription)
+                        if let intent = prunePlanSummary.intentMeta, intent.scorer != nil || intent.schema == "jang-intent-prune-plan-v1" {
+                            if let scorer = intent.scorer {
+                                LabeledContent("Scorer", value: scorer)
+                            }
+                            if let suiteName = intent.suiteName {
+                                LabeledContent("Suite", value: suiteName)
+                            }
+                            if let crack = intent.crackPackName {
+                                LabeledContent("CRACK pack", value: crack)
+                            }
+                        }
                         if let comparison = prunePlanSummary.comparisonSummary {
                             LabeledContent("A/B comparison", value: "\(comparison.promptCount) prompts")
                             LabeledContent("Masked pass rate", value: comparison.maskedPassRateDescription)
@@ -459,9 +470,102 @@ struct PrequantPruneSheet: View {
                 )
                 errorText = nil
             } catch {
-                errorText = "Could not read Expert Lab plan: \(error.localizedDescription)"
+                errorText = "Could not read prune plan: \(error.localizedDescription)"
             }
         }
+    }
+
+    private static let intentPrunePlanSchema = "jang-intent-prune-plan-v1"
+
+    /// Normalize `jang-intent-prune-plan-v1` (flat keep lists, scorer, scalar top-k)
+    /// into the Expert Lab import shape so existing decoders/gates stay shared.
+    private static func normalizeImportedPrunePlanDictionary(_ plan: [String: Any]) -> [String: Any] {
+        var out = plan
+        let schema = (out["schema"] as? String) ?? ""
+        let isIntent = schema == intentPrunePlanSchema
+            || ((out["scorer"] as? String)?.isEmpty == false && out["method"] == nil)
+
+        if isIntent || out["method"] == nil {
+            if let scorer = out["scorer"] as? String, !scorer.isEmpty, out["method"] == nil {
+                out["method"] = scorer
+            }
+        }
+        if out["method"] == nil {
+            out["method"] = isIntent ? "hybrid_v1" : "external_keep_map"
+        }
+
+        if out["keepExpertsPerLayer"] == nil, let keep = out["keep_experts_per_layer"] {
+            out["keepExpertsPerLayer"] = keep
+        }
+        if out["promptCount"] == nil {
+            if let pc = out["prompt_count"] {
+                out["promptCount"] = pc
+            } else if let suite = out["suite"] as? [String: Any],
+                      let pc = suite["prompt_count"] ?? suite["promptCount"] {
+                out["promptCount"] = pc
+            }
+        }
+
+        if var safety = out["safety"] as? [String: Any] {
+            let hasByLayer = safety["trained_top_k_by_layer"] != nil || safety["trainedTopKByLayer"] != nil
+            if !hasByLayer, let topK = safety["trained_top_k"] ?? safety["trainedTopK"] {
+                var byLayer: [String: Any] = [:]
+                if let layers = out["layers"] as? [String: Any] {
+                    for key in layers.keys {
+                        byLayer[key] = topK
+                    }
+                }
+                if byLayer.isEmpty {
+                    byLayer["0"] = topK
+                }
+                safety["trained_top_k_by_layer"] = byLayer
+            }
+            out["safety"] = safety
+        }
+
+        if let layers = out["layers"] as? [String: Any] {
+            var normalized: [String: Any] = [:]
+            let numExperts = (out["num_experts_source"] as? Int)
+                ?? (out["numExpertsSource"] as? Int)
+                ?? (out["sourceNumExperts"] as? Int)
+            for (key, value) in layers {
+                if let arr = value as? [Any] {
+                    let keepInts = arr.compactMap { ($0 as? Int) ?? ($0 as? NSNumber)?.intValue }
+                    var layerObj: [String: Any] = [
+                        "keep": keepInts,
+                        "drop": [] as [Int],
+                        "evidence": [] as [[String: Any]],
+                    ]
+                    if let numExperts, numExperts > 0 {
+                        let keepSet = Set(keepInts)
+                        layerObj["drop"] = (0..<numExperts).filter { !keepSet.contains($0) }
+                        layerObj["num_source_experts"] = numExperts
+                    }
+                    normalized[key] = layerObj
+                } else {
+                    normalized[key] = value
+                }
+            }
+            out["layers"] = normalized
+        }
+
+        if isIntent {
+            out["_intent_prune"] = true
+        }
+        return out
+    }
+
+    private static func isIntentPrunePlanDictionary(_ plan: [String: Any]) -> Bool {
+        if let schema = plan["schema"] as? String, schema == intentPrunePlanSchema {
+            return true
+        }
+        if plan["_intent_prune"] as? Bool == true {
+            return true
+        }
+        if let scorer = plan["scorer"] as? String, !scorer.isEmpty, plan["method"] == nil {
+            return true
+        }
+        return false
     }
 
     private static func readPrunePlanSummary(
@@ -470,8 +574,21 @@ struct PrequantPruneSheet: View {
         sourceExperts: Int
     ) throws -> ImportedPrunePlanSummary {
         let data = try Data(contentsOf: url)
-        let plan = try JSONDecoder().decode(ImportedPrunePlan.self, from: data)
-        return try ImportedPrunePlanSummary(plan: plan, sourceURL: sourceURL, sourceExperts: sourceExperts)
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dict = object as? [String: Any] else {
+            throw ImportedPrunePlanError.emptyLayers
+        }
+        let isIntent = isIntentPrunePlanDictionary(dict)
+        let normalized = normalizeImportedPrunePlanDictionary(dict)
+        let normalizedData = try JSONSerialization.data(withJSONObject: normalized)
+        let plan = try JSONDecoder().decode(ImportedPrunePlan.self, from: normalizedData)
+        return try ImportedPrunePlanSummary(
+            plan: plan,
+            sourceURL: sourceURL,
+            sourceExperts: sourceExperts,
+            skipSemanticEvidence: isIntent,
+            intentMeta: IntentPrunePlanMeta(from: dict)
+        )
     }
 
     private func runPrune() async {
@@ -3324,6 +3441,7 @@ private struct ImportedPrunePlanSafety: Decodable {
     let passed: Bool
     let minimumActiveExpertsPerLayer: Int?
     let trainedTopKByLayer: [String: Int]
+    let trainedTopK: Int?
     let issues: [String]
 
     enum CodingKeys: String, CodingKey {
@@ -3332,6 +3450,8 @@ private struct ImportedPrunePlanSafety: Decodable {
         case minimumActiveExpertsPerLayerSnake = "minimum_active_experts_per_layer"
         case trainedTopKByLayer
         case trainedTopKByLayerSnake = "trained_top_k_by_layer"
+        case trainedTopK
+        case trainedTopKSnake = "trained_top_k"
         case issues
     }
 
@@ -3343,11 +3463,14 @@ private struct ImportedPrunePlanSafety: Decodable {
         trainedTopKByLayer = try c.decodeIfPresent([String: Int].self, forKey: .trainedTopKByLayer)
             ?? c.decodeIfPresent([String: Int].self, forKey: .trainedTopKByLayerSnake)
             ?? [:]
+        trainedTopK = try c.decodeIfPresent(Int.self, forKey: .trainedTopK)
+            ?? c.decodeIfPresent(Int.self, forKey: .trainedTopKSnake)
         issues = try c.decodeIfPresent([String].self, forKey: .issues) ?? []
     }
 
     var maxTrainedTopK: Int? {
-        trainedTopKByLayer.values.max()
+        if let trainedTopK { return trainedTopK }
+        return trainedTopKByLayer.values.max()
     }
 }
 
@@ -3612,6 +3735,40 @@ private struct ImportedEvalIndexSummary: Decodable {
     }
 }
 
+private struct IntentPrunePlanMeta {
+    let schema: String?
+    let scorer: String?
+    let safetyStance: String?
+    let intentsKeep: [String]
+    let suiteName: String?
+    let suiteSHA256: String?
+    let suitePromptCount: Int?
+    let crackPackName: String?
+    let crackPackSHA256: String?
+    let crackPackPromptCount: Int?
+
+    init(from plan: [String: Any]) {
+        schema = plan["schema"] as? String
+        scorer = plan["scorer"] as? String
+        safetyStance = (plan["safety_stance"] as? String) ?? (plan["safetyStance"] as? String)
+        intentsKeep = (plan["intents_keep"] as? [String])
+            ?? (plan["intentsKeep"] as? [String])
+            ?? []
+        let suite = plan["suite"] as? [String: Any]
+        suiteName = suite?["name"] as? String
+        suiteSHA256 = suite?["sha256"] as? String
+        suitePromptCount = (suite?["prompt_count"] as? Int)
+            ?? (suite?["promptCount"] as? Int)
+            ?? (suite?["prompt_count"] as? NSNumber)?.intValue
+        let crack = plan["crack_pack"] as? [String: Any]
+        crackPackName = crack?["name"] as? String
+        crackPackSHA256 = crack?["sha256"] as? String
+        crackPackPromptCount = (crack?["prompt_count"] as? Int)
+            ?? (crack?["promptCount"] as? Int)
+            ?? (crack?["prompt_count"] as? NSNumber)?.intValue
+    }
+}
+
 private struct ImportedPrunePlanSummary {
     private static let minimumReviewedPrunePromptCount = 50
     private static let minimumReviewedPruneMeanTokens: Double = 8
@@ -3629,8 +3786,15 @@ private struct ImportedPrunePlanSummary {
     let comparisonSummary: ImportedComparisonSummary?
     let safetyDescription: String
     let evidencePreview: [String]
+    let intentMeta: IntentPrunePlanMeta?
 
-    init(plan: ImportedPrunePlan, sourceURL: URL, sourceExperts: Int) throws {
+    init(
+        plan: ImportedPrunePlan,
+        sourceURL: URL,
+        sourceExperts: Int,
+        skipSemanticEvidence: Bool = false,
+        intentMeta: IntentPrunePlanMeta? = nil
+    ) throws {
         guard !plan.layers.isEmpty else {
             throw ImportedPrunePlanError.emptyLayers
         }
@@ -3691,8 +3855,10 @@ private struct ImportedPrunePlanSummary {
         ) {
             throw ImportedPrunePlanError.comparisonRejected(issue)
         }
-        if let issue = Self.semanticEvidenceIssue(plan.layers) {
-            throw ImportedPrunePlanError.semanticEvidenceRejected(issue)
+        if !skipSemanticEvidence {
+            if let issue = Self.semanticEvidenceIssue(plan.layers) {
+                throw ImportedPrunePlanError.semanticEvidenceRejected(issue)
+            }
         }
         self.method = plan.method
         self.keepExperts = keepExperts
@@ -3705,7 +3871,22 @@ private struct ImportedPrunePlanSummary {
         self.userForcedDropCount = plan.layers.values.reduce(0) { $0 + $1.userForcedDrop.count }
         self.evidenceCount = plan.layers.values.reduce(0) { $0 + $1.evidence.count }
         self.comparisonSummary = comparison
-        self.safetyDescription = "passed; min active \(minimumActive), trained top-k \(trainedTopK)"
+        self.intentMeta = intentMeta
+        if let intentMeta, intentMeta.schema == "jang-intent-prune-plan-v1" || intentMeta.scorer != nil {
+            var parts = ["passed; min active \(minimumActive), trained top-k \(trainedTopK)"]
+            if let stance = intentMeta.safetyStance, !stance.isEmpty {
+                parts.append("stance \(stance)")
+            }
+            if !intentMeta.intentsKeep.isEmpty {
+                parts.append("intents \(intentMeta.intentsKeep.joined(separator: ","))")
+            }
+            if let crack = intentMeta.crackPackName {
+                parts.append("CRACK \(crack)")
+            }
+            self.safetyDescription = parts.joined(separator: "; ")
+        } else {
+            self.safetyDescription = "passed; min active \(minimumActive), trained top-k \(trainedTopK)"
+        }
         let layerPreviewLines = plan.layers.keys
             .sorted { (Int($0) ?? Int.max, $0) < (Int($1) ?? Int.max, $1) }
             .flatMap { layer -> [String] in

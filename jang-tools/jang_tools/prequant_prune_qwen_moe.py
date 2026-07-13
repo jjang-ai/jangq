@@ -928,12 +928,15 @@ def _reviewed_safety_issue(
     raw_trained = safety.get("trained_top_k_by_layer")
     if raw_trained is None:
         raw_trained = safety.get("trainedTopKByLayer")
-    if not isinstance(raw_trained, dict) or not raw_trained:
-        return "safety block is missing trained top-k evidence"
-    trained_values = [_int_value(value) for value in raw_trained.values()]
-    trained_topk = max((value for value in trained_values if value is not None), default=None)
+    trained_topk = None
+    if isinstance(raw_trained, dict) and raw_trained:
+        trained_values = [_int_value(value) for value in raw_trained.values()]
+        trained_topk = max((value for value in trained_values if value is not None), default=None)
     if trained_topk is None:
-        return "safety block has invalid trained top-k evidence"
+        # jang-intent-prune-plan-v1 uses scalar trained_top_k
+        trained_topk = _int_value(safety.get("trained_top_k") or safety.get("trainedTopK"))
+    if trained_topk is None:
+        return "safety block is missing trained top-k evidence"
     if keep_count < trained_topk:
         return f"plan keeps {keep_count} experts but embedded trained top-k is {trained_topk}"
     if source_topk and trained_topk != source_topk:
@@ -1262,9 +1265,13 @@ def _load_keep_map(
             layer = int(raw_layer)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"{path}: invalid layer key {raw_layer!r}") from exc
-        if not isinstance(layer_data, dict):
-            raise RuntimeError(f"{path}: layer {layer} must be an object")
-        keep = layer_data.get("keep")
+        # Expert Lab: {"keep": [...]}; intent prune v1: flat [expert, ...] keep lists
+        if isinstance(layer_data, list):
+            keep = layer_data
+        elif isinstance(layer_data, dict):
+            keep = layer_data.get("keep")
+        else:
+            raise RuntimeError(f"{path}: layer {layer} must be an object or keep list")
         if not isinstance(keep, list) or not keep:
             raise RuntimeError(f"{path}: layer {layer} must contain a non-empty keep list")
         if not all(isinstance(v, int) for v in keep):
@@ -1281,7 +1288,7 @@ def _load_keep_map(
             )
         keep_by_layer[layer] = np.asarray(unique, dtype=np.int64)
 
-    method = str(data.get("method") or "external_keep_map")
+    method = str(data.get("method") or data.get("scorer") or "external_keep_map")
     assert keep_count is not None
     if require_reviewed_comparison:
         issue = _reviewed_safety_issue(data, keep_count=keep_count, source_topk=source_topk)
