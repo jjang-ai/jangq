@@ -180,8 +180,18 @@ class LagunaAttention(nn.Module):
             # had originally. Using sigmoid drove residual stream blow-up
             # (std 0.29 → 11 over 30 layers → garbage saturation).
             gate = nn.softplus(self.g_proj(x).astype(mx.float32)).astype(out.dtype)
-            out = out.reshape(B, T, self.n_heads, self.head_dim) * gate[..., None]
-            out = out.reshape(B, T, self.n_heads * self.head_dim)
+            if gate.shape[-1] == self.n_heads:
+                # per-head gating (config.gating="per-head"): one gate per head,
+                # broadcast across head_dim.
+                out = out.reshape(B, T, self.n_heads, self.head_dim) * gate[..., None]
+                out = out.reshape(B, T, self.n_heads * self.head_dim)
+            else:
+                # per-element gating (config.gating="per-element", the default and
+                # what Laguna-M.1 ships — see modeling_laguna.py: g_out =
+                # num_heads*head_dim): g_proj emits one gate per (head, head_dim)
+                # channel, so multiply elementwise into the already-flattened
+                # (B, T, n_heads*head_dim) attention output.
+                out = out * gate
 
         return self.o_proj(out)
 

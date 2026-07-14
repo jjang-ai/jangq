@@ -194,8 +194,52 @@ def load(src: str):
         group_size = qcfg.get("group_size", 64)
         bits = qcfg.get("bits", 4)
         scale_keys = {k for k in weights.keys() if k.endswith(".scales")}
+
+        def _module_bits(name: str) -> int:
+            # JANG affine bundles are MIXED-precision: config.json's
+            # top-level quantization.bits is only the DEFAULT, and
+            # per-module entries (e.g. Laguna-M.1-JANG_2L: attention 8-bit,
+            # MoE gate/up/down 6-bit, some routed experts 2/3-bit) override
+            # it. Quantizing every module at the top-level bits leaves
+            # QuantizedLinear.bits wrong for the low-bit modules; model.update
+            # then loads their (narrower) packed tensors and mx.quantized_matmul
+            # dequantizes e.g. 6-bit data as 8-bit ->
+            #   "[dequantize] Shape of scales and biases does not match the
+            #    matrix ... (1,17,768) and scales/biases of shape (1,17,64)
+            #    with group_size=64 and bits=8"
+            # (768 == 4096*6/32 is a 6-bit packed row, not 8-bit's 1024).
+            # Derive the TRUE bit-width from the packed weight vs scales shapes
+            # on disk: scales_last == in_features/group_size and
+            # packed_last == in_features*bits/32, so
+            #   bits = packed_last*32 / (scales_last*group_size).
+            sc = weights.get(f"{name}.scales")
+            w = weights.get(f"{name}.weight")
+            if sc is None or w is None:
+                return bits
+            scales_last = int(sc.shape[-1])
+            packed_last = int(w.shape[-1])
+            if scales_last <= 0:
+                return bits
+            in_features = scales_last * group_size
+            derived = round(packed_last * 32 / in_features)
+            return derived if derived in (2, 3, 4, 5, 6, 8) else bits
+
         def _predicate(name, module):
-            return f"{name}.scales" in scale_keys
+            if f"{name}.scales" not in scale_keys:
+                return False
+            # Only the affine "jang" path is mixed-precision. MXFP4 is uniform
+            # 4-bit and JANGTQ routed experts already went through
+            # hydrate_jangtq above (their affine leftovers are uniform 8-bit),
+            # so keep those on the original uniform predicate to avoid any
+            # behavioural change.
+            if fmt == "jang":
+                return {
+                    "group_size": group_size,
+                    "bits": _module_bits(name),
+                    "mode": "affine",
+                }
+            return True
+
         nn.quantize(model, group_size=group_size, bits=bits, class_predicate=_predicate)
     model.update(tree_unflatten(list(weights.items())))
     from jang_tools.jangrt.inference_mode import ensure_inference_mode
