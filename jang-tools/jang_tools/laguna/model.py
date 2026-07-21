@@ -319,12 +319,19 @@ class LagunaForCausalLM(nn.Module):
     def make_cache(self):
         """Per-layer cache list. Full attention layers get a plain KVCache;
         sliding_attention layers get RotatingKVCache sized to the window.
+
+        keep=0: the HF reference only retains attention-sink tokens when
+        config.swa_attention_sink_enabled is set, and no shipped Laguna
+        config (XS.2 / M.1 / S-2.1) sets it — pure sliding window. The old
+        keep=4 (copied from the gemma pattern) let decode attend the first
+        4 prompt tokens forever, silently diverging from the reference once
+        the sequence passed the 512-token window.
         """
         from mlx_lm.models.cache import KVCache, RotatingKVCache
         caches = []
         for i in range(self.cfg.num_hidden_layers):
             if self.cfg.layer_types[i] == "sliding_attention":
-                caches.append(RotatingKVCache(max_size=self.cfg.sliding_window, keep=4))
+                caches.append(RotatingKVCache(max_size=self.cfg.sliding_window, keep=0))
             else:
                 caches.append(KVCache())
         return caches
@@ -354,17 +361,42 @@ class LagunaForCausalLM(nn.Module):
             # them, decode reuses them.
             caches = self.make_cache()
 
+        # Per-layer-type masks (HF reference: LagunaModel.forward builds
+        # separate create_causal_mask / create_sliding_window_causal_mask
+        # mappings). Feeding ONE full causal mask to every layer — the old
+        # behavior here — is only equivalent for prompts <= sliding_window
+        # (512); past that, SWA layers wrongly attend the whole prefix.
+        # mlx_lm's create_attention_mask(window_size=…) is the same banded
+        # mask the gemma3 port uses; each mask is derived from a cache of
+        # its OWN layer type so offsets line up.
         full_mask = None
+        sliding_mask = None
         if T > 1:
+            lt = self.cfg.layer_types
+            full_idx = next((i for i, t in enumerate(lt) if t == "full_attention"), None)
+            swa_idx = next((i for i, t in enumerate(lt) if t == "sliding_attention"), None)
             try:
                 from mlx_lm.models.base import create_attention_mask
-                full_mask = create_attention_mask(h, caches[0]) if caches[0] is not None else \
-                    mx.triu(mx.full((T, T), -mx.inf, dtype=h.dtype), k=1)
+                if full_idx is not None:
+                    full_mask = create_attention_mask(h, caches[full_idx])
+                if swa_idx is not None:
+                    sliding_mask = create_attention_mask(
+                        h, caches[swa_idx], window_size=self.cfg.sliding_window)
             except Exception:
-                full_mask = mx.triu(mx.full((T, T), -mx.inf, dtype=h.dtype), k=1)
+                causal = mx.triu(mx.full((T, T), -mx.inf, dtype=h.dtype), k=1)
+                full_mask = causal
+                if swa_idx is not None:
+                    # banded causal: j > i (future) or i - j >= window (evicted)
+                    rows = mx.arange(T)[:, None]
+                    cols = mx.arange(T)[None, :]
+                    band = mx.where(
+                        (cols > rows) | ((rows - cols) >= self.cfg.sliding_window),
+                        -mx.inf, 0.0).astype(h.dtype)
+                    sliding_mask = band
 
         for layer, c in zip(self.layers, caches):
-            h = layer(h, mask=full_mask, cache=c)
+            m = full_mask if layer.layer_type == "full_attention" else sliding_mask
+            h = layer(h, mask=m, cache=c)
 
         logits = self.lm_head(self.norm(h))
         # Engine path (cache=…, no caches=) expects bare logits.
