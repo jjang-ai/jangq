@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.31"
+version = "2.5.33"
 description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.31: Gemma 4 QAT JANG_4M/MXFP converters preserve VL/audio sidecars and BF16 media tensors, split stacked SwitchGLU expert keys for runtime loaders, and expose MiMo-V2.5 converter/verifier CLIs. v2.5.30: JANGTQ MPP/NAX auto dispatch is prefill-gated and Kimi/VLM warmup compiles the trained-router prefill shape."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
