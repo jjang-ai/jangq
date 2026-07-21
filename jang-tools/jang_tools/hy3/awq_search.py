@@ -179,8 +179,16 @@ def main(argv=None) -> None:
           f"({(baseline-best)/baseline*100:+.1f}%)", flush=True)
 
     # ── emit scales for every sparse layer ──
+    # Drive off the layers the capture actually produced stats for, not
+    # range(first_dense, NL): hy3 marks dense layers via
+    # first_k_dense_replace but laguna uses mlp_layer_types, and assuming
+    # the hy3 key walked into laguna's dense layer 0 (KeyError, 2026-07-21).
     out: dict[str, np.ndarray] = {}
-    for li in range(first_dense, NL):
+    stat_layers = sorted(
+        int(k.split(".")[2]) for k in stats
+        if k.endswith(f".mlp.input_{best_stat}"))
+    assert stat_layers, f"stats file has no input_{best_stat} keys"
+    for li in stat_layers:
         stat = stats[f"model.layers.{li}.mlp.input_{best_stat}"]
         s = make_scale(stat, best_alpha, args.clip_max)
         out[f"model.layers.{li}.mlp.input_scale"] = s
