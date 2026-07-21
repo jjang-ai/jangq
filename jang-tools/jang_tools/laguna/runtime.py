@@ -40,6 +40,22 @@ def load(src: str):
     cfg = LagunaConfig.from_json(Path(src) / "config.json")
     model = LagunaForCausalLM(cfg)
     fmt = detect_format(src)
+
+    # Wired-limit stamp (GLM-5.1 / Ornith lesson, measured here 2026-07-21):
+    # with the default limit the S-2.1-JANG_4M 68 GB working set gets
+    # evicted under decode and throughput halves (14.0 -> 28.6 tok/s once
+    # wired). Wire bundle size + headroom, capped at 118 GB — the ceiling
+    # proven safe on the 128 GB M5 Max by Ornith-397B (111.6 GB wired).
+    try:
+        idx_p = Path(src) / "model.safetensors.index.json"
+        total = json.loads(idx_p.read_text())["metadata"]["total_size"]
+        gb = 1024 ** 3
+        want = min(int(total * 1.2) + 8 * gb, 118 * gb)
+        mx.set_wired_limit(want)
+        print(f"[laguna] wired_limit={want // gb} GB (bundle "
+              f"{total / gb:.1f} GB)", flush=True)
+    except Exception as exc:
+        print(f"[laguna] wired_limit not set: {exc}", flush=True)
     print(f"[laguna] format={fmt}, layers={cfg.num_hidden_layers}, "
           f"experts={cfg.num_experts}", flush=True)
     if fmt == "bf16":
@@ -85,6 +101,20 @@ def load(src: str):
                           ".mlp.e_score_correction_bias")
         return k
     weights = {_remap(k): v for k, v in weights.items()}
+
+    # 2026-07-21: run the activation stream in bf16, matching the source
+    # (torch_dtype=bfloat16), NOT the fp16 the bundle sidecars are stored
+    # in. Converter output uses fp16 for scales/biases/norms (house
+    # convention), which made every dequant and activation fp16. Laguna's
+    # residual stream grows to ~1200 by L40 on S-2.1; the L46 MoE
+    # intermediate then overflows fp16 (max 65504) -> inf -> NaN logits ->
+    # argmax 0 -> 〈|UNK|〉 spam. Measured on Laguna-S-2.1-JANG_4M; the 2L
+    # bundle merely sat under the ceiling. Same failure class as the
+    # 512-expert bf16 fix and the Ornith bf16 embed cast. Packed quantized
+    # weights are uint32 and untouched; casting scales/biases/norms to
+    # bf16 makes QuantizedLinear/QuantizedEmbedding emit bf16 activations.
+    weights = {k: (v.astype(mx.bfloat16) if v.dtype == mx.float16 else v)
+               for k, v in weights.items()}
 
     # 2026-04-30 expert weight packing for SwitchGLU. HF Laguna source
     # stores experts unpacked as
