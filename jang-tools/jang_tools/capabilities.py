@@ -100,6 +100,17 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # standard KV with a full/sliding-window layer pattern, not MLA or SSM.
     "step3p5":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
     "step3p7":          ("step3p7",     "qwen3",       "step3p5",  True,  "kv"),
+    # poolside Laguna (XS.2 / M.1 / S-2.1) — text-only MoE, hybrid full+SWA
+    # attention with per-layer head counts, sigmoid router + bias, shared
+    # expert, softplus attention gating. Chat template is a GLM-thinking
+    # derivative ("laguna_glm_thinking_v8"): <think> pre-opened on thinking
+    # requests (vendor default ON via default_chat_template_kwargs),
+    # closed `</think>` prefill on no-think — same dual convention as glm5,
+    # so think_in_template=True. Tool calls are byte-compatible with the
+    # glm47 parser (<tool_call>name<arg_key>k</arg_key><arg_value>v…).
+    # Vendor (vLLM) calls both parsers "poolside_v1" — recorded in
+    # jang_config.chat.vendor_parsers, not here.
+    "laguna":           ("laguna",      "deepseek_r1", "glm47",    True,  "kv"),
     # Tencent Hy3-preview (HYV3ForCausalLM) — text-only MoE, 295B/21B active.
     # GQA + qk_norm, sigmoid router with expert_bias (DSV3-style aux-free balancing),
     # 1 shared expert, first_k_dense_replace=1, native MTP layer, 256K context.
