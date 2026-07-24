@@ -24,9 +24,12 @@
    scores, renorm over top-10, routed×2.5 + shared unscaled, fp32 math.
 8. **eos [2, 24]** — 24 is end-of-turn; missing it = chat runs on. The
    template emits its own 〈|EOS|〉 (bos 2): never prepend another.
-9. **Thinking defaults ON** via `default_chat_template_kwargs` — the
-   template's own jinja fallback is OFF; engines that drop the kwargs
-   silently no-think. Prompt tails: `<assistant><think>` / `<assistant></think>`.
+9. **Thinking defaults ON** — current Poolside revision `e80da38` defaults
+   `enable_thinking` to true in both `default_chat_template_kwargs` and the
+   template itself. Older source revisions defaulted the template Off. The
+   converter derives the exact copied template fallback instead of assuming
+   either revision. Prompt tails: `<assistant><think>` /
+   `<assistant></think>`.
 10. **Per-module quantization bits** from `config.json[quantization]` —
    a single top-level width mis-dequantizes the 2/3/4-bit experts.
 
@@ -73,10 +76,13 @@ vision/audio/video tensors — not just the card claim).
 ## Chat protocol (GLM-style think tags)
 
 - Prompt ends `<assistant><think>` (thinking) or `<assistant></think>` (no-think).
-- **Vendor serving default is thinking ON** via
-  `generation_config.default_chat_template_kwargs.enable_thinking=true`;
-  the template's own jinja fallback is `false`. Engines that drop the kwargs
-  silently run no-think. Bundles stamp this in `jang_config.chat`.
+- **Vendor serving default is thinking ON**. Current Poolside revision
+  `e80da38` has both
+  `generation_config.default_chat_template_kwargs.enable_thinking=true` and
+  `enable_thinking | default(true)` in `chat_template.jinja`, plus
+  `preserve_thinking | default(false)`. Older source revisions used a
+  template fallback of `false`; the converter now mirrors the exact copied
+  template in `jang_config.chat` when generation kwargs are absent.
 - Sampling (vendor, verbatim): temp 1.0, top_p 1.0, min_p 0.0, top_k 20.
   No loop audit has been run on the quantized tail yet — if the 2-bit tail
   loops (cf. hy3 2026-07-10 audit), floor top_p/min_p THEN, with data.

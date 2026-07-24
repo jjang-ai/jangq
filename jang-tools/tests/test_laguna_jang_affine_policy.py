@@ -100,9 +100,8 @@ def test_laguna_router_and_norms_pass_through_fp16():
 def test_laguna_chat_block_passes_vendor_generation_params_through():
     """S-2.1 ships temp 1.0 / top_p 1.0 / min_p 0.0 / top_k 20 and poolside_v1
     parsers. The bundle must carry them VERBATIM (no invented floors) plus
-    default_chat_template_kwargs — the vendor serving default is
-    enable_thinking=true while the template's own fallback is false, so a
-    consumer that drops the kwargs silently runs no-think."""
+    default_chat_template_kwargs. An explicit generation-config default
+    remains authoritative over either historical template fallback."""
     from jang_tools.convert_laguna_jang import build_chat_block
 
     gen = {
@@ -136,16 +135,39 @@ def test_laguna_chat_block_passes_vendor_generation_params_through():
         "reasoning": "poolside_v1", "tool": "poolside_v1"}
 
 
-def test_laguna_chat_block_defaults_thinking_off_without_template_kwargs():
-    """Without default_chat_template_kwargs the template fallback (false)
-    governs — default_enabled must not be invented as true."""
+def test_laguna_chat_block_derives_current_template_default_without_kwargs():
+    """Absent generation kwargs, mirror the effective copied template."""
     from jang_tools.convert_laguna_jang import build_chat_block
 
-    chat = build_chat_block({"temperature": 0.7})
+    current = (
+        "{%- set enable_thinking = enable_thinking | default(true) -%}\n"
+        "{%- set preserve_thinking = preserve_thinking | default(false) -%}"
+    )
+    chat = build_chat_block({"temperature": 0.7}, template_text=current)
 
-    assert chat["reasoning"]["default_enabled"] is False
+    assert chat["reasoning"]["default_enabled"] is True
+    assert chat["reasoning"]["default_mode"] == "think"
     assert chat["sampling_defaults"] == {"temperature": 0.7}
     assert chat["template_kwargs_defaults"] == {}
+
+
+def test_laguna_chat_block_keeps_old_template_default_and_explicit_override():
+    """Older template fallback stays Off; an explicit generation value wins."""
+    from jang_tools.convert_laguna_jang import build_chat_block
+
+    old = "{%- set enable_thinking = enable_thinking | default(false) -%}"
+    old_chat = build_chat_block({}, template_text=old)
+    explicit_off = build_chat_block(
+        {"default_chat_template_kwargs": {"enable_thinking": False}},
+        template_text=old.replace("default(false)", "default(true)"),
+    )
+
+    assert old_chat["reasoning"]["default_enabled"] is False
+    assert old_chat["reasoning"]["default_mode"] == "no_think"
+    assert explicit_off["reasoning"]["default_enabled"] is False
+    assert explicit_off["template_kwargs_defaults"] == {
+        "enable_thinking": False,
+    }
 
 
 def test_laguna_3l_and_4m_only_move_ffn_bits():

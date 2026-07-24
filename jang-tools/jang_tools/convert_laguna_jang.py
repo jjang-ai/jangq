@@ -142,18 +142,42 @@ def profile_policy(profile: str) -> LagunaJangPolicy:
     )
 
 
-def build_chat_block(gen_cfg: dict) -> dict:
+def _template_default_enable_thinking(template_text: str | None) -> bool:
+    """Read Laguna's literal Jinja fallback without inventing a policy."""
+    compact = "".join((template_text or "").split())
+    true_marker = "enable_thinking=enable_thinking|default(true)"
+    false_marker = "enable_thinking=enable_thinking|default(false)"
+    if true_marker in compact:
+        return True
+    if false_marker in compact:
+        return False
+    return False
+
+
+def build_chat_block(
+    gen_cfg: dict,
+    *,
+    template_text: str | None = None,
+) -> dict:
     """jang_config['chat'] from the vendor generation_config.json — verbatim
-    passthrough, nothing invented. See main() for the enable_thinking trap
-    (vendor default true via default_chat_template_kwargs; template fallback
-    false)."""
+    passthrough, nothing invented.
+
+    An explicit ``default_chat_template_kwargs.enable_thinking`` remains
+    authoritative. If it is absent, mirror the effective template's literal
+    ``default(true|false)`` fallback. Poolside changed S-2.1 from false to true
+    in revision e80da38, so assuming either value independently of the copied
+    template makes ``jang_config`` disagree with the actual prompt.
+    """
     tpl_kwargs = dict(gen_cfg.get("default_chat_template_kwargs") or {})
     sampling_defaults = {
         k: gen_cfg[k]
         for k in ("temperature", "top_p", "top_k", "min_p")
         if k in gen_cfg
     }
-    thinking_on = bool(tpl_kwargs.get("enable_thinking", False))
+    if "enable_thinking" in tpl_kwargs:
+        thinking_on = bool(tpl_kwargs["enable_thinking"])
+    else:
+        thinking_on = _template_default_enable_thinking(template_text)
     return {
         "reasoning": {
             "supported": True,
@@ -523,9 +547,9 @@ def main(argv=None) -> None:
     # ── vendor generation params: pass through, never invent ──
     # S-2.1 ships temp 1.0 / top_p 1.0 / min_p 0.0 / top_k 20, parsers
     # "poolside_v1", and default_chat_template_kwargs.enable_thinking=true.
-    # The chat template's OWN fallback is enable_thinking=false, so a
-    # consumer that ignores default_chat_template_kwargs silently runs
-    # no-think — stamp the kwargs into jang_config so engines see them.
+    # Current Poolside revision e80da38 also defaults the template itself On;
+    # older revisions defaulted it Off. Derive the fallback from the exact
+    # copied template so jang_config and the prompt cannot disagree.
     gen_cfg: dict = {}
     gen_p = SRC / "generation_config.json"
     if gen_p.exists():
@@ -533,7 +557,16 @@ def main(argv=None) -> None:
     else:
         print("  WARNING: source has no generation_config.json — chat block "
               "will carry no vendor sampling defaults", flush=True)
-    chat_block = build_chat_block(gen_cfg)
+    source_template_path = SRC / "chat_template.jinja"
+    source_template_text = (
+        source_template_path.read_text(encoding="utf-8")
+        if source_template_path.exists()
+        else None
+    )
+    chat_block = build_chat_block(
+        gen_cfg,
+        template_text=source_template_text,
+    )
     # EOS consistency: config.json vs generation_config.json. The template
     # emits 〈|EOS|〉 (id 2) as BOS and stops on [2, 24]; a mismatch here is
     # how bundles end up generating past end-of-turn.
@@ -688,8 +721,21 @@ def main(argv=None) -> None:
         msgs, tokenize=False, add_generation_prompt=True, enable_thinking=True)
     nothink = tok.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    default_render = tok.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True)
     for label, rendered, tail in (("think", think, "<assistant><think>"),
-                                  ("no-think", nothink, "<assistant></think>")):
+                                  ("no-think", nothink, "<assistant></think>"),
+                                  (
+                                      "default",
+                                      default_render,
+                                      (
+                                          "<assistant><think>"
+                                          if chat_block["reasoning"][
+                                              "default_enabled"
+                                          ]
+                                          else "<assistant></think>"
+                                      ),
+                                  )):
         if "<user>ping</user>" not in rendered or not rendered.endswith(tail):
             raise SystemExit(
                 f"chat template round-trip FAILED ({label}): got {rendered!r}"
