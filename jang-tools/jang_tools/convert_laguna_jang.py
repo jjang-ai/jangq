@@ -28,6 +28,8 @@ spec: tests/test_laguna_jang_affine_policy.py):
       (byte-for-byte the policy of the shipped Laguna-M.1-JANG_2L bundle)
   JANG_3L: routed 3/3/4, rest as 2L
   JANG_4M: routed 4/4/4, shared/dense 8, rest as 2L
+  JANG_6M: routed 6/6/6, shared/dense 8, rest as 4M
+      (matches the shipped Laguna-XS-2.1-JANG_6M role map)
 
 AWQ: optional (--awq <scales.safetensors>, hy3 key convention
 `model.layers.{L}.mlp.input_scale`). Laguna-M.1-JANG_2L shipped no-AWQ and
@@ -105,6 +107,18 @@ _PROFILES = {
     "JANG_4M": dict(
         group_size=64,
         routed_bits={"gate_proj": 4, "up_proj": 4, "down_proj": 4},
+        attention_bits=8,
+        shared_expert_bits=8,
+        dense_ffn_bits=8,
+        embed_bits=6,
+        lm_head_bits=8,
+    ),
+    # Near-lossless family profile. This is the exact role map carried by
+    # Laguna-XS-2.1-JANG_6M: routed experts at 6-bit, attention/shared/dense
+    # at 8-bit, embeddings at 6-bit, and the untied head at 8-bit.
+    "JANG_6M": dict(
+        group_size=64,
+        routed_bits={"gate_proj": 6, "up_proj": 6, "down_proj": 6},
         attention_bits=8,
         shared_expert_bits=8,
         dense_ffn_bits=8,

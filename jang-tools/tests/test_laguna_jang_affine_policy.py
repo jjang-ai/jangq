@@ -4,7 +4,8 @@ The JANG_2L policy here is byte-for-byte the map of the shipped
 Laguna-M.1-JANG_2L bundle (routed 2/2/3, attention+g_proj 8, shared/dense/
 embed 6, lm_head 8, gs 64, norms+router fp16) — the recipe already proven
 coherent on this family. S-2.1 (117.5B) reuses it unchanged; profiles only
-move the routed-expert bits.
+move the routed-expert bits and the shared/dense protection tier. The 6M
+contract matches the shipped Laguna-XS-2.1-JANG_6M role map.
 """
 
 from __future__ import annotations
@@ -190,3 +191,38 @@ def test_laguna_3l_and_4m_only_move_ffn_bits():
     assert p4.attention_bits == 8
     assert p4.shared_expert_bits == 8
     assert p4.dense_ffn_bits == 8
+
+
+def test_laguna_6m_matches_shipped_xs21_role_map():
+    """The current converter must be able to reproduce the existing XS 6M
+    profile instead of accepting only the lower-bit family profiles."""
+    from jang_tools.convert_laguna_jang import classify_tensor, profile_policy
+
+    p6 = profile_policy("JANG_6M")
+
+    assert p6.group_size == 64
+    assert p6.routed_bits == {
+        "gate_proj": 6,
+        "up_proj": 6,
+        "down_proj": 6,
+    }
+    assert p6.attention_bits == 8
+    assert p6.shared_expert_bits == 8
+    assert p6.dense_ffn_bits == 8
+    assert p6.embed_bits == 6
+    assert p6.lm_head_bits == 8
+
+    expected = {
+        "model.layers.1.mlp.experts.7.gate_proj.weight": (6, "affine"),
+        "model.layers.1.mlp.experts.7.up_proj.weight": (6, "affine"),
+        "model.layers.1.mlp.experts.7.down_proj.weight": (6, "affine"),
+        "model.layers.1.mlp.shared_expert.gate_proj.weight": (8, "affine"),
+        "model.layers.0.mlp.gate_proj.weight": (8, "affine"),
+        "model.layers.1.self_attn.g_proj.weight": (8, "affine"),
+        "model.embed_tokens.weight": (6, "affine"),
+        "lm_head.weight": (8, "affine"),
+    }
+    assert {
+        name: classify_tensor(name, p6)
+        for name in expected
+    } == expected

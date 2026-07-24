@@ -56,6 +56,11 @@ Source pinned: `~/models/poolside/Laguna-S-2.1/.jang_source_pin.json`
 (sha a50e85e). Winners: absmean α=0.25 at BOTH 2-bit (+2.4%) and 4-bit
 (+2.9%), 0 inert channels.
 
+2026-07-24 converter reproducibility addendum: the family converter now also
+accepts `JANG_6M`, using the role map present in the existing
+Laguna-XS-2.1-JANG_6M bundle (routed 6-bit, attention/shared/dense/head 8-bit,
+embed 6-bit, group size 64).
+
 
 Source: `poolside/Laguna-S-2.1` → `~/models/poolside/Laguna-S-2.1` (BF16, 46 shards, ~235 GB).
 118B total / ~8B active. Text-only (verified from the tensor index: zero
@@ -214,6 +219,8 @@ replacing them with canonical paths.
 
 Profiles: 2L = routed 2/2/3, attn+g_proj 8, shared/dense/embed 6, lm_head 8,
 gs 64 (exact shipped M.1 recipe). 4M = routed 4/4/4, shared/dense 8.
+6M = routed 6/6/6, shared/dense 8, embed 6, lm_head 8 (the role map
+shipped by Laguna-XS-2.1-JANG_6M).
 bf16 source (235 GB) cannot fit in 128 GB RAM for a full-precision sanity
 run — the port is proven on M.1/XS.2 + the tiny-weight tests above; the 2L
 bundle no-cache greedy is the runtime gate.
