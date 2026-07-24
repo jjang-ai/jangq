@@ -51,6 +51,16 @@ def load(src: str):
         total = json.loads(idx_p.read_text())["metadata"]["total_size"]
         gb = 1024 ** 3
         want = min(int(total * 1.2) + 8 * gb, 118 * gb)
+        # Metal rejects limits above the device max working set (the 96 GB
+        # S-2.1-JANG_6M hit this: want=118 GB > max -> exception -> NO wire
+        # at all -> 4.8 tok/s). Clamp to the device ceiling instead.
+        try:
+            dev_max = int(mx.metal.device_info().get(
+                "max_recommended_working_set_size", 0))
+        except Exception:
+            dev_max = 0
+        if dev_max:
+            want = min(want, dev_max)
         mx.set_wired_limit(want)
         print(f"[laguna] wired_limit={want // gb} GB (bundle "
               f"{total / gb:.1f} GB)", flush=True)
