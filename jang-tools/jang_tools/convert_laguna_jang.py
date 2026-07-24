@@ -111,6 +111,15 @@ _PROFILES = {
         embed_bits=6,
         lm_head_bits=8,
     ),
+    "JANG_6M": dict(
+        group_size=64,
+        routed_bits={"gate_proj": 6, "up_proj": 6, "down_proj": 6},
+        attention_bits=8,
+        shared_expert_bits=8,
+        dense_ffn_bits=8,
+        embed_bits=6,
+        lm_head_bits=8,
+    ),
 }
 
 
@@ -627,14 +636,27 @@ def main(argv=None) -> None:
         if (SRC / fn).exists():
             shutil.copy2(SRC / fn, OUT / fn)
 
-    # inline chat_template into tokenizer_config when absent there
+    # Inline the REAL chat template into tokenizer_config. poolside ships
+    # tokenizer_config.chat_template = "{% include 'chat_template.jinja' %}"
+    # — a 35-char multi-file include stub, NOT a template. Only the newest
+    # transformers resolve that include against the model dir; every other
+    # consumer (vmlx among them) renders a broken/fallback template where
+    # enable_thinking never reaches the real jinja, which is exactly the
+    # "cannot enable Laguna reasoning" bug (2026-07-22). The shipped
+    # Laguna-M.1 bundle inlines the full template — that is the house
+    # convention. Treat an include-stub (or anything template-free) as
+    # absent and inline the .jinja content.
     tok_cfg_p = OUT / "tokenizer_config.json"
     tpl_p = OUT / "chat_template.jinja"
     if tok_cfg_p.exists() and tpl_p.exists():
         tc = json.loads(tok_cfg_p.read_text())
-        if not tc.get("chat_template"):
+        cur = tc.get("chat_template") or ""
+        if not cur or "{% include" in cur or "{%- include" in cur:
             tc["chat_template"] = tpl_p.read_text(encoding="utf-8")
             tok_cfg_p.write_text(json.dumps(tc, indent=2, ensure_ascii=False))
+            print("  chat_template: inlined full .jinja into tokenizer_config "
+                  f"(was {len(cur)} chars{' include-stub' if cur else ''})",
+                  flush=True)
 
     # ── chat-template round-trip gate ──
     # Structural presence is not enough (feedback_structural_verification_
@@ -647,6 +669,20 @@ def main(argv=None) -> None:
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(str(OUT), trust_remote_code=True)
+    # The EFFECTIVE template (what tok will render) must be the real thing,
+    # not the include stub — and it must actually read enable_thinking.
+    # Environments differ on include resolution; gate on the tokenizer's
+    # attribute so this fails HERE, not in a consumer.
+    eff_tpl = getattr(tok, "chat_template", None) or ""
+    if "{% include" in eff_tpl or "{%- include" in eff_tpl:
+        raise SystemExit(
+            "tokenizer.chat_template is still the include stub — the inline "
+            "step failed; consumers without model-dir include resolution "
+            "will render without the think protocol")
+    if "enable_thinking" not in eff_tpl:
+        raise SystemExit(
+            "effective chat template does not read enable_thinking — "
+            "reasoning cannot be toggled; refusing to ship")
     msgs = [{"role": "user", "content": "ping"}]
     think = tok.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True, enable_thinking=True)

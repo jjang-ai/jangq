@@ -163,3 +163,10 @@ def test_laguna_3l_and_4m_only_move_ffn_bits():
     assert p4.attention_bits == 8
     assert p4.shared_expert_bits == 8
     assert p4.dense_ffn_bits == 8
+
+    p6 = profile_policy("JANG_6M")
+    assert p6.group_size == 64
+    assert p6.routed_bits == {"gate_proj": 6, "up_proj": 6, "down_proj": 6}
+    assert p6.attention_bits == 8
+    assert p6.shared_expert_bits == 8
+    assert p6.dense_ffn_bits == 8
