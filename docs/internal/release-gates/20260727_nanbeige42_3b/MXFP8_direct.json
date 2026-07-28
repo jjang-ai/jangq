@@ -1,0 +1,73 @@
+{
+  "bundle": "MXFP8",
+  "thinking": false,
+  "cache_slots": 44,
+  "prompt_tokens_fed_total": 235,
+  "peak_gb": 4.48,
+  "turns": [
+    {
+      "turn": 1,
+      "label": "t1_factual",
+      "user": "My name is Eric and I'm building a quantization toolkit called JANG. In one short paragraph, what is the capital of Japan and why did it move there?",
+      "prompt_delta_tokens": 59,
+      "gen_tokens": 61,
+      "finish_reason": "stop",
+      "decode_tok_s": 40.86,
+      "cache_offsets_distinct": [
+        120
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Eric, the capital of Japan is **Tokyo**. Japan moved its capital to Tokyo in 1867, consolidating national government, administration, and economic infrastructure away from Kyoto—the previous imperial capital—to create a more centralized, modern, and strategically positioned political and economic center for national development.",
+      "raw": "Eric, the capital of Japan is **Tokyo**. Japan moved its capital to Tokyo in 1867, consolidating national government, administration, and economic infrastructure away from Kyoto—the previous imperial capital—to create a more centralized, modern, and strategically positioned political and economic center for national development."
+    },
+    {
+      "turn": 2,
+      "label": "t2_arith_recall",
+      "user": "What is 84 * 3 / 2? Show the two steps. Also, what did I say my toolkit is called?",
+      "prompt_delta_tokens": 42,
+      "gen_tokens": 131,
+      "finish_reason": "stop",
+      "decode_tok_s": 25.53,
+      "cache_offsets_distinct": [
+        295
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Here are your two requests:\n\n### What is 84 * 3 / 2? Show the two steps.\n\n**Step 1: Multiply 84 by 3**\n84 × 3 = 252\n\n**Step 2: Divide the result by 2**\n252 / 2 = 126\n\n**Answer:** 126\n\n---\n\n### What did I say my toolkit is called?\nYou mentioned earlier that you are building a quantization toolkit called **JANG**. So, the name of your toolkit is **JANG**.",
+      "raw": "Here are your two requests:\n\n### What is 84 * 3 / 2? Show the two steps.\n\n**Step 1: Multiply 84 by 3**\n84 × 3 = 252\n\n**Step 2: Divide the result by 2**\n252 / 2 = 126\n\n**Answer:** 126\n\n---\n\n### What did I say my toolkit is called?\nYou mentioned earlier that you are building a quantization toolkit called **JANG**. So, the name of your toolkit is **JANG**."
+    },
+    {
+      "turn": 3,
+      "label": "t3_long_instruction",
+      "user": "Write a 4-bullet release checklist for shipping a quantized model bundle. Each bullet must be one sentence. Then, on a final line, restate my name.",
+      "prompt_delta_tokens": 48,
+      "gen_tokens": 121,
+      "finish_reason": "stop",
+      "decode_tok_s": 21.17,
+      "cache_offsets_distinct": [
+        466
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Here is a 4-bullet release checklist for shipping a quantized model bundle, followed by your name:\n\n* Verify that all quantization parameters (e.g., bit depth, scaling factors) are correctly applied and validated against accuracy benchmarks.\n* Ensure the model bundle is packaged with all required metadata, configuration files, and quantization artifacts in a versioned directory.\n* Run final integration tests to confirm the quantized bundle loads correctly, executes without errors, and meets performance targets.\n* Generate and attach the release manifest documenting the bundle version, quantization details, and deployment prerequisites.\n\nEric",
+      "raw": "Here is a 4-bullet release checklist for shipping a quantized model bundle, followed by your name:\n\n* Verify that all quantization parameters (e.g., bit depth, scaling factors) are correctly applied and validated against accuracy benchmarks.\n* Ensure the model bundle is packaged with all required metadata, configuration files, and quantization artifacts in a versioned directory.\n* Run final integration tests to confirm the quantized bundle loads correctly, executes without errors, and meets performance targets.\n* Generate and attach the release manifest documenting the bundle version, quantization details, and deployment prerequisites.\n\nEric"
+    },
+    {
+      "turn": 4,
+      "label": "t4_code_structured",
+      "user": "Write a Python function `kv_bytes(tokens, layers, loops, kv_heads, head_dim, dtype_bytes=2)` returning KV cache bytes for a looped transformer, with a docstring and one doctest. Then output a JSON object {\"name\": <my name>, \"toolkit\": <my toolkit>} on the last line.",
+      "prompt_delta_tokens": 86,
+      "gen_tokens": 304,
+      "finish_reason": "stop",
+      "decode_tok_s": 23.94,
+      "cache_offsets_distinct": [
+        858
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Here is the Python function with a docstring and one doctest, followed by the requested JSON object:\n\n```python\ndef kv_bytes(tokens, layers, loops, kv_heads, head_dim, dtype_bytes=2):\n    \"\"\"\n    Calculate the KV cache bytes for a looped transformer.\n    \n    Args:\n        tokens (int): Number of tokens processed.\n        layers (int): Number of transformer layers.\n        loops (int): Number of looping iterations over layers.\n        kv_heads (int): Number of key-value heads in the attention mechanism.\n        head_dim (int): Dimension of each head.\n        dtype_bytes (int): Number of bytes per data element (default 2 for float16).\n        \n    Returns:\n        int: Total size of the KV cache in bytes.\n        \n    Doctest:\n    >>> kv_bytes(128, 4, 3, 8, 128, dtype_bytes=2)\n    122880\n    \"\"\"\n    # Total KV cache bytes = tokens * loops * layers * kv_heads * head_dim * dtype_bytes\n    total_bytes = tokens * loops * layers * kv_heads * head_dim * dtype_bytes\n    return total_bytes\n```\n\n{\"name\": \"Eric\", \"toolkit\": \"JANG\"}",
+      "raw": "Here is the Python function with a docstring and one doctest, followed by the requested JSON object:\n\n```python\ndef kv_bytes(tokens, layers, loops, kv_heads, head_dim, dtype_bytes=2):\n    \"\"\"\n    Calculate the KV cache bytes for a looped transformer.\n    \n    Args:\n        tokens (int): Number of tokens processed.\n        layers (int): Number of transformer layers.\n        loops (int): Number of looping iterations over layers.\n        kv_heads (int): Number of key-value heads in the attention mechanism.\n        head_dim (int): Dimension of each head.\n        dtype_bytes (int): Number of bytes per data element (default 2 for float16).\n        \n    Returns:\n        int: Total size of the KV cache in bytes.\n        \n    Doctest:\n    >>> kv_bytes(128, 4, 3, 8, 128, dtype_bytes=2)\n    122880\n    \"\"\"\n    # Total KV cache bytes = tokens * loops * layers * kv_heads * head_dim * dtype_bytes\n    total_bytes = tokens * loops * layers * kv_heads * head_dim * dtype_bytes\n    return total_bytes\n```\n\n{\"name\": \"Eric\", \"toolkit\": \"JANG\"}"
+    }
+  ]
+}

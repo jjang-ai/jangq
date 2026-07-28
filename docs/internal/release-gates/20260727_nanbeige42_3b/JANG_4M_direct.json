@@ -1,0 +1,73 @@
+{
+  "bundle": "JANG_4M",
+  "thinking": false,
+  "cache_slots": 44,
+  "prompt_tokens_fed_total": 235,
+  "peak_gb": 3.2,
+  "turns": [
+    {
+      "turn": 1,
+      "label": "t1_factual",
+      "user": "My name is Eric and I'm building a quantization toolkit called JANG. In one short paragraph, what is the capital of Japan and why did it move there?",
+      "prompt_delta_tokens": 59,
+      "gen_tokens": 147,
+      "finish_reason": "stop",
+      "decode_tok_s": 46.95,
+      "cache_offsets_distinct": [
+        206
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Eric, the capital of Japan is **Tokyo**. It became the capital in the late 19th century (specifically after the Meiji Restoration in 1868) because of strategic and political modernization efforts: the new imperial government sought to centralize power away from Kyoto (the previous capital) to foster rapid industrial, administrative, and international reforms. Tokyo’s location on the Tokyo Bay, with its connectivity to other prefectures and global trade routes, made it an ideal hub for consolidating governance, economic development, and national identity during Japan’s transformation into a modern state. This relocation was part of broader efforts to strengthen central authority and align Japan with Western practices, laying groundwork for its rise as a global power.",
+      "raw": "Eric, the capital of Japan is **Tokyo**. It became the capital in the late 19th century (specifically after the Meiji Restoration in 1868) because of strategic and political modernization efforts: the new imperial government sought to centralize power away from Kyoto (the previous capital) to foster rapid industrial, administrative, and international reforms. Tokyo’s location on the Tokyo Bay, with its connectivity to other prefectures and global trade routes, made it an ideal hub for consolidating governance, economic development, and national identity during Japan’s transformation into a modern state. This relocation was part of broader efforts to strengthen central authority and align Japan with Western practices, laying groundwork for its rise as a global power."
+    },
+    {
+      "turn": 2,
+      "label": "t2_arith_recall",
+      "user": "What is 84 * 3 / 2? Show the two steps. Also, what did I say my toolkit is called?",
+      "prompt_delta_tokens": 42,
+      "gen_tokens": 135,
+      "finish_reason": "stop",
+      "decode_tok_s": 47.02,
+      "cache_offsets_distinct": [
+        385
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Here is the breakdown of your two questions:\n\n**1. What is 84 * 3 / 2? (Showing two steps)**\n*   **Step 1: Multiply 84 by 3.**\n    84 × 3 = 252\n*   **Step 2: Divide the result by 2.**\n    252 ÷ 2 = 126\n\nSo, **84 * 3 / 2 = 126**.\n\n**2. What did you say your toolkit is called?**\nYou mentioned earlier that your quantization toolkit is called **JANG**.",
+      "raw": "Here is the breakdown of your two questions:\n\n**1. What is 84 * 3 / 2? (Showing two steps)**\n*   **Step 1: Multiply 84 by 3.**\n    84 × 3 = 252\n*   **Step 2: Divide the result by 2.**\n    252 ÷ 2 = 126\n\nSo, **84 * 3 / 2 = 126**.\n\n**2. What did you say your toolkit is called?**\nYou mentioned earlier that your quantization toolkit is called **JANG**."
+    },
+    {
+      "turn": 3,
+      "label": "t3_long_instruction",
+      "user": "Write a 4-bullet release checklist for shipping a quantized model bundle. Each bullet must be one sentence. Then, on a final line, restate my name.",
+      "prompt_delta_tokens": 48,
+      "gen_tokens": 146,
+      "finish_reason": "stop",
+      "decode_tok_s": 43.42,
+      "cache_offsets_distinct": [
+        581
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "Here is a 4-bullet release checklist for shipping a quantized model bundle:\n\n*   **Validate Quantization Accuracy:** Ensure the quantized model bundle maintains target precision metrics and passes all required accuracy benchmarks against the original model.\n*   **Package and Structure Bundle:** Organize the quantized weights, metadata, and configuration files into the agreed bundle structure, verifying all files are complete and uncorrupted.\n*   **Test Integration and Compatibility:** Run end-to-end integration tests to confirm the quantized bundle works seamlessly within target environments and hardware constraints.\n*   **Generate Release Artifacts:** Create and attach version-controlled release documentation, checksums, and license files for traceability and compliance.\n\n**Eric**",
+      "raw": "Here is a 4-bullet release checklist for shipping a quantized model bundle:\n\n*   **Validate Quantization Accuracy:** Ensure the quantized model bundle maintains target precision metrics and passes all required accuracy benchmarks against the original model.\n*   **Package and Structure Bundle:** Organize the quantized weights, metadata, and configuration files into the agreed bundle structure, verifying all files are complete and uncorrupted.\n*   **Test Integration and Compatibility:** Run end-to-end integration tests to confirm the quantized bundle works seamlessly within target environments and hardware constraints.\n*   **Generate Release Artifacts:** Create and attach version-controlled release documentation, checksums, and license files for traceability and compliance.\n\n**Eric**"
+    },
+    {
+      "turn": 4,
+      "label": "t4_code_structured",
+      "user": "Write a Python function `kv_bytes(tokens, layers, loops, kv_heads, head_dim, dtype_bytes=2)` returning KV cache bytes for a looped transformer, with a docstring and one doctest. Then output a JSON object {\"name\": <my name>, \"toolkit\": <my toolkit>} on the last line.",
+      "prompt_delta_tokens": 86,
+      "gen_tokens": 370,
+      "finish_reason": "stop",
+      "decode_tok_s": 46.16,
+      "cache_offsets_distinct": [
+        1039
+      ],
+      "cache_slots": 44,
+      "reasoning": null,
+      "visible": "```python\ndef kv_bytes(tokens, layers, loops, kv_heads, head_dim, dtype_bytes=2):\n    \"\"\"\n    Calculate KV cache byte size for a looped transformer.\n\n    This function estimates the memory footprint of the Key-Value (KV) cache\n    bytes required for a looped transformer architecture. It computes the\n    total size based on the number of tokens, layers, loop iterations, KV heads,\n    and the per-head dimension, scaling by the data type byte size (default 2\n    for float16).\n\n    :param tokens: int - Number of tokens in the sequence.\n    :param layers: int - Number of transformer layers.\n    :param loops: int - Number of loop iterations over the sequence.\n    :param kv_heads: int - Number of key-value heads per layer.\n    :param head_dim: int - Dimension of each head.\n    :param dtype_bytes: int - Number of bytes per data type element (default 2).\n    :return: int - Total KV cache byte size.\n\n    >>> kv_bytes(4, 2, 3, 8, 64, dtype_bytes=2)\n    1536\n    \"\"\"\n    # KV cache size per layer per loop = tokens * kv_heads * head_dim * dtype_bytes * 2 (for Key and Value)\n    per_layer_loop = tokens * kv_heads * head_dim * dtype_bytes * 2\n    total_bytes = per_layer_loop * layers * loops\n    return total_bytes\n```\n\n{\"name\": \"Eric\", \"toolkit\": \"JANG\"}",
+      "raw": "```python\ndef kv_bytes(tokens, layers, loops, kv_heads, head_dim, dtype_bytes=2):\n    \"\"\"\n    Calculate KV cache byte size for a looped transformer.\n\n    This function estimates the memory footprint of the Key-Value (KV) cache\n    bytes required for a looped transformer architecture. It computes the\n    total size based on the number of tokens, layers, loop iterations, KV heads,\n    and the per-head dimension, scaling by the data type byte size (default 2\n    for float16).\n\n    :param tokens: int - Number of tokens in the sequence.\n    :param layers: int - Number of transformer layers.\n    :param loops: int - Number of loop iterations over the sequence.\n    :param kv_heads: int - Number of key-value heads per layer.\n    :param head_dim: int - Dimension of each head.\n    :param dtype_bytes: int - Number of bytes per data type element (default 2).\n    :return: int - Total KV cache byte size.\n\n    >>> kv_bytes(4, 2, 3, 8, 64, dtype_bytes=2)\n    1536\n    \"\"\"\n    # KV cache size per layer per loop = tokens * kv_heads * head_dim * dtype_bytes * 2 (for Key and Value)\n    per_layer_loop = tokens * kv_heads * head_dim * dtype_bytes * 2\n    total_bytes = per_layer_loop * layers * loops\n    return total_bytes\n```\n\n{\"name\": \"Eric\", \"toolkit\": \"JANG\"}"
+    }
+  ]
+}
