@@ -147,7 +147,8 @@ def test_laguna_chat_block_derives_current_template_default_without_kwargs():
 
     assert chat["reasoning"]["default_enabled"] is True
     assert chat["reasoning"]["default_mode"] == "think"
-    assert chat["sampling_defaults"] == {"temperature": 0.7}
+    # top_k rides in from the card fallback; the vendor declared no value.
+    assert chat["sampling_defaults"] == {"temperature": 0.7, "top_k": 20}
     assert chat["template_kwargs_defaults"] == {}
 
 
@@ -168,6 +169,32 @@ def test_laguna_chat_block_keeps_old_template_default_and_explicit_override():
     assert explicit_off["template_kwargs_defaults"] == {
         "enable_thinking": False,
     }
+
+
+def test_laguna_chat_block_fills_card_documented_top_k_when_vendor_omits_it():
+    """XS-2.1's generation_config.json has no top_k, but its card states all
+    XS-2.1 benchmarking ran at temperature=1.0, top_k=20, top_p=1. Shipping
+    without it makes runtimes sample the full vocab unfiltered at temp 1.0.
+    An explicit vendor value must still win over the card fallback."""
+    from jang_tools.convert_laguna_jang import build_chat_block
+
+    xs_gen = {  # verbatim poolside/Laguna-XS-2.1 sampling keys
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "default_chat_template_kwargs": {"enable_thinking": True},
+    }
+    chat = build_chat_block(xs_gen)
+
+    assert chat["sampling_defaults"] == {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "top_k": 20,
+    }
+
+    explicit = build_chat_block({**xs_gen, "top_k": 5})
+    assert explicit["sampling_defaults"]["top_k"] == 5
 
 
 def test_laguna_3l_and_4m_only_move_ffn_bits():

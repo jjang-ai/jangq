@@ -154,13 +154,28 @@ def _template_default_enable_thinking(template_text: str | None) -> bool:
     return False
 
 
+# Sampling values poolside documents on the model card but omits from some
+# generation_config.json files. S-2.1 ships top_k=20; XS-2.1 does NOT, even
+# though its own card states "The same sampling parameters were used for all
+# Laguna XS 2.1 benchmarking: temperature=1.0, top_k=20 and top_p=1" and both
+# usage snippets pass top_k=20. Omission there is a vendor inconsistency, not
+# intent to disable top_k: with top_k unset at temperature 1.0 / top_p 1.0 a
+# runtime samples the full 100352-wide distribution unfiltered, which is not
+# how the model was evaluated (and it is worst on the low-bit profiles).
+# These fill ONLY missing keys — an explicit vendor value always wins.
+_CARD_DOCUMENTED_SAMPLING = {"top_k": 20}
+
+
 def build_chat_block(
     gen_cfg: dict,
     *,
     template_text: str | None = None,
 ) -> dict:
-    """jang_config['chat'] from the vendor generation_config.json — verbatim
-    passthrough, nothing invented.
+    """jang_config['chat'] from the vendor generation_config.json.
+
+    Vendor values pass through verbatim; the only additions are sampling keys
+    poolside documents on the card but leaves out of generation_config
+    (``_CARD_DOCUMENTED_SAMPLING``), and only where the vendor said nothing.
 
     An explicit ``default_chat_template_kwargs.enable_thinking`` remains
     authoritative. If it is absent, mirror the effective template's literal
@@ -174,6 +189,8 @@ def build_chat_block(
         for k in ("temperature", "top_p", "top_k", "min_p")
         if k in gen_cfg
     }
+    for k, v in _CARD_DOCUMENTED_SAMPLING.items():
+        sampling_defaults.setdefault(k, v)
     if "enable_thinking" in tpl_kwargs:
         thinking_on = bool(tpl_kwargs["enable_thinking"])
     else:
@@ -690,6 +707,38 @@ def main(argv=None) -> None:
             print("  chat_template: inlined full .jinja into tokenizer_config "
                   f"(was {len(cur)} chars{' include-stub' if cur else ''})",
                   flush=True)
+
+    # ── sampling-defaults reconciliation + gate ──
+    # Two files declare sampling: jang_config.chat.sampling_defaults (what
+    # vmlx reads first) and the copied generation_config.json (what
+    # transformers / vLLM / every non-JANG consumer reads). They MUST agree,
+    # or the same bundle samples differently depending on who loads it —
+    # exactly how the XS-2.1 lineup shipped without top_k=20 while its README
+    # advertised it. Push card-documented keys into the copy, then hard-gate.
+    gen_out_p = OUT / "generation_config.json"
+    if gen_out_p.exists():
+        gen_out = json.loads(gen_out_p.read_text())
+        added = {}
+        for k, v in chat_block["sampling_defaults"].items():
+            if k not in gen_out:
+                gen_out[k] = v
+                added[k] = v
+        if added:
+            gen_out_p.write_text(json.dumps(gen_out, indent=2) + "\n")
+            print(f"  generation_config: added card-documented {added}",
+                  flush=True)
+        disagree = {
+            k: (v, gen_out.get(k))
+            for k, v in chat_block["sampling_defaults"].items()
+            if gen_out.get(k) != v
+        }
+        if disagree:
+            raise SystemExit(
+                "sampling defaults disagree between jang_config.chat and "
+                f"generation_config.json (key: jang vs gen): {disagree} — "
+                "refusing to ship a bundle that samples differently per "
+                "consumer"
+            )
 
     # ── chat-template round-trip gate ──
     # Structural presence is not enough (feedback_structural_verification_
