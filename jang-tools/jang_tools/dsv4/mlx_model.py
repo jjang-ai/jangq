@@ -261,48 +261,178 @@ def hc_split_sinkhorn(
 # ---------- Attention (simplified: full scaled_dot_product) ----------
 
 
-def act_quant_sim(x: mx.array, block_size: int = 128) -> mx.array:
-    """FP8 e4m3 fake-quant on activations (block_size=128 per last dim).
+def _make_dsv4_e4m3_kv_kernel():
+    """Exact block-64 E4M3FN round trip used by official DSV4 KV QAT."""
+    try:
+        if mx.default_device() != mx.gpu or not mx.metal.is_available():
+            return None
+    except Exception:
+        return None
 
-    Reference (`inference/kernel.py act_quant_kernel`) applies this before
-    every Linear with FP4/FP8 weights during inference. The model was
-    TRAINED expecting this activation noise — skipping it gives weights
-    cleaner-than-trained inputs, which paradoxically hurts accuracy.
+    return mx.fast.metal_kernel(
+        name="dsv4_e4m3_kv_roundtrip",
+        input_names=["x"],
+        output_names=["y"],
+        source=r"""
+            const uint gid = thread_position_in_grid.x;
+            const uint lane = thread_position_in_threadgroup.x;
+            const uint group = gid >> 6;
+            const uint block = group % NB;
+            const uint row = group / NB;
+            const uint idx = row * N + block * 64 + lane;
+            threadgroup float scratch[64];
 
-    e4m3fn has fp8_max=448. Per-block scale = amax/fp8_max rounded to
-    power-of-2 (fast_round_scale). Quantize → 8-bit e4m3 levels → dequant.
+            const float input_value = static_cast<float>(x[idx]);
+            scratch[lane] = metal::abs(input_value);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = 32; stride > 0; stride >>= 1) {
+                if (lane < stride) {
+                    scratch[lane] = metal::max(scratch[lane], scratch[lane + stride]);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
 
-    Enable with env DSV4_ACT_QUANT=1; default OFF because it adds overhead
-    and most runtime queries work without it. For arithmetic-heavy
-    reasoning, turn ON.
-    """
+            const float amax = metal::max(scratch[0], 1.0e-4f);
+            const float raw_scale = amax / 448.0f;
+            const uint raw_bits = as_type<uint>(raw_scale);
+            const int raw_exp = int((raw_bits >> 23) & 0xffu) - 127;
+            const bool has_mantissa = (raw_bits & 0x7fffffu) != 0u;
+            const int scale_exp = raw_exp + int(has_mantissa);
+            const float scale = as_type<float>(uint(scale_exp + 127) << 23);
+
+            const float normalized = metal::clamp(input_value / scale, -448.0f, 448.0f);
+            const float sign = normalized < 0.0f ? -1.0f : 1.0f;
+            const float absolute = metal::min(metal::abs(normalized), 448.0f);
+            int low = 0;
+            int high = 126;
+            while (low < high) {
+                const int middle = (low + high + 1) >> 1;
+                const int exponent = (middle >> 3) & 0x0f;
+                const int mantissa = middle & 0x07;
+                const float candidate = exponent == 0
+                    ? float(mantissa) * 0.001953125f
+                    : (1.0f + float(mantissa) * 0.125f)
+                        * metal::fast::exp2(float(exponent - 7));
+                if (candidate <= absolute) low = middle;
+                else high = middle - 1;
+            }
+
+            int best = low;
+            const int best_exponent = (best >> 3) & 0x0f;
+            const int best_mantissa = best & 0x07;
+            float best_value = best_exponent == 0
+                ? float(best_mantissa) * 0.001953125f
+                : (1.0f + float(best_mantissa) * 0.125f)
+                    * metal::fast::exp2(float(best_exponent - 7));
+            if (best < 126) {
+                const int next = best + 1;
+                const int next_exponent = (next >> 3) & 0x0f;
+                const int next_mantissa = next & 0x07;
+                const float next_value = next_exponent == 0
+                    ? float(next_mantissa) * 0.001953125f
+                    : (1.0f + float(next_mantissa) * 0.125f)
+                        * metal::fast::exp2(float(next_exponent - 7));
+                const float best_diff = metal::abs(absolute - best_value);
+                const float next_diff = metal::abs(absolute - next_value);
+                if (next_diff < best_diff ||
+                    (next_diff == best_diff && (next & 1) == 0 && (best & 1) != 0)) {
+                    best_value = next_value;
+                }
+            }
+            y[idx] = static_cast<outT>(sign * best_value * scale);
+        """,
+    )
+
+
+_dsv4_e4m3_kv_kernel = _make_dsv4_e4m3_kv_kernel()
+
+
+def _dsv4_exact_kv_qat_enabled() -> bool:
     import os as _os
-    if _os.environ.get("DSV4_ACT_QUANT", "0") != "1":
-        return x
-    orig_dtype = x.dtype
-    shape = x.shape
-    if shape[-1] % block_size != 0:
-        return x
-    x32 = x.astype(mx.float32)
-    reshaped = x32.reshape(*shape[:-1], -1, block_size)
-    fp8_max = 448.0
-    amax = mx.max(mx.abs(reshaped), axis=-1, keepdims=True)
-    # fast_round_scale: 2^ceil(log2(amax/fp8_max)), zero-safe
-    raw_scale = amax / fp8_max
-    # Handle zero blocks — leave them as 1.0 (no-op)
-    safe_scale = mx.where(raw_scale > 1e-30, raw_scale, mx.ones_like(raw_scale))
-    log2s = mx.ceil(mx.log2(safe_scale))
-    scale = mx.power(mx.array(2.0, dtype=mx.float32), log2s)
-    # e4m3fn has 3 mantissa bits → ~8 equal-ratio levels per binade.
-    # Approximation: uniform 8-bit levels within ±fp8_max. Real e4m3 is
-    # log-spaced per binade; this simplification is close enough for
-    # the fake-quant effect the model was trained with.
-    normalized = reshaped / scale
-    # Round-trip through 8-bit signed range [-127, 127] scaled to [-448, 448]
-    q = mx.round(normalized * (127.0 / fp8_max)) * (fp8_max / 127.0)
-    q = mx.clip(q, -fp8_max, fp8_max)
-    result = (q * scale).reshape(shape)
-    return result.astype(orig_dtype)
+    return _os.environ.get("DSV4_EXACT_KV_QAT", "0") == "1"
+
+
+def _dsv4_fp32_compressor_enabled() -> bool:
+    import os as _os
+    return _os.environ.get("DSV4_FP32_COMPRESSOR", "0") == "1"
+
+
+def _dsv4_indexer_qat_enabled() -> bool:
+    import os as _os
+    return _os.environ.get("DSV4_INDEXER_QAT", "0") == "1"
+
+
+def act_quant_sim(x: mx.array, block_size: int = 64) -> mx.array:
+    """Exact official DSV4 block-64 E4M3FN activation round trip."""
+    if block_size != 64 or x.shape[-1] % block_size != 0:
+        raise ValueError("DSV4 E4M3 KV QAT requires a 64-aligned last dimension")
+    if _dsv4_e4m3_kv_kernel is None:
+        raise RuntimeError("DSV4 exact E4M3 KV QAT requires the Metal backend")
+    blocks = x.shape[-1] // block_size
+    rows = x.size // x.shape[-1]
+    return _dsv4_e4m3_kv_kernel(
+        inputs=[x],
+        template=[("N", x.shape[-1]), ("NB", blocks), ("outT", x.dtype)],
+        grid=(rows * blocks * block_size, 1, 1),
+        threadgroup=(block_size, 1, 1),
+        output_shapes=[x.shape],
+        output_dtypes=[x.dtype],
+    )[0]
+
+
+def dsv4_indexer_qat_sim(x: mx.array) -> mx.array:
+    """Official Hadamard-128 then block-32 E2M1 activation round trip.
+
+    This mirrors the DSV4 0731 indexer graph for both projected Q and the
+    indexer's private compressed-KV pool. It is diagnostic-gated until the
+    complete graph A/B has been measured.
+    """
+    if x.shape[-1] != 128:
+        raise ValueError("DSV4 indexer QAT requires 128-wide rows")
+
+    original_dtype = x.dtype
+    y = x.astype(mx.float32)
+    for stride in (1, 2, 4, 8, 16, 32, 64):
+        paired = y.reshape(*y.shape[:-1], 128 // (2 * stride), 2, stride)
+        low = paired[..., 0, :]
+        high = paired[..., 1, :]
+        y = mx.concatenate([low + high, low - high], axis=-1).reshape(
+            *y.shape[:-1], 128
+        )
+    y = y * mx.array(0.08838834764831845, dtype=mx.float32)
+
+    blocks = y.reshape(*y.shape[:-1], 4, 32)
+    amax = mx.maximum(
+        mx.max(mx.abs(blocks), axis=-1, keepdims=True),
+        mx.array(7.052966104933725e-38, dtype=mx.float32),
+    )
+    scale = mx.power(
+        mx.array(2.0, dtype=mx.float32),
+        mx.ceil(mx.log2(amax / 6.0)),
+    )
+    normalized = mx.clip(blocks / scale, -6.0, 6.0)
+    absolute = mx.abs(normalized)
+    codebook = mx.array(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        dtype=mx.float32,
+    )
+    distances = mx.abs(absolute[..., None] - codebook)
+    best = mx.argmin(distances, axis=-1)
+    next_index = mx.minimum(best + 1, mx.array(7, dtype=best.dtype))
+    best_distance = mx.take_along_axis(
+        distances, best[..., None], axis=-1
+    ).squeeze(-1)
+    next_distance = mx.take_along_axis(
+        distances, next_index[..., None], axis=-1
+    ).squeeze(-1)
+    choose_even_tie = (
+        (next_distance == best_distance)
+        & ((best % 2) != 0)
+        & ((next_index % 2) == 0)
+    )
+    best = mx.where(choose_even_tie, next_index, best)
+    quantized = mx.take(codebook, best) * mx.sign(normalized) * scale
+    return quantized.reshape(x.shape).astype(original_dtype)
 
 
 class DeepseekV4RoPE(nn.Module):
@@ -731,6 +861,7 @@ class Compressor(nn.Module):
         super().__init__()
         self.compress_ratio = compress_ratio
         self.head_dim = head_dim
+        self.is_indexer = head_dim == getattr(config, "index_head_dim", 128)
         self.rope_head_dim = config.qk_rope_head_dim
         self.overlap = compress_ratio == 4
         self.out_dim = head_dim * (2 if self.overlap else 1)
@@ -748,8 +879,11 @@ class Compressor(nn.Module):
 
     def __call__(self, x, rope, cache, start_pos, state_key="compressor_state"):
         B, _, _ = x.shape
-        kv = self.wkv(x)
-        gate = self.wgate(x)
+        projection_input = (
+            x.astype(mx.float32) if _dsv4_fp32_compressor_enabled() else x
+        )
+        kv = self.wkv(projection_input)
+        gate = self.wgate(projection_input)
         if cache is not None and self.overlap:
             pos = start_pos + mx.arange(gate.shape[1])
             ape = mx.take(self.ape.astype(gate.dtype), pos % self.compress_ratio, axis=0)
@@ -789,6 +923,13 @@ class Compressor(nn.Module):
                 + pool_base
             )
             new_pooled = _apply_partial_rope(new_pooled[:, None], rope, positions=positions).squeeze(1)
+            if self.is_indexer and _dsv4_indexer_qat_enabled():
+                new_pooled = dsv4_indexer_qat_sim(new_pooled)
+            elif _dsv4_exact_kv_qat_enabled():
+                nope = act_quant_sim(new_pooled[..., :-self.rope_head_dim])
+                new_pooled = mx.concatenate(
+                    [nope, new_pooled[..., -self.rope_head_dim:]], axis=-1
+                )
         if cache is not None:
             return cache.update_pool(new_pooled, state_key)
         return new_pooled
@@ -814,10 +955,22 @@ class Indexer(nn.Module):
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = _apply_partial_rope(q, position_rope, offset)
+        if _dsv4_indexer_qat_enabled():
+            q = dsv4_indexer_qat_sim(q)
         scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
         scores = mx.maximum(scores, 0) * self.scale
         weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads ** -0.5)
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
+        if start_pos == 0:
+            row_index = mx.arange(pooled.shape[1])[None, None, :]
+            visible_rows = (
+                mx.arange(1, L + 1) // self.compressor.compress_ratio
+            )[None, :, None]
+            scores = mx.where(
+                row_index < visible_rows,
+                scores,
+                mx.array(-float("inf"), dtype=scores.dtype),
+            )
         k = min(self.index_topk, pooled.shape[1])
         return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
 
@@ -1039,6 +1192,10 @@ class DeepseekV4Attention(nn.Module):
 
         q = _apply_partial_rope(q, self.rope, offset)
         kv = _apply_partial_rope(kv, self.rope, offset)
+
+        if _dsv4_exact_kv_qat_enabled():
+            nope = act_quant_sim(kv[..., :self.nope_head_dim])
+            kv = mx.concatenate([nope, kv[..., self.nope_head_dim:]], axis=-1)
 
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, kv)
@@ -1398,6 +1555,8 @@ class DeepseekV4Model(nn.Module):
         return y.astype(x.dtype)
 
     def __call__(self, input_ids, cache=None, mask=None):
+        import os as _os
+
         h = self.embed(input_ids)
         # Expand to hc_mult copies for mHC. Must be materialized (not a broadcast
         # view) — matches torch reference `h.unsqueeze(2).repeat(1, 1, hc_mult, 1)`.
@@ -1416,8 +1575,11 @@ class DeepseekV4Model(nn.Module):
                 window_size=self.args.sliding_window,
                 return_array=True,
             )
+        evaluate_each_layer = _os.environ.get("DSV4_EVAL_EACH_LAYER", "0") == "1"
         for layer, c in zip(self.layers, cache):
             h = layer(h, mask=mask, cache=c, input_ids=input_ids)
+            if evaluate_each_layer:
+                mx.eval(h)
         h = self._hc_head_reduce(h)
         return self.norm(h)
 

@@ -235,6 +235,24 @@ def load(src: str):
         bits = qcfg.get("bits", 4)
         scale_keys = {k for k in weights.keys() if k.endswith(".scales")}
 
+        # Per-module entries carry their OWN group_size, and a bundle may
+        # genuinely mix them: Raptor-1.0-16B imports poolside's certified QAT
+        # expert codes, which are locked to the trained grid's 128, while the
+        # non-expert path keeps the proven 64. Applying one global group_size
+        # to everything forced the whole bundle to 128 and measurably coarsened
+        # attention/shared/dense (greedy decode then degenerated into
+        # repetition on open-ended prompts, which the certified artifact does
+        # not do). Override keys are stored with the `model.` prefix; module
+        # paths have it stripped by _remap above, so normalise before lookup.
+        _ovr = {}
+        for _k, _v in qcfg.items():
+            if isinstance(_v, dict):
+                _ovr[_k[6:] if _k.startswith("model.") else _k] = _v
+
+        def _module_group_size(name: str) -> int:
+            g = _ovr.get(name, {}).get("group_size")
+            return int(g) if g else group_size
+
         def _module_bits(name: str) -> int:
             # JANG affine bundles are MIXED-precision: config.json's
             # top-level quantization.bits is only the DEFAULT, and
@@ -260,7 +278,7 @@ def load(src: str):
             packed_last = int(w.shape[-1])
             if scales_last <= 0:
                 return bits
-            in_features = scales_last * group_size
+            in_features = scales_last * _module_group_size(name)
             derived = round(packed_last * 32 / in_features)
             return derived if derived in (2, 3, 4, 5, 6, 8) else bits
 
@@ -274,7 +292,7 @@ def load(src: str):
             # behavioural change.
             if fmt == "jang":
                 return {
-                    "group_size": group_size,
+                    "group_size": _module_group_size(name),
                     "bits": _module_bits(name),
                     "mode": "affine",
                 }

@@ -138,3 +138,6 @@ verify_quant_*.py
 
 # Internal issue/audit reports
 jangtq_*_report.md
+
+# Internal release-gate artifacts (never publish — see wiki model-production-gate)
+docs/internal/

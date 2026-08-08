@@ -87,6 +87,15 @@ EOS_FIXES: dict[str, dict[int, int]] = {
 
 _LAYERS_INDEX_RE = re.compile(r"\.layers\.(\d+)\.")
 
+# Model types whose tensor naming matches the N2 per-component bit overrides
+# (--n2-self-attn-bits / --n2-lm-head-bits / --n2-token-io-bits). These key off
+# substrings like ".self_attn." and "lm_head.weight", so a model only belongs
+# here once its checkpoint is confirmed to use those names.
+#   qwen3_5_moe  — original target.
+#   glm_moe_dsa  — GLM 5.2 (GlmMoeDsaForCausalLM); verified 663 ".self_attn."
+#                  tensors in the zai-org GLM-5.2 bf16 checkpoint.
+_N2_EXTRA_OVERRIDE_MODEL_TYPES = frozenset({"qwen3_5_moe", "glm_moe_dsa"})
+
 
 def _is_mtp_tensor_name(tensor_name: str, base_layers: int | None = None) -> bool:
     """Return true for model-family MTP tensor namespaces.
@@ -154,6 +163,24 @@ def _is_vision_tensor_name(tensor_name: str) -> bool:
         or "vision_model" in name
         or "vision_encoder" in name
         or "embed_vision" in name
+    )
+
+
+def _is_audio_tensor_name(tensor_name: str) -> bool:
+    """Return true for audio tower namespaces that must be preserved as fp16.
+
+    Audio towers are tiny relative to the LLM (Inkling-Small: 5.2M params, and its
+    "encoder" is a [mel_vocab*n_mel_bins, hidden] embedding table, not a conv
+    stack). Quantizing them saves noise and breaks audio input, so they get the
+    same passthrough treatment as the vision tower.
+    """
+    name = tensor_name.lower()
+    return (
+        name.startswith("model.audio")
+        or ".audio." in name
+        or name.startswith("audio_tower")
+        or "audio_model" in name
+        or "audio_encoder" in name
     )
 
 
@@ -367,7 +394,9 @@ def _is_n2_fused_expert_gate_up(tensor_name: str) -> bool:
 
 
 def _is_n2_expert_down(tensor_name: str) -> bool:
-    return tensor_name.endswith(".mlp.experts.down_proj")
+    # Inkling names the routed down-projection `.mlp.experts.w2_weight`, so the
+    # `down_proj` suffix alone would make --n2-down-bits a silent no-op there.
+    return tensor_name.endswith((".mlp.experts.down_proj", ".mlp.experts.w2_weight"))
 
 
 def _is_moe_router_gate(tensor_name: str) -> bool:
@@ -538,14 +567,27 @@ def _load_bf16_from_header(sf_path: str, key: str):
     return result
 
 
+def _is_routed_expert_tensor(name_lower: str) -> bool:
+    """True for ROUTED expert weights (the gather_qmm path), false for shared experts.
+
+    Covers per-expert source layouts (`...experts.3.w1.weight`, `...experts.w13_weight`)
+    and the stacked MLX layout the converter emits (`...switch_mlp.gate_proj.weight`).
+    Shared experts are always-active plain matmuls, not gathers, so they are excluded.
+    """
+    if "shared_expert" in name_lower:
+        return False
+    return "experts." in name_lower or "switch_mlp" in name_lower
+
+
 def _get_tensor_group_size(tensor_name: str, default_gs: int, num_experts: int = 0) -> int:
     """
     Get the optimal group_size for a specific tensor.
 
     Rules (empirically verified on MiniMax, Mar 2026):
     - MoE router/gate: ALWAYS gs=64 (precision-critical, tiny tensor)
-    - Expert MLP with 150+ experts at 2-4 bit: gs=128 (gather_qmm cache pressure)
-    - Everything else: gs=64 (standard, best precision)
+    - Routed expert MLP with 150+ experts at 2-4 bit: gs=128 (gather_qmm cache pressure)
+    - Everything else: gs=64 (standard, best precision) — including non-expert
+      tensors in a model whose global default was auto-raised to 128
 
     The default_gs is the model's global group_size (set by auto-detection).
     This function overrides it for specific tensors that need different values.
@@ -559,7 +601,25 @@ def _get_tensor_group_size(tensor_name: str, default_gs: int, num_experts: int =
     if "shared_expert_gate" in name_lower:
         return 64
 
-    # Everything else uses the model's global group_size
+    # Non-expert tensors stay at gs=64 even when the model-level auto-detect chose
+    # gs=128 for a 150+ expert MoE. The gs=128 auto-select exists purely to avoid
+    # the gather_qmm kernel-cache regression on ROUTED experts; attention, the
+    # head, embeddings, dense MLP and shared experts are plain qmm and get no
+    # speed benefit from coarse groups, only precision loss.
+    #
+    # Two reasons this matters, both measured on Inkling-Small (256 experts):
+    #   Size:      routed experts are 96.9% of params, so gs64->gs128 there frees
+    #              ~8 GB; doing the same on non-experts saves only ~0.2 GB.
+    #   Bandwidth: scales/biases are read alongside weights at decode, and the
+    #              always-active non-expert tiers dominate per-token reads
+    #              (attention + shared experts + head > all routed-expert visits
+    #              combined, since only top_k of N experts fire). Coarse groups
+    #              there buy ~2% decode for a real precision cost.
+    # Ref: project_raptor_16b_qat_jang4m ("non-experts must stay gs64").
+    if default_gs > 64 and not _is_routed_expert_tensor(name_lower):
+        return 64
+
+    # Routed experts use the model's global group_size
     # (which is 128 for 150+ expert models, 64 otherwise)
     return default_gs
 
@@ -902,7 +962,7 @@ def convert_model(
                     continue
                 if "lm_head" in tensor_name and _tie_embeddings:
                     continue
-                if _is_vision_tensor_name(tensor_name):
+                if _is_vision_tensor_name(tensor_name) or _is_audio_tensor_name(tensor_name):
                     continue
 
                 shape = f.get_slice(tensor_name).get_shape()
@@ -1054,10 +1114,18 @@ def convert_model(
     }
     if any(_bits is not None for _bits in _n2_extra_overrides.values()):
         _model_type = str(getattr(arch_config, "model_type", "") or "").lower()
-        if _model_type == "qwen3_5_moe":
+        if _model_type in _N2_EXTRA_OVERRIDE_MODEL_TYPES:
             _extra_counts: dict[str, int] = {}
+            _skipped_indexer = 0
             for _name in list(_tensor_bits):
                 _lower = _name.lower()
+                # glm_moe_dsa puts the DSA indexer under .self_attn. — its wk /
+                # wq_b / weights_proj drive sparse top-k selection, so dropping
+                # them to 4-bit corrupts which tokens attention even looks at.
+                # Leave the indexer at its allocated precision.
+                if ".indexer." in _lower:
+                    _skipped_indexer += 1
+                    continue
                 for _needle, _bits in _n2_extra_overrides.items():
                     if _bits is None:
                         continue
@@ -1070,6 +1138,8 @@ def convert_model(
                     f"  N2 override: {_needle} {_count} tensors "
                     f"→ {_n2_extra_overrides[_needle]}-bit"
                 )
+            if _skipped_indexer:
+                print(f"  N2 override: preserved {_skipped_indexer} DSA indexer tensors")
         else:
             print(
                 "  N2 extra compact overrides skipped: "
@@ -1834,7 +1904,7 @@ def convert_model(
 
                 is_norm = ("norm" in tensor_name.lower())
                 is_bias = tensor_name.endswith(".bias")
-                is_vision = _is_vision_tensor_name(tensor_name)
+                is_vision = _is_vision_tensor_name(tensor_name) or _is_audio_tensor_name(tensor_name)
                 shape = f.get_slice(tensor_name).get_shape()
                 is_small = len(shape) == 1
                 n_el = 1

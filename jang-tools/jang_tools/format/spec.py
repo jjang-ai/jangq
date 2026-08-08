@@ -7,7 +7,7 @@ FORMAT_NAME = "jang"
 FORMAT_VERSION = "2.0"
 FORMAT_VERSION_V1 = "1.1"
 DEFAULT_BLOCK_SIZE = 64
-ALLOWED_BIT_WIDTHS = frozenset({2, 3, 4, 5, 6, 8})
+ALLOWED_BIT_WIDTHS = frozenset({1, 2, 3, 4, 5, 6, 8})
 JANG_CONFIG_FILENAME = "jang_config.json"
 JANG_IMATRIX_FILENAME = "jang_imatrix.safetensors"
 JANG_INDEX_FILENAME = "model.jang.index.json"          # v1
@@ -15,6 +15,7 @@ JANG_V2_INDEX_FILENAME = "model.safetensors.index.json"  # v2 — standard MLX n
 
 # Bytes per block at each bit width (for block_size=64)
 BYTES_PER_BLOCK = {
+    1: 8,    # 64 * 1 / 8 (JANG affine storage; runtime expands to native 2-bit)
     2: 16,   # 64 * 2 / 8
     3: 24,   # 64 * 3 / 8
     4: 32,   # 64 * 4 / 8

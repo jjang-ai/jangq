@@ -197,6 +197,103 @@ def test_laguna_chat_block_fills_card_documented_top_k_when_vendor_omits_it():
     assert explicit["sampling_defaults"]["top_k"] == 5
 
 
+def test_laguna_template_thinking_default_realigns_to_explicit_vendor_kwarg():
+    """Raptor-1.0-16B ships a laguna_glm_thinking_v8-derived template that
+    still falls back to default(false) while its generation_config declares
+    enable_thinking=true (as the whole shipped Laguna-2.1 family does). The
+    copied template must be realigned to the explicit kwarg, or the bundle
+    reasons or not depending on which consumer renders it."""
+    from jang_tools.convert_laguna_jang import (
+        _set_template_thinking_default,
+        _template_default_enable_thinking,
+    )
+
+    raptor = (
+        '{#- Iteration on laguna_glm_thinking_v8/chat_template.jinja -#}\n'
+        "{%- set enable_thinking = enable_thinking | default(false) -%}\n"
+        "{%- set add_generation_prompt = add_generation_prompt | default(false) -%}\n"
+    )
+    assert _template_default_enable_thinking(raptor) is False
+
+    aligned, n = _set_template_thinking_default(raptor, True)
+    assert n == 1, "must rewrite exactly the thinking fallback"
+    assert _template_default_enable_thinking(aligned) is True
+    # The neighbouring default(false) call must be left untouched.
+    assert "add_generation_prompt | default(false)" in aligned
+
+    # Idempotent, and reversible.
+    assert _set_template_thinking_default(aligned, True)[0] == aligned
+    assert _set_template_thinking_default(aligned, False)[0] == raptor
+
+    # A template with no such fallback reports 0 so the converter can refuse.
+    assert _set_template_thinking_default("{{- 'hi' -}}", True)[1] == 0
+
+
+def test_laguna_qat_symmetric_grid_maps_losslessly_into_jang_affine():
+    """The Path B container swap must be exact: MLX dequantizes affine as
+    q*scale + bias, so codes q+8 with bias -8*scale must evaluate to the
+    symmetric QAT grid q_sym*scale with ZERO error. If this drifts, every
+    Raptor expert silently shifts off the grid it was trained on."""
+    import mlx.core as mx
+    import numpy as np
+
+    from jang_tools.convert_laguna_jang import pack_affine4
+
+    rng = np.random.default_rng(0)
+    q_sym = rng.integers(-8, 8, size=(4, 256)).astype(np.int8)
+    scale = (rng.random((4, 2)).astype(np.float32) + 0.1) / 7.5
+
+    packed = pack_affine4((q_sym.astype(np.int16) + 8).astype(np.uint8))
+    deq = np.array(mx.dequantize(
+        mx.array(packed), mx.array(scale), mx.array(-8.0 * scale),
+        group_size=128, bits=4).astype(mx.float32))
+
+    expect = (q_sym.reshape(4, 2, 128) * scale[..., None]).reshape(4, 256)
+    assert np.array_equal(deq, expect), "affine container is not lossless"
+    # And the grid invariant CONVERT.md gates on.
+    assert max(len(np.unique(g)) for g in deq.reshape(-1, 128)) <= 16
+
+
+def test_laguna_runtime_honours_per_module_group_size_for_mixed_grids():
+    """A Raptor bundle legitimately MIXES grids: routed experts are locked to
+    the certified QAT grid's 128 while non-experts keep the proven 64. The
+    loader read one global group_size, so a mixed bundle could not be
+    expressed — and forcing everything to 128 coarsened the non-expert path
+    enough to degenerate greedy decode. Pin both the override normalisation
+    (config keys carry the `model.` prefix that _remap strips) and the
+    in_features shape maths that makes mixed grids load at all."""
+    qcfg = {
+        "bits": 8, "group_size": 64, "mode": "affine",
+        "model.layers.0.self_attn.q_proj": {"bits": 8, "group_size": 64},
+        "model.layers.1.mlp.switch_mlp.gate_proj": {"bits": 4, "group_size": 128},
+        "lm_head": {"bits": 8, "group_size": 64},
+    }
+    # Mirror the loader's normalisation + lookup.
+    ovr = {(k[6:] if k.startswith("model.") else k): v
+           for k, v in qcfg.items() if isinstance(v, dict)}
+
+    def module_group_size(name):
+        g = ovr.get(name, {}).get("group_size")
+        return int(g) if g else qcfg["group_size"]
+
+    assert module_group_size("layers.1.mlp.switch_mlp.gate_proj") == 128
+    assert module_group_size("layers.0.self_attn.q_proj") == 64
+    assert module_group_size("lm_head") == 64
+    assert module_group_size("layers.7.mlp.shared_expert.up_proj") == 64  # default
+
+    # Shape round-trip: bits must be recoverable from packed/scales widths
+    # using the module's OWN group size. in=2048 at 4-bit/gs128 packs to
+    # 2048*4/32 = 256 words with 2048/128 = 16 scales; the same tensor read
+    # with the global 64 would derive 8-bit and load garbage.
+    in_features, gs, bits_true = 2048, 128, 4
+    scales_last = in_features // gs
+    packed_last = in_features * bits_true // 32
+    derived = round(packed_last * 32 / (scales_last * gs))
+    assert derived == bits_true
+    wrong = round(packed_last * 32 / (scales_last * 64))
+    assert wrong != bits_true, "global-group_size read must be the broken one"
+
+
 def test_laguna_3l_and_4m_only_move_ffn_bits():
     from jang_tools.convert_laguna_jang import profile_policy
 

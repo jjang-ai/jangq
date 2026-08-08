@@ -1,22 +1,28 @@
-"""DSV4-Flash → JANG_2L (standard mx.quantize path, not MXTQ codebook).
+"""DSV4-Flash → mixed-layout JANG affine (standard ``mx.quantize``).
 
 Differences vs convert_dsv4_jangtq.py:
-  - Routed experts use mx.quantize(bits=2) affine (standard mlx-lm) instead
-    of MXTQ codebook. Larger size vs JANGTQ2, but works with stock mlx-lm
-    loader if our custom runtime isn't ready yet.
-  - Attention + shared + embed + lm_head: 8-bit affine (same).
-  - Norms / router / mHC: fp16 passthrough (same).
+  - Routed experts support per-main-layer gate/down/up bit and group-size
+    layouts, with all experts in a runtime-stacked unit sharing one layout.
+  - Attention, compressor, indexer, shared, embed, and head precision are
+    independently configurable from the routed floor.
+  - Norms, router, mHC, integer maps, and critical controls pass through.
+  - The intended verifier is vMLX Python, whose DSV4 loader shape-walks the
+    actual packed tensor shapes; a uniform ``mlx_lm`` loader is not sufficient
+    proof for these mixed-layout bundles.
 
 Usage:
   python -m jang_tools.dsv4.convert_dsv4_jang \\
-      --src <path/to/DeepSeek-V4-Flash> \\
-      --dst ~/.mlxstudio/models/JANGQ-AI/DSV4-Flash-JANG_2L \\
-      --profile 2
+      --src <path/to/DeepSeek-V4-Flash-0731> \\
+      --dst <external-drive-output> \\
+      --profile 2 \\
+      --routed-projection-layer-bits-file dsv4-affine-plan.json \\
+      --routed-projection-layer-group-sizes-file dsv4-affine-plan.json
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -26,9 +32,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from safetensors.numpy import load_file as sf_load_np
 from safetensors.numpy import save_file as sf_save_np
 
-from jang_tools.dsv4.chat_template import DSV4_CHAT_TEMPLATE_JINJA
 from jang_tools.dsv4.weight_loader import ShardIndex
 
 
@@ -272,6 +278,47 @@ def parse_routed_projection_group_sizes(value: str | None) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+def parse_routed_projection_layer_group_sizes_file(
+    path: Path | None,
+) -> dict[str, dict[int, int]]:
+    """Read per-main-layer routed projection affine group sizes.
+
+    Supported JSON shapes mirror the bit-plan file:
+
+      ``{"w2": {"7": 64}, "gate": {"12": 32}}``
+      ``{"routed_projection_layer_group_sizes": {...}}``
+
+    All experts in one ``(layer, projection)`` unit must share a group size so
+    the Python vMLX runtime can stack them into one QuantizedSwitchLinear.
+    """
+    if path is None:
+        return {}
+    raw = json.loads(path.read_text())
+    data = raw.get("routed_projection_layer_group_sizes", raw)
+    out: dict[str, dict[int, int]] = {}
+    for raw_proj, raw_layer_groups in data.items():
+        proj = _canonical_projection(str(raw_proj))
+        if not isinstance(raw_layer_groups, dict):
+            raise ValueError(
+                f"layer group-size plan for {raw_proj!r} must be an object"
+            )
+        for raw_layer, raw_group_size in raw_layer_groups.items():
+            layer = int(raw_layer)
+            group_size = int(raw_group_size)
+            if layer < 0:
+                raise ValueError(f"invalid negative layer index: {layer}")
+            if group_size not in (32, 64, 128):
+                raise ValueError(
+                    f"invalid routed projection group size for {proj}: "
+                    f"{group_size}"
+                )
+            out.setdefault(proj, {})[layer] = group_size
+    return {
+        proj: dict(sorted(layer_groups.items()))
+        for proj, layer_groups in sorted(out.items())
+    }
+
+
 def routed_bits_for_name(
     name: str,
     profile_bits: int,
@@ -315,12 +362,21 @@ def routed_group_size_for_name(
     name: str,
     routed_group_size: int,
     routed_projection_group_sizes: dict[str, int] | None = None,
+    routed_projection_layer_group_sizes: dict[str, dict[int, int]] | None = None,
 ) -> int:
     """Return routed expert affine group size for source tensor name."""
     m = re.match(r"^(layers\.(\d+)|mtp\.\d+)\.ffn\.experts\.\d+\.(w[123])\.weight$", name)
-    if not m or not routed_projection_group_sizes:
+    if not m:
         return routed_group_size
-    return int(routed_projection_group_sizes.get(m.group(3), routed_group_size))
+    if m.group(2) is not None and routed_projection_layer_group_sizes:
+        layer_groups = routed_projection_layer_group_sizes.get(m.group(3))
+        if layer_groups is not None:
+            group_size = layer_groups.get(int(m.group(2)))
+            if group_size is not None:
+                return int(group_size)
+    if routed_projection_group_sizes:
+        return int(routed_projection_group_sizes.get(m.group(3), routed_group_size))
+    return routed_group_size
 
 
 def compatible_group_size(in_dim: int, requested: int) -> int:
@@ -335,6 +391,81 @@ def compatible_group_size(in_dim: int, requested: int) -> int:
         if gsz <= requested and in_dim % gsz == 0:
             return gsz
     raise ValueError(f"no compatible affine group size for dim={in_dim}, requested={requested}")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_provenance(
+    src: Path,
+    expected_revision: str | None,
+) -> tuple[dict, dict]:
+    """Load and verify the immutable source lock used by this conversion."""
+    lock_path = src / ".dsv4-release-lock.json"
+    lock: dict = {}
+    if lock_path.exists():
+        lock = json.loads(lock_path.read_text())
+    resolved_revision = lock.get("resolved_revision")
+    if expected_revision is not None:
+        if not lock:
+            raise ValueError(
+                f"{src}: --expected-revision requires .dsv4-release-lock.json"
+            )
+        if resolved_revision != expected_revision:
+            raise ValueError(
+                f"source lock revision {resolved_revision!r} does not match "
+                f"--expected-revision {expected_revision!r}"
+            )
+    config_path = src / "config.json"
+    index_path = src / "model.safetensors.index.json"
+    provenance = {
+        "repository": lock.get("repository"),
+        "release_identity": lock.get("release_identity"),
+        "revision": resolved_revision,
+        "source_path": str(src.resolve()),
+        "release_lock_sha256": (
+            _sha256_file(lock_path) if lock_path.exists() else None
+        ),
+        "config_sha256": _sha256_file(config_path),
+        "weight_index_sha256": _sha256_file(index_path),
+    }
+    return lock, provenance
+
+
+def _discover_dspark(src: Path, weight_keys: list[str]) -> dict:
+    stage_ids = sorted(
+        {
+            int(match.group(1))
+            for name in weight_keys
+            if (match := re.match(r"^mtp\.(\d+)\.", name))
+        }
+    )
+    inference_path = src / "inference" / "config.json"
+    inference = (
+        json.loads(inference_path.read_text()) if inference_path.exists() else {}
+    )
+    configured_stages = int(inference.get("n_mtp_layers", len(stage_ids)) or 0)
+    if stage_ids and stage_ids != list(range(len(stage_ids))):
+        raise ValueError(f"non-contiguous DSpark stage ids: {stage_ids}")
+    if stage_ids and configured_stages != len(stage_ids):
+        raise ValueError(
+            f"inference n_mtp_layers={configured_stages} but source index has "
+            f"stages={stage_ids}"
+        )
+    return {
+        "stage_count": len(stage_ids),
+        "stage_ids": stage_ids,
+        "inference_n_mtp_layers": configured_stages,
+        "block_size": inference.get("dspark_block_size"),
+        "noise_token_id": inference.get("dspark_noise_token_id"),
+        "target_main_layers": inference.get("dspark_target_layer_ids"),
+        "markov_rank": inference.get("dspark_markov_rank"),
+    }
 
 
 def read_passthrough(idx: ShardIndex, name: str) -> np.ndarray:
@@ -355,6 +486,155 @@ def read_passthrough(idx: ShardIndex, name: str) -> np.ndarray:
     return tensor.numpy()
 
 
+def load_awq_ffn_scales(
+    path: Path,
+    *,
+    hidden_size: int,
+    num_layers: int,
+    alpha: float,
+    clip_min: float,
+    clip_max: float,
+) -> dict[int, np.ndarray]:
+    """Load and normalize routed/shared FFN-input AWQ statistics.
+
+    The scale is folded completely into the upstream FFN RMSNorm and every
+    consumer of its output (router plus routed/shared w1 and w3). No runtime
+    AWQ tensor or custom operator is required.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"AWQ statistics not found: {path}")
+    if not (0.0 <= alpha <= 1.0):
+        raise ValueError(f"AWQ alpha must be in [0, 1], got {alpha}")
+    if not (0.0 < clip_min <= 1.0 <= clip_max):
+        raise ValueError(
+            f"AWQ clip must satisfy 0 < min <= 1 <= max, got "
+            f"{clip_min}, {clip_max}"
+        )
+    raw = sf_load_np(str(path))
+    scales: dict[int, np.ndarray] = {}
+    for layer in range(num_layers):
+        key = f"layers.{layer}.experts_input"
+        if key not in raw:
+            raise ValueError(f"AWQ statistics are incomplete: missing {key}")
+        act = np.asarray(raw[key], dtype=np.float32)
+        if act.shape != (hidden_size,):
+            raise ValueError(f"{key}: expected {(hidden_size,)}, got {act.shape}")
+        if not np.isfinite(act).all() or np.any(act < 0):
+            raise ValueError(f"{key}: values must be finite and nonnegative")
+        positive = act[act > 0]
+        if positive.size == 0:
+            raise ValueError(f"{key}: all activation statistics are zero")
+        baseline = float(np.exp(np.mean(np.log(positive.astype(np.float64)))))
+        normalized = np.maximum(act / max(baseline, 1e-12), 1e-8)
+        scale = np.power(normalized, alpha).astype(np.float32)
+        # Remove the irrelevant global multiplier before clipping. This is the
+        # guard that prevents the historical DSV4 AWQ fp16-overflow failure.
+        scale /= float(np.exp(np.mean(np.log(scale.astype(np.float64)))))
+        scale = np.clip(scale, clip_min, clip_max).astype(np.float32)
+        if not np.isfinite(scale).all() or np.any(scale <= 0):
+            raise ValueError(f"{key}: computed invalid AWQ scale")
+        scales[layer] = np.ascontiguousarray(scale)
+    return scales
+
+
+def load_imatrix_down_scales(
+    path: Path,
+    *,
+    intermediate_size: int,
+    num_layers: int,
+    alpha: float,
+    clip_min: float,
+    clip_max: float,
+) -> dict[int, np.ndarray]:
+    """Derive diagonal-imatrix scales from measured down-input second moments."""
+    raw = sf_load_np(str(path))
+    scales: dict[int, np.ndarray] = {}
+    for layer in range(num_layers):
+        key = f"layers.{layer}.down_input_rms2"
+        if key not in raw:
+            raise ValueError(f"imatrix statistics are incomplete: missing {key}")
+        rms2 = np.asarray(raw[key], dtype=np.float32)
+        if rms2.shape != (intermediate_size,):
+            raise ValueError(
+                f"{key}: expected {(intermediate_size,)}, got {rms2.shape}"
+            )
+        if not np.isfinite(rms2).all() or np.any(rms2 < 0):
+            raise ValueError(f"{key}: values must be finite and nonnegative")
+        rms = np.sqrt(np.maximum(rms2, 1e-20)).astype(np.float32)
+        baseline = float(np.exp(np.mean(np.log(rms.astype(np.float64)))))
+        scale = np.power(np.maximum(rms / max(baseline, 1e-12), 1e-8), alpha)
+        scale /= float(np.exp(np.mean(np.log(scale.astype(np.float64)))))
+        scale = np.clip(scale, clip_min, clip_max).astype(np.float32)
+        if not np.isfinite(scale).all() or np.any(scale <= 0):
+            raise ValueError(f"{key}: computed invalid imatrix scale")
+        scales[layer] = np.ascontiguousarray(scale)
+    return scales
+
+
+def apply_awq_ffn_fold(
+    name: str,
+    tensor: torch.Tensor,
+    scales: dict[int, np.ndarray],
+) -> tuple[torch.Tensor, bool]:
+    """Apply the algebraically neutral DSV4 FFN-input AWQ fold."""
+    match = re.match(r"^layers\.(\d+)\.(.*)$", name)
+    if match is None:
+        return tensor, False
+    scale_np = scales.get(int(match.group(1)))
+    if scale_np is None:
+        return tensor, False
+    rest = match.group(2)
+    inverse = rest == "ffn_norm.weight"
+    router = rest == "ffn.gate.weight"
+    consumer = re.match(
+        r"^ffn\.(?:experts\.\d+|shared_experts)\.w[13]\.weight$", rest
+    ) is not None
+    if not (inverse or router or consumer):
+        return tensor, False
+    scale = torch.from_numpy(scale_np).to(dtype=torch.float32)
+    value = tensor.float()
+    if inverse:
+        if value.ndim != 1 or value.shape[0] != scale.shape[0]:
+            raise ValueError(f"{name}: AWQ norm shape mismatch {tuple(value.shape)}")
+        value = value / scale
+    else:
+        if value.ndim != 2 or value.shape[-1] != scale.shape[0]:
+            raise ValueError(f"{name}: AWQ consumer shape mismatch {tuple(value.shape)}")
+        value = value * scale.view(1, -1)
+    return value, True
+
+
+def apply_imatrix_down_fold(
+    name: str,
+    tensor: torch.Tensor,
+    scales: dict[int, np.ndarray],
+) -> tuple[torch.Tensor, str | None]:
+    """Fold a diagonal down-input imatrix into routed W2 and W3.
+
+    ``W2' = W2 diag(s)`` and ``W3' = diag(1/s) W3`` are algebraically
+    neutral because DSV4 SwiGLU is linear in the W3/up branch.  The resulting
+    tensors remain ordinary MLX affine weights and use stock gather_qmm.
+    """
+    match = re.match(
+        r"^layers\.(\d+)\.ffn\.experts\.\d+\.(w[23])\.weight$", name
+    )
+    if match is None:
+        return tensor, None
+    scale_np = scales.get(int(match.group(1)))
+    if scale_np is None:
+        return tensor, None
+    scale = torch.from_numpy(scale_np).to(dtype=torch.float32)
+    value = tensor.float()
+    projection = match.group(2)
+    if projection == "w2":
+        if value.ndim != 2 or value.shape[-1] != scale.shape[0]:
+            raise ValueError(f"{name}: imatrix W2 shape mismatch {tuple(value.shape)}")
+        return value * scale.view(1, -1), "w2"
+    if value.ndim != 2 or value.shape[0] != scale.shape[0]:
+        raise ValueError(f"{name}: imatrix W3 shape mismatch {tuple(value.shape)}")
+    return value / scale.view(-1, 1), "w3"
+
+
 def classify(
     name: str,
     profile_bits: int,
@@ -370,6 +650,7 @@ def classify(
     routed_down_layer_bits: dict[int, int] | None = None,
     routed_projection_layer_bits: dict[str, dict[int, int]] | None = None,
     routed_projection_group_sizes: dict[str, int] | None = None,
+    routed_projection_layer_group_sizes: dict[str, dict[int, int]] | None = None,
 ) -> tuple[int, str, int]:
     """Same rules as convert_dsv4_jangtq.classify but all quantizable
     weights go through `affine` (mx.quantize). bookend_bits controls
@@ -396,6 +677,7 @@ def classify(
             name,
             routed_group_size,
             routed_projection_group_sizes,
+            routed_projection_layer_group_sizes,
         )
         return bits, "affine", group_size
     if token_bookend_bits is not None and is_token_bookend_weight(name):
@@ -423,6 +705,16 @@ def convert(src: Path, dst: Path, profile_bits: int,
             token_bookend_bits: int | None = None,
             token_bookend_group_size: int | None = None,
             routed_projection_layer_bits: dict[str, dict[int, int]] | None = None,
+            routed_projection_layer_group_sizes: dict[str, dict[int, int]] | None = None,
+            expected_revision: str | None = None,
+            plan_file: Path | None = None,
+            chat_compat_report: Path | None = None,
+            awq_stats: Path | None = None,
+            awq_alpha: float = 0.25,
+            awq_clip_min: float = 0.5,
+            awq_clip_max: float = 2.0,
+            imatrix_alpha: float = 0.25,
+            model_name: str | None = None,
             drop_mtp: bool = False) -> None:
     import mlx.core as mx
 
@@ -436,8 +728,40 @@ def convert(src: Path, dst: Path, profile_bits: int,
     routed_projection_group_sizes = dict(
         sorted((routed_projection_group_sizes or {}).items())
     )
+    routed_projection_layer_group_sizes = {
+        proj: dict(sorted(layer_groups.items()))
+        for proj, layer_groups in sorted(
+            (routed_projection_layer_group_sizes or {}).items()
+        )
+    }
+    if dst.exists() and any(dst.iterdir()):
+        raise FileExistsError(f"destination is non-empty: {dst}")
     dst.mkdir(parents=True, exist_ok=True)
+    release_lock, source_provenance = _source_provenance(src, expected_revision)
     idx = ShardIndex(src)
+    source_config = json.loads((src / "config.json").read_text())
+    awq_scales: dict[int, np.ndarray] = {}
+    imatrix_down_scales: dict[int, np.ndarray] = {}
+    awq_stats_sha256 = None
+    if awq_stats is not None:
+        awq_stats = awq_stats.expanduser().resolve()
+        awq_scales = load_awq_ffn_scales(
+            awq_stats,
+            hidden_size=int(source_config["hidden_size"]),
+            num_layers=int(source_config["num_hidden_layers"]),
+            alpha=awq_alpha,
+            clip_min=awq_clip_min,
+            clip_max=awq_clip_max,
+        )
+        imatrix_down_scales = load_imatrix_down_scales(
+            awq_stats,
+            intermediate_size=int(source_config["moe_intermediate_size"]),
+            num_layers=int(source_config["num_hidden_layers"]),
+            alpha=imatrix_alpha,
+            clip_min=awq_clip_min,
+            clip_max=awq_clip_max,
+        )
+        awq_stats_sha256 = _sha256_file(awq_stats)
     print(f"[convert] source: {src}")
     print(f"[convert] target: {dst}")
     print(f"[convert] profile: JANG_{profile_bits}L (all-affine, "
@@ -468,9 +792,26 @@ def convert(src: Path, dst: Path, profile_bits: int,
             "[convert] routed projection group-size plan: "
             f"{routed_projection_group_sizes}"
         )
+    if routed_projection_layer_group_sizes:
+        print(
+            "[convert] routed projection/layer group-size plan: "
+            f"{routed_projection_layer_group_sizes}"
+        )
     if drop_mtp:
         print("[convert] MTP tensors: DROP", flush=True)
+    if awq_scales:
+        print(
+            f"[convert] AWQ FFN fold: {len(awq_scales)} layers, "
+            f"alpha={awq_alpha}, clip=[{awq_clip_min}, {awq_clip_max}]",
+            flush=True,
+        )
+        print(
+            f"[convert] diagonal imatrix down fold: "
+            f"{len(imatrix_down_scales)} layers, alpha={imatrix_alpha}",
+            flush=True,
+        )
     weight_keys = [k for k in idx.keys if not k.endswith(".scale")]
+    dspark = _discover_dspark(src, weight_keys)
     if drop_mtp:
         before = len(weight_keys)
         weight_keys = [k for k in weight_keys if not k.startswith("mtp.")]
@@ -483,6 +824,8 @@ def convert(src: Path, dst: Path, profile_bits: int,
     shard_buf: dict[str, np.ndarray] = {}
     shard_map: dict[str, str] = {}
     totals = {"affine": 0, "passthrough": 0}
+    awq_folded = {"ffn_norm": 0, "router": 0, "routed_w1_w3": 0, "shared_w1_w3": 0}
+    imatrix_folded = {"routed_w2": 0, "routed_w3_inverse": 0}
     group_totals: dict[str, int] = {}
     quant_overrides: dict[str, dict] = {}
     t_start = time.time()
@@ -525,13 +868,37 @@ def convert(src: Path, dst: Path, profile_bits: int,
             routed_down_layer_bits,
             routed_projection_layer_bits,
             routed_projection_group_sizes,
+            routed_projection_layer_group_sizes,
         )
         if method == "passthrough":
-            arr = read_passthrough(idx, name)
+            if awq_scales and re.match(
+                r"^layers\.\d+\.(?:ffn_norm\.weight|ffn\.gate\.weight)$", name
+            ):
+                source_tensor = idx.read_tensor(name, out_dtype=torch.float32)
+                source_tensor, folded = apply_awq_ffn_fold(name, source_tensor, awq_scales)
+                arr = source_tensor.numpy().astype(np.float32)
+                if folded:
+                    awq_folded["ffn_norm" if name.endswith("ffn_norm.weight") else "router"] += 1
+            else:
+                arr = read_passthrough(idx, name)
             add_tensor(name, arr)
             totals["passthrough"] += 1
         else:  # affine
             t = idx.read_tensor(name, out_dtype=torch.float32)
+            if awq_scales:
+                t, folded = apply_awq_ffn_fold(name, t, awq_scales)
+                if folded:
+                    if ".shared_experts." in name:
+                        awq_folded["shared_w1_w3"] += 1
+                    else:
+                        awq_folded["routed_w1_w3"] += 1
+                t, imatrix_projection = apply_imatrix_down_fold(
+                    name, t, imatrix_down_scales
+                )
+                if imatrix_projection == "w2":
+                    imatrix_folded["routed_w2"] += 1
+                elif imatrix_projection == "w3":
+                    imatrix_folded["routed_w3_inverse"] += 1
             gsz = compatible_group_size(int(t.shape[-1]), requested_gs)
             w = mx.array(t.numpy())
             qw, qs, qb = mx.quantize(w, group_size=gsz, bits=bits)
@@ -562,9 +929,21 @@ def convert(src: Path, dst: Path, profile_bits: int,
         "weight_map": final_map,
     }, indent=2))
 
-    src_cfg = json.loads((src / "config.json").read_text())
+    src_cfg = source_config
     src_cfg.pop("quantization_config", None)
-    mtp_layers = int(src_cfg.get("num_nextn_predict_layers", 0))
+    source_num_nextn_predict_layers = int(
+        src_cfg.get("num_nextn_predict_layers", 0) or 0
+    )
+    mtp_layers = int(dspark["stage_count"])
+    if mtp_layers and not drop_mtp:
+        # The 0731 Transformers field retains the older value 1 while the
+        # official inference config and indexed namespaces define three
+        # DSpark stages. Runtime-facing metadata must describe the stored
+        # artifact; the exact source value remains in jang_config provenance.
+        src_cfg["num_nextn_predict_layers"] = mtp_layers
+        src_cfg["source_num_nextn_predict_layers"] = (
+            source_num_nextn_predict_layers
+        )
     # transformers 4.45+ renamed `rope_scaling` -> `rope_parameters` and
     # `type` -> `rope_type` inside the dict. Add the newer spelling for
     # compatibility, but never remove rope_scaling: jang_tools.dsv4.mlx_model
@@ -608,6 +987,7 @@ def convert(src: Path, dst: Path, profile_bits: int,
         or routed_down_layer_bits
         or routed_projection_layer_bits
         or routed_projection_group_sizes
+        or routed_projection_layer_group_sizes
     ):
         routed_expert_bit_plan = {
             "default_bits": profile_bits,
@@ -630,6 +1010,10 @@ def convert(src: Path, dst: Path, profile_bits: int,
             },
             "routed_projection_group_sizes": {
                 str(k): int(v) for k, v in routed_projection_group_sizes.items()
+            },
+            "routed_projection_layer_group_sizes": {
+                str(proj): {str(k): int(v) for k, v in layer_groups.items()}
+                for proj, layer_groups in routed_projection_layer_group_sizes.items()
             },
         }
         quant_cfg["routed_expert_bit_plan"] = routed_expert_bit_plan
@@ -663,6 +1047,8 @@ def convert(src: Path, dst: Path, profile_bits: int,
             for k, v in routed_projection_group_sizes.items()
         )
         profile_suffix += f"_{gs_tag}"
+    if routed_projection_layer_group_sizes:
+        profile_suffix += "_ProjLayerGS"
     if bookend_group_size != routed_group_size:
         profile_suffix += f"_BKGS{bookend_group_size}"
     if bookend_bits != 8:
@@ -694,20 +1080,61 @@ def convert(src: Path, dst: Path, profile_bits: int,
         src_cfg["runtime"].update({
             "bundle_has_mtp": True,
             "mtp_layers": mtp_layers,
-            "mtp_mode": "preserved_disabled",
+            "mtp_mode": "dspark_preserved_disabled",
         })
-    src_cfg["_name_or_path"] = f"DSV4-Flash-{profile_suffix}"
+    if awq_scales:
+        profile_suffix += "_AWQ_DiagImatrix"
+    src_cfg["_name_or_path"] = model_name or f"DSV4-Flash-{profile_suffix}"
     (dst / "config.json").write_text(json.dumps(src_cfg, indent=2))
 
+    generation_config = json.loads(
+        (src / "generation_config.json").read_text()
+    )
+    # DeepSeek recommends nucleus sampling at top_p=0.95 for agentic use.
+    # DSV4 JANG bundles are primarily deployed through agent runtimes, so keep
+    # both the HF sidecar and the higher-priority JANG sampling stamp aligned.
+    generation_config.update({
+        "do_sample": True,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+    })
+    source_tokenizer_config = json.loads(
+        (src / "tokenizer_config.json").read_text()
+    )
     (dst / "jang_config.json").write_text(json.dumps({
         "weight_format": "affine",
         "profile": profile_suffix,
-        "source_model": str(src),
+        "source_model": source_provenance,
+        "source_revision": source_provenance.get("revision"),
         "critical_f32_preserved": True,
+        "awq": {
+            "enabled": bool(awq_scales),
+            "method": "normalized_ffn_input_fold" if awq_scales else None,
+            "scope": "routed/shared w1+w3 plus router, inverse ffn_norm" if awq_scales else None,
+            "alpha": awq_alpha if awq_scales else None,
+            "scale_clip": [awq_clip_min, awq_clip_max] if awq_scales else None,
+            "calibrated_layers": sorted(awq_scales),
+            "calibration_sha256": awq_stats_sha256,
+            "folded_tensor_counts": awq_folded,
+            "runtime_sidecar_required": False,
+        },
+        "imatrix": {
+            "enabled": bool(imatrix_down_scales),
+            "method": "diagonal_activation_second_moment_fold" if imatrix_down_scales else None,
+            "scope": "routed w2 columns plus inverse routed w3 rows" if imatrix_down_scales else None,
+            "alpha": imatrix_alpha if imatrix_down_scales else None,
+            "scale_clip": [awq_clip_min, awq_clip_max] if imatrix_down_scales else None,
+            "calibrated_layers": sorted(imatrix_down_scales),
+            "calibration_sha256": awq_stats_sha256,
+            "folded_tensor_counts": imatrix_folded,
+            "codec": "mlx_affine",
+            "runtime_sidecar_required": False,
+        },
         "dsv4_runtime_requirements": {
             "limited_swiglu_tq_patch": False,
             "generic_mlx_sinks": False,
-            "native_cache_schema": "deepseek_v4_v7",
+            "native_cache_schema": "deepseek_v4_v9",
             "generic_turboquant_kv": False,
             "long_ctx_default": True,
             "pool_quant_default": False,
@@ -719,7 +1146,8 @@ def convert(src: Path, dst: Path, profile_bits: int,
             "shared_expert": bookend_bits,
             "embed_tokens": token_bookend_bits or bookend_bits,
             "lm_head": token_bookend_bits or bookend_bits,
-            "mtp_matmul": bookend_bits,
+            "mtp_routed_expert": profile_bits,
+            "mtp_non_routed_matmul": bookend_bits,
             "norms_router_hc": 16,
         },
         "affine_group_size": {
@@ -728,7 +1156,8 @@ def convert(src: Path, dst: Path, profile_bits: int,
             "shared_expert": bookend_group_size,
             "embed_tokens": token_bookend_group_size or bookend_group_size,
             "lm_head": token_bookend_group_size or bookend_group_size,
-            "mtp_matmul": bookend_group_size,
+            "mtp_routed_expert": routed_group_size,
+            "mtp_non_routed_matmul": bookend_group_size,
         },
         "quantization": {
             "method": "affine",
@@ -787,9 +1216,16 @@ def convert(src: Path, dst: Path, profile_bits: int,
             {str(k): int(v) for k, v in routed_projection_group_sizes.items()}
             if routed_projection_group_sizes else {}
         ),
+        "routed_projection_layer_group_sizes": (
+            {
+                str(proj): {str(k): int(v) for k, v in layer_groups.items()}
+                for proj, layer_groups in routed_projection_layer_group_sizes.items()
+            }
+            if routed_projection_layer_group_sizes else {}
+        ),
         "cache": {
-            "schema": "deepseek_v4_v7",
-            "components": ["swa", "csa", "hsa"],
+            "schema": "deepseek_v4_v9",
+            "components": ["swa", "csa", "hca", "compressor", "indexer"],
             "sliding_window": src_cfg.get("sliding_window"),
             "compress_ratios": src_cfg.get("compress_ratios"),
             "generic_turboquant_kv": False,
@@ -808,11 +1244,33 @@ def convert(src: Path, dst: Path, profile_bits: int,
                 "and DSV4 SWA+CSA/HSA composite-cache-safe rollback"
             ),
         },
+        "dspark": {
+            "preserved": mtp_layers > 0 and not drop_mtp,
+            "runtime_enabled": False,
+            "mode": "dropped" if drop_mtp else (
+                "preserved_disabled" if mtp_layers > 0 else "absent"
+            ),
+            **dspark,
+            "activation_requires": [
+                "main hidden-state capture at target layers",
+                "five-token DSpark draft block",
+                "Markov and confidence heads",
+                "SWA+CSA+HCA composite-cache atomic rollback",
+            ],
+        },
+        "runtime": {
+            "bundle_has_mtp": mtp_layers > 0 and not drop_mtp,
+            "mtp_layers": 0 if drop_mtp else mtp_layers,
+            "mtp_mode": "dropped" if drop_mtp else (
+                "dspark_preserved_disabled" if mtp_layers > 0 else "absent"
+            ),
+        },
         "source_config": {
             "n_routed_experts": src_cfg.get("n_routed_experts"),
             "num_experts_per_tok": src_cfg.get("num_experts_per_tok"),
             "num_hidden_layers": src_cfg.get("num_hidden_layers"),
-            "num_nextn_predict_layers": mtp_layers,
+            "num_nextn_predict_layers": source_num_nextn_predict_layers,
+            "inference_n_mtp_layers": dspark["inference_n_mtp_layers"],
             "sliding_window": src_cfg.get("sliding_window"),
             "compress_ratios": src_cfg.get("compress_ratios"),
             "hc_mult": src_cfg.get("hc_mult"),
@@ -824,8 +1282,10 @@ def convert(src: Path, dst: Path, profile_bits: int,
         "chat": {
             "encoder": "encoding_dsv4",
             "encoder_fn": "encode_messages",
-            "chat_template_source": "tokenizer_config",
-            "has_tokenizer_chat_template": True,
+            "chat_template_source": "official_python_encoder",
+            "has_tokenizer_chat_template": bool(
+                source_tokenizer_config.get("chat_template")
+            ),
             "bos_token": "<｜begin▁of▁sentence｜>",
             "eos_token": "<｜end▁of▁sentence｜>",
             "bos_token_id": 0,
@@ -838,10 +1298,16 @@ def convert(src: Path, dst: Path, profile_bits: int,
             "reasoning": {
                 "supported": True,
                 "modes": ["chat", "thinking"],
-                "default_mode": "chat",
+                # This reasoning-capable release should enter its native
+                # thinking rail when a client leaves the mode on Auto. Explicit
+                # enable_thinking=false remains the instruct/direct escape
+                # hatch, while max stays request-only. The 0731 encoder's
+                # unspecified effort is its native low effort.
+                "default_mode": "thinking",
+                "default_effort": "low",
                 "thinking_start": "<think>",
                 "thinking_end": "</think>",
-                "reasoning_effort_levels": ["max", "high", None],
+                "reasoning_effort_levels": ["low", "high", "max"],
                 "drop_earlier_reasoning": True,
             },
             "tool_calling": {
@@ -853,14 +1319,7 @@ def convert(src: Path, dst: Path, profile_bits: int,
                 "parameter_block": "parameter",
                 "tool_output_tag": "tool_result",
             },
-            "sampling_defaults": {
-                "temperature": 0.6,
-                "top_p": 0.95,
-                "repetition_penalty": 1.0,
-                "repetition_penalty_thinking": 1.0,
-                "repetition_penalty_chat": 1.05,
-                "max_new_tokens": 4096,
-            },
+            "sampling_defaults": generation_config,
         },
     }, indent=2, ensure_ascii=False))
 
@@ -870,45 +1329,42 @@ def convert(src: Path, dst: Path, profile_bits: int,
                 and p.name not in ("config.json", "model.safetensors.index.json"):
             shutil.copy2(p, dst / p.name)
             copied += 1
+    # The aux-file copy above includes the source generation_config.json.
+    # Rewrite it with the audited JANG deployment defaults used above so the
+    # two runtime metadata sources cannot disagree.
+    (dst / "generation_config.json").write_text(
+        json.dumps(generation_config, indent=2, ensure_ascii=False) + "\n"
+    )
     enc = src / "encoding"
     if enc.is_dir():
-        shutil.copytree(enc, dst / "encoding", dirs_exist_ok=True)
+        shutil.copytree(
+            enc,
+            dst / "encoding",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                "__pycache__", "*.pyc", "*.pyo", ".DS_Store"
+            ),
+        )
         copied += 1
     print(f"[convert] copied {copied} aux files/dirs")
 
-    tok_cfg = dst / "tokenizer_config.json"
-    if tok_cfg.exists():
-        data = json.loads(tok_cfg.read_text())
-        data["chat_template"] = DSV4_CHAT_TEMPLATE_JINJA
-        tok_cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        print("[convert] injected DSV4 chat_template into tokenizer_config.json")
-
-    # Force eos_token_id to a list including <|User|> when the tokenizer can
-    # resolve it, preventing generated assistant turns from rolling into a fake
-    # user turn after <|end_of_sentence|>.
-    try:
-        from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(str(dst), trust_remote_code=True)
-        eos_id = tok.convert_tokens_to_ids("<｜end▁of▁sentence｜>")
-        user_id = tok.convert_tokens_to_ids("<｜User｜>")
-        if eos_id is not None and user_id is not None and eos_id != user_id:
-            eos_list = sorted({int(eos_id), int(user_id)})
-            for fn in ("config.json", "generation_config.json", "tokenizer_config.json"):
-                p = dst / fn
-                if not p.exists():
-                    continue
-                data = json.loads(p.read_text())
-                data["eos_token_id"] = eos_list
-                p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-            print(f"[convert] forced eos_token_id={eos_list} in config files")
-    except Exception as eos_err:
-        print(f"[convert] WARN eos list patch failed: {eos_err}")
+    if plan_file is not None:
+        shutil.copy2(plan_file, dst / "dsv4-affine-plan.json")
+    if chat_compat_report is not None:
+        shutil.copy2(
+            chat_compat_report,
+            dst / "dsv4-chat-compatibility.json",
+        )
+    if awq_stats is not None:
+        shutil.copy2(awq_stats, dst / "awq-calibration.safetensors")
 
     elapsed = time.time() - t_start
     print(f"\nDONE in {elapsed:.0f}s ({elapsed/60:.1f} min)")
     print(f"  affine={totals['affine']}  passthrough={totals['passthrough']}")
     print(f"  group_totals={group_totals}")
     print(f"  quant_overrides={len(quant_overrides)}")
+    print(f"  awq_folded={awq_folded}")
+    print(f"  imatrix_folded={imatrix_folded}")
     print(f"  output size: {total_bytes / 1e9:.1f} GB")
 
 
@@ -968,6 +1424,29 @@ def main() -> int:
                     help="projection-specific routed expert affine group sizes "
                          "such as gate=32,up=64,down=64. This is useful for "
                          "DQ-style all-affine size experiments.")
+    ap.add_argument("--routed-projection-layer-group-sizes-file", type=Path,
+                    help="JSON file containing per-main-layer projection group "
+                         "sizes under routed_projection_layer_group_sizes. All "
+                         "256 experts in a layer/projection unit share the "
+                         "selected group size.")
+    ap.add_argument("--expected-revision",
+                    help="require the source .dsv4-release-lock.json to match "
+                         "this immutable Hugging Face revision")
+    ap.add_argument("--plan-file", type=Path,
+                    help="copy the exact selected plan into the bundle")
+    ap.add_argument("--chat-compat-report", type=Path,
+                    help="copy the canonical-encoder compatibility report "
+                         "into the bundle")
+    ap.add_argument("--awq-stats", type=Path,
+                    help="per-layer layers.N.experts_input activation stats; "
+                         "folded into DSV4 FFN weights/norm/router")
+    ap.add_argument("--awq-alpha", type=float, default=0.25)
+    ap.add_argument("--awq-clip-min", type=float, default=0.5)
+    ap.add_argument("--awq-clip-max", type=float, default=2.0)
+    ap.add_argument("--imatrix-alpha", type=float, default=0.25,
+                    help="diagonal down-input imatrix exponent")
+    ap.add_argument("--model-name",
+                    help="canonical bundle name stamped into config.json")
     ap.add_argument("--drop-mtp", action="store_true",
                     help="drop mtp.* tensors and mark the bundle as no-MTP. "
                          "Keep unset for preserved-disabled MTP artifacts.")
@@ -998,6 +1477,20 @@ def main() -> int:
         token_bookend_bits=args.token_bookend_bits,
         token_bookend_group_size=args.token_bookend_group_size,
         routed_projection_layer_bits=routed_projection_layer_bits,
+        routed_projection_layer_group_sizes=(
+            parse_routed_projection_layer_group_sizes_file(
+                args.routed_projection_layer_group_sizes_file
+            )
+        ),
+        expected_revision=args.expected_revision,
+        plan_file=args.plan_file,
+        chat_compat_report=args.chat_compat_report,
+        awq_stats=args.awq_stats,
+        awq_alpha=args.awq_alpha,
+        awq_clip_min=args.awq_clip_min,
+        awq_clip_max=args.awq_clip_max,
+        imatrix_alpha=args.imatrix_alpha,
+        model_name=args.model_name,
         drop_mtp=args.drop_mtp,
     )
     return 0

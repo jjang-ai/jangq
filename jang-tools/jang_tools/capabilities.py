@@ -21,6 +21,7 @@ stamped artifacts (idempotent).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,21 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # visible content, not in an auto-opened reasoning prefix.
     "zaya":              ("zaya",        "qwen3",       "zaya_xml", False, "hybrid"),
     "zaya1_vl":          ("zaya1_vl",    "qwen3",       "zaya_xml", False, "hybrid"),
+    # Inkling (thinkingmachines) — no RoPE, 35x sliding-512 + 7x full attention,
+    # 4 fp32 short convs per layer, 256 routed + 2 router-gated shared experts.
+    # cache_type "hybrid": sliding + full KV *and* four per-layer conv states.
+    # Upstream vLLM now ships dedicated `inkling` reasoning and tool parsers for
+    # the model's content-channel protocol:
+    #   <|content_thinking|>, <|content_text|>,
+    #   <|content_invoke_tool_json|>, <|end_message|>,
+    #   <|content_model_end_sampling|>.
+    # Do not substitute qwen3/deepseek_r1/native here: those parsers do not own
+    # Inkling's channel-state transitions.
+    # think_in_template is False: the template's generation prompt ends at
+    # `<|message_model|>` and does NOT auto-open a thinking block, so generation
+    # must start in a neutral message and let the model pick the channel.
+    "inkling":           ("inkling",     "inkling",     "inkling",  False, "hybrid"),
+    "inkling_mm_model":  ("inkling",     "inkling",     "inkling",  False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
     "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3_5_text":     ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
@@ -93,9 +109,14 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     # `content` null — visible as empty UI bubbles on thinking-off prompts.
     "bailing_hybrid":   ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
     "bailing_moe_v2_5": ("bailing_hybrid", "deepseek_r1", "deepseek", False, "hybrid"),
-    # Liquid LFM2/LFM2.5 hybrid LIV-conv + GQA + MoE. The template does not
-    # pre-open a think block, but model outputs use <think>...</think> and
-    # tool calls use the Liquid Python-call format parsed by vmlx as "lfm2".
+    # Liquid LFM2/LFM2.5 hybrid LIV-conv + GQA (+ MoE variants). Original
+    # LFM2 templates do NOT pre-open a think block (table default False),
+    # but LFM2.5-2.6B (2026-07-28) is an always-thinking model whose
+    # template ends the generation prompt with a literal `<think>` — for
+    # such bundles _template_preopens_think lifts think_in_template to True
+    # from the shipped template itself. Model outputs use <think>...</think>
+    # and tool calls use the Liquid Python-call format parsed by vmlx as
+    # "lfm2".
     "lfm2":             ("lfm2",       "qwen3",       "lfm2",     False, "hybrid"),
     "lfm2_moe":         ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
     "lfm2_5":           ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
@@ -132,6 +153,20 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "llama3":           ("llama",       None,          "llama",    False, "kv"),
     # idefics3 (SmolVLM) — llama text decoder + SigLIP vision encoder
     "idefics3":         ("idefics3",    None,          "llama",    False, "kv"),
+    # Nanbeige 4.x (BOSS Zhipin) — LOOPED TRANSFORMER. Per-layer math is plain
+    # Llama GQA, so the per-entry cache codec is ordinary KV ("kv" here is
+    # correct and keeps generic prefix/paged/L2 paths usable) — BUT the stack is
+    # executed `num_loops` times over shared weights and each pass owns its own
+    # cache slots, so the cache has `num_hidden_layers * num_loops` entries
+    # (44 on 4.2-3B), NOT `num_hidden_layers`. A runtime that sizes the cache
+    # from num_hidden_layers silently corrupts every token past the first.
+    # `config.json["jang_runtime"]["cache_slots"]` carries the true count.
+    # Reasoning: qwen3-style <think>/</think>, and the chat template pre-opens
+    # `<think>\n` in the generation prompt → think_in_template=True.
+    # Tools: default `tool_call_format='xml'` emits
+    # <tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>
+    # → the same shape mimo_v2/nemotron-ultra use, parser "xml_function".
+    "nanbeige":         ("nanbeige",    "qwen3",       "xml_function", True, "kv"),
 }
 
 
@@ -147,7 +182,7 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     candidates: list[str] = []
 
     src_dict = jang.get("source_model") or {}
-    if isinstance(src_dict.get("architecture"), str):
+    if isinstance(src_dict, dict) and isinstance(src_dict.get("architecture"), str):
         candidates.append(src_dict["architecture"])
 
     arch_dict = jang.get("architecture")
@@ -198,10 +233,83 @@ _VISION_WEIGHT_PATTERNS = (
 _AUDIO_WEIGHT_PATTERNS = (
     "audio_tower", "audio_model", "audio_encoder", "audio_embedder",
     "embed_audio", "audio_projector", "whisper",
+    # Dot-separated namespaces: Inkling ships `model.audio.encoder.weight`
+    # (a [mel_vocab*n_mel_bins, hidden] embedding table for dmel tokens) plus
+    # `model.audio.final_norm.weight`. The underscore patterns above miss those,
+    # so the vestigial-modality gate wrongly stamped has_audio=false on a model
+    # that genuinely accepts audio input.
+    "audio.encoder", "audio.final_norm", "model.audio.",
 )
 _VIDEO_WEIGHT_PATTERNS = (
     "video_tower", "video_model", "video_embedder", "embed_video",
 )
+
+
+_THINKING_TEMPLATE_MARKERS = (
+    "content_thinking", "reasoning_content", "reasoning_effort",
+    "<think>", "</think>", "enable_thinking", "thinking effort",
+)
+
+
+def _template_has_thinking(model_path: Path | None) -> bool:
+    """True when the bundle's chat template exposes a reasoning channel.
+
+    Evidence-based signal for `supports_thinking`, so a family without a
+    dedicated reasoning parser is not mis-advertised as unable to reason.
+    Returns False when there is no readable template (never guesses True).
+    """
+    if model_path is None:
+        return False
+    for name in ("chat_template.jinja", "chat_template.json", "tokenizer_config.json"):
+        p = Path(model_path) / name
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(errors="ignore").lower()
+        except OSError:
+            continue
+        if any(m in text for m in _THINKING_TEMPLATE_MARKERS):
+            return True
+    return False
+
+
+def _template_preopens_think(model_path: Path | None) -> bool:
+    """True when the shipped template UNCONDITIONALLY pre-opens ``<think>``
+    in its ``add_generation_prompt`` block.
+
+    Template-evidence lift for `think_in_template`: a static FAMILY_MAP
+    boolean cannot be right for a model_type whose vendors changed template
+    convention mid-family — LFM2's original templates end the generation
+    prompt at ``assistant\\n`` (False), while LFM2.5-2.6B (2026-07-28) is an
+    always-thinking model whose template ends it with ``<think>`` (True).
+    Deliberately conservative: the block must contain NO nested jinja tags
+    (a conditional ``<think>`` like Bailing's ``detailed thinking on`` or
+    qwen3's ``enable_thinking`` keeps the table value), and only the LAST
+    ``if add_generation_prompt`` block is inspected. A closed ``</think>``
+    prefill (zaya-style) does not match. Never guesses True on read errors.
+    """
+    if model_path is None:
+        return False
+    p = Path(model_path) / "chat_template.jinja"
+    if not p.is_file():
+        return False
+    try:
+        text = p.read_text(errors="ignore")
+    except OSError:
+        return False
+    blocks = re.findall(
+        r"\{%-?\s*if\s+add_generation_prompt\s*-?%\}(.*?)\{%-?\s*endif\s*-?%\}",
+        text, flags=re.DOTALL,
+    )
+    if not blocks:
+        return False
+    block = blocks[-1]
+    if re.search(r"\{%", block):
+        return False  # nested logic — thinking is conditional, keep table value
+    literals = re.findall(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'', block)
+    emitted = "".join(a or b for a, b in literals)
+    emitted = emitted.replace("\\n", "\n").rstrip("\n ")
+    return emitted.endswith("<think>") and not emitted.endswith("</think>")
 
 
 def _bundle_tensor_names(model_path: Path | None) -> list[str] | None:
@@ -331,6 +439,12 @@ def build_capabilities(
     if matched is None:
         return None
     family, reasoning, tool, think_in_template, cache_type = FAMILY_MAP[matched]
+    # Template-evidence lift: an unconditional `<think>`-terminated
+    # generation prompt overrides a False table default (see
+    # _template_preopens_think — LFM2.5-2.6B always-thinking case). Only
+    # False->True with hard evidence; True rows were vetted per family.
+    if not think_in_template and _template_preopens_think(model_path):
+        think_in_template = True
     modality = _resolve_modality(jang, config, model_path, tensor_names)
     modalities = _resolve_modalities(jang, config, model_path, tensor_names)
     # supports_thinking advertises whether the model architecturally produces
@@ -341,7 +455,14 @@ def build_capabilities(
     # (think_in_template=False is correct because the default template emits
     # a closed </think> block) with model-capability claims. Keep
     # think_in_template=False, but mark supports_thinking=True.
-    supports_thinking = reasoning is not None
+    # The same conflation previously recurred on Inkling before upstream added
+    # its dedicated parser: parser absence stamped supports_thinking=false on a
+    # model whose template defaults reasoning_effort to 0.9 and carries a native
+    # thinking channel. Parser availability is a routing fact; model reasoning
+    # is a capability claim. Keep the template evidence fallback for legacy
+    # bundles even though current Inkling rows now resolve the native parser.
+    supports_thinking = (reasoning is not None
+                         or _template_has_thinking(model_path))
     return {
         "reasoning_parser": reasoning,
         "tool_parser": tool,
@@ -423,7 +544,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
     if missing:
         return False, f"capabilities missing keys: {sorted(missing)}"
 
-    valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4",
+    valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4", "inkling",
                        "openai_gptoss", None}
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
@@ -433,7 +554,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # have dedicated parsers in vmlx_engine.tool_parsers.
                   # Without these, verify_directory rejected legitimate
                   # DSV4 / Zaya bundles after stamp.
-                  "dsml", "zaya_xml",
+                  "dsml", "zaya_xml", "inkling",
                   # Tencent Hy3-preview emits its own XML-like tool tags
                   # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
                   # registers this parser as "hy_v3", SGLang as "hunyuan".

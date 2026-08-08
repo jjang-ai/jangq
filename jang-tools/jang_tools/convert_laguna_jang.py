@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -123,6 +124,60 @@ _PROFILES = {
 }
 
 
+# ── QAT grid experts (Raptor-1.0-16B) ────────────────────────────────────
+def _to_bf16(x: np.ndarray) -> np.ndarray:
+    """Round fp32 -> bf16 -> fp32. The QAT forward used a bf16 scale; using
+    an fp32 scale here would reproduce a slightly different function."""
+    import torch
+
+    return torch.from_numpy(np.ascontiguousarray(x)).bfloat16().float().numpy()
+
+
+def qat_snap_int4_g128(w: np.ndarray, group_size: int = 128):
+    """Snap onto the QAT grid per CONVERT.md Path A — an APPROXIMATION.
+
+    Symmetric int4, groups of ``group_size`` along the INPUT (last) dim,
+    ``scale = bf16(group_absmax / 7.5)``, ``q = clamp(round(w/scale), -8, 7)``.
+
+    ⚠ Measured against poolside's packed W4A16 codes (2026-07-29, three expert
+    projections across layers 1/20/39): this reproduces ~99.4% of codes, but
+    ~0.6% differ by exactly ±1 because their bf16 scale rounding differs from
+    ours by up to one ULP (max rel 3.8e-3..5.3e-3). It is therefore NOT the
+    certified function. Use ``--qat-packed`` (Path B) for anything that ships
+    under the certified numbers; this path is for analysis only.
+
+    Returns (q_sym int8 in [-8,7], scale fp32-holding-bf16-values).
+    """
+    if w.shape[-1] % group_size:
+        raise ValueError(
+            f"last dim {w.shape[-1]} not divisible by group_size {group_size}")
+    grp = w.reshape(*w.shape[:-1], w.shape[-1] // group_size, group_size)
+    scale = _to_bf16(np.abs(grp).max(-1, keepdims=True) / 7.5)
+    safe = np.where(scale > 0, scale, np.float32(1.0))
+    q = np.clip(np.rint(grp / safe), -8, 7).astype(np.int8)
+    return q.reshape(w.shape), scale.squeeze(-1).astype(np.float32)
+
+
+def pack_affine4(q_affine: np.ndarray) -> np.ndarray:
+    """Pack 4-bit codes (0..15) into uint32, 8 per word, little nibble first
+    — MLX's affine layout, which is also the W4A16 packed layout."""
+    a = q_affine.reshape(*q_affine.shape[:-1], -1, 8).astype(np.uint32)
+    shifts = (np.arange(8, dtype=np.uint32) * np.uint32(4))
+    return (a << shifts).sum(-1).astype(np.uint32)
+
+
+def qat_expert_affine(w: np.ndarray, group_size: int = 128):
+    """Snap to the QAT grid and express it losslessly as a jang affine block.
+
+    MLX dequantizes affine as ``q*scale + bias``; with ``q = q_sym + 8`` and
+    ``bias = -8*scale`` that is exactly ``q_sym * scale`` — the symmetric QAT
+    grid, carried in the affine container the runtime already understands.
+    """
+    q_sym, scale = qat_snap_int4_g128(w, group_size)
+    packed = pack_affine4((q_sym.astype(np.int16) + 8).astype(np.uint8))
+    return packed, scale, (-8.0 * scale)
+
+
 def profile_policy(profile: str) -> LagunaJangPolicy:
     key = profile.upper()
     if key not in _PROFILES:
@@ -152,6 +207,28 @@ def _template_default_enable_thinking(template_text: str | None) -> bool:
     if false_marker in compact:
         return False
     return False
+
+
+# Matches only the `enable_thinking = enable_thinking | default(<bool>)`
+# assignment — not the many other `| default(...)` calls in the template.
+_THINKING_DEFAULT_RE = re.compile(
+    r"(enable_thinking\s*=\s*enable_thinking\s*\|\s*default\(\s*)"
+    r"(true|false)"
+    r"(\s*\))"
+)
+
+
+def _set_template_thinking_default(template_text: str, want: bool) -> tuple[str, int]:
+    """Rewrite the template's literal thinking fallback to ``want``.
+
+    Returns (new_text, n_substitutions) so the caller can refuse to ship when
+    the fallback is absent or ambiguous rather than silently doing nothing.
+    """
+    new_text, n = _THINKING_DEFAULT_RE.subn(
+        lambda m: f"{m.group(1)}{'true' if want else 'false'}{m.group(3)}",
+        template_text,
+    )
+    return new_text, n
 
 
 # Sampling values poolside documents on the model card but omits from some
@@ -287,9 +364,40 @@ def _parse_args(argv=None):
                          "model.layers.{L}.mlp.input_scale)")
     ap.add_argument("--group-size", type=int, default=None,
                     help="override policy group_size")
+    ap.add_argument("--qat-packed", type=Path, default=None,
+                    help="QAT W4A16 artifact dir (e.g. Raptor-1.0-16B-A3B-"
+                         "W4A16). Routed experts are IMPORTED from its packed "
+                         "int4 codes instead of being re-quantized, so the "
+                         "bundle reproduces the certified QAT function "
+                         "bit-exactly (CONVERT.md Path B).")
     ap.add_argument("--shard-bytes", type=int, default=SHARD_BYTES)
     ap.add_argument("--dry-run", action="store_true")
     return ap.parse_args(argv)
+
+
+def _load_raw_pt(src: Path, wm: dict, name: str):
+    """Load a tensor without forcing fp32 — packed codes must stay integral."""
+    import torch  # noqa: F401
+    from safetensors import safe_open
+
+    with safe_open(str(src / wm[name]), framework="pt") as f:
+        return f.get_tensor(name)
+
+
+def load_packed_expert(pdir: Path, pwm: dict, stem: str):
+    """Import one expert projection from the W4A16 artifact as a jang affine
+    block — zero re-quantization (CONVERT.md Path B).
+
+    poolside packs nibbles = q+8, little nibble first, which is byte-for-byte
+    MLX's own affine 4-bit layout, so the packed words are reused verbatim;
+    only the container changes. bias = -8*scale makes MLX's ``q*scale + bias``
+    evaluate the symmetric grid ``q_sym*scale`` exactly.
+    """
+    packed = _load_raw_pt(pdir, pwm, f"{stem}.weight_packed").numpy()
+    if packed.dtype != np.int32:
+        raise SystemExit(f"{stem}.weight_packed dtype {packed.dtype}, expected int32")
+    scale = _load_raw_pt(pdir, pwm, f"{stem}.weight_scale").float().numpy()
+    return packed.view(np.uint32), scale.astype(np.float32)
 
 
 def _load_pt(src: Path, wm: dict, name: str) -> np.ndarray:
@@ -365,6 +473,60 @@ def main(argv=None) -> None:
 
     policy = profile_policy(args.profile)
     gs = args.group_size or policy.group_size
+
+    # ── Path B: certified QAT expert codes ──
+    # Raptor's experts were trained through a symmetric-int4 g128 quantizer
+    # (STE), and every certified number belongs to THAT function. The BF16
+    # merge is the pre-snap master, so re-quantizing it — affine or even a
+    # hand-rolled snap — yields a function nobody measured (a snap from bf16
+    # reproduces ~99.4% of codes; the rest differ by 1 because poolside's
+    # bf16 scale rounding differs by an ULP). Importing the packed codes is
+    # exact by construction.
+    PACKED = args.qat_packed.expanduser() if args.qat_packed else None
+    pwm: dict = {}
+    QAT_GS = 128
+    if PACKED is not None:
+        pidx = PACKED / "model.safetensors.index.json"
+        if not pidx.exists():
+            raise SystemExit(f"missing {pidx}")
+        pwm = json.loads(pidx.read_text())["weight_map"]
+        pmiss = sorted({s for s in pwm.values() if not (PACKED / s).exists()})
+        if pmiss:
+            raise SystemExit(
+                f"QAT artifact incomplete: {len(pmiss)} shards missing; "
+                f"first={pmiss[0]}")
+        man = PACKED / "qat-export-manifest.json"
+        if man.exists():
+            m = json.loads(man.read_text())
+            npack = m.get("expert_tensors_packed")
+            nver = m.get("bit_exact_roundtrip_verified")
+            print(f"  QAT artifact: packed={npack} bit_exact_verified={nver} "
+                  f"group_size={m.get('group_size')}", flush=True)
+            if nver != npack:
+                raise SystemExit(
+                    f"QAT artifact reports {nver}/{npack} tensors verified "
+                    "bit-exact — refusing to import an unverified export")
+            if m.get("group_size") != QAT_GS:
+                raise SystemExit(
+                    f"QAT group_size={m.get('group_size')}, converter assumes "
+                    f"{QAT_GS}")
+        if set(policy.routed_bits.values()) != {4}:
+            raise SystemExit(
+                f"--qat-packed imports 4-bit codes but profile "
+                f"{policy.profile} wants routed bits {policy.routed_bits}")
+        if args.awq is not None:
+            raise SystemExit(
+                "--qat-packed and --awq are mutually exclusive: folding AWQ "
+                "scales would require re-quantizing the experts and discard "
+                "the certified QAT function")
+        # Experts are locked to the QAT grid's 128; non-experts keep the
+        # profile's proven group size. Do NOT force the whole bundle to 128 —
+        # measured 2026-07-29, coarsening the non-expert path to 128 made
+        # greedy decode degenerate into repetition on open-ended prompts,
+        # which poolside's certified W4A16 (BF16 non-experts) does not do.
+        # laguna/runtime.py honours per-module group_size for this.
+        print(f"  group_size: experts {QAT_GS} (QAT grid) / non-experts {gs}",
+              flush=True)
 
     index_path = SRC / "model.safetensors.index.json"
     if not index_path.exists():
@@ -518,18 +680,34 @@ def main(argv=None) -> None:
             emit_quant(f"{pre}.mlp.shared_expert.{proj}", w,
                        policy.shared_expert_bits)
 
-        # routed experts: stack -> prestacked switch_mlp, quantized per policy.
+        # routed experts: stack -> prestacked switch_mlp.
         for proj in _PROJS:
-            rows = moe_inter if proj in ("gate_proj", "up_proj") else H
-            cols = H if proj in ("gate_proj", "up_proj") else moe_inter
-            stack = np.empty((NE, rows, cols), dtype=np.float32)
-            for e in range(NE):
-                stack[e] = _load_pt(SRC, wm, f"{pre}.mlp.experts.{e}.{proj}.weight")
-            if scale is not None and proj in ("gate_proj", "up_proj"):
-                stack *= scale[None, None, :]
-            emit_quant(f"{pre}.mlp.switch_mlp.{proj}", stack,
-                       policy.routed_bits[proj])
-            del stack
+            base = f"{pre}.mlp.switch_mlp.{proj}"
+            if PACKED is not None:
+                # Path B: import the certified QAT codes verbatim.
+                pk, sc = zip(*(
+                    load_packed_expert(
+                        PACKED, pwm, f"{pre}.mlp.experts.{e}.{proj}")
+                    for e in range(NE)))
+                pk = np.stack(pk)
+                sc = np.stack(sc)
+                writer.add(f"{base}.weight", pk)
+                writer.add(f"{base}.scales", sc.astype(np.float16))
+                writer.add(f"{base}.biases", (-8.0 * sc).astype(np.float16))
+                overrides[base] = {"bits": 4, "group_size": QAT_GS,
+                                   "mode": "affine"}
+                del pk, sc
+            else:
+                rows = moe_inter if proj in ("gate_proj", "up_proj") else H
+                cols = H if proj in ("gate_proj", "up_proj") else moe_inter
+                stack = np.empty((NE, rows, cols), dtype=np.float32)
+                for e in range(NE):
+                    stack[e] = _load_pt(
+                        SRC, wm, f"{pre}.mlp.experts.{e}.{proj}.weight")
+                if scale is not None and proj in ("gate_proj", "up_proj"):
+                    stack *= scale[None, None, :]
+                emit_quant(base, stack, policy.routed_bits[proj])
+                del stack
             gc.collect()
             mx.clear_cache()
         print(f"    L{li:2d} moe    {time.time() - tl:.1f}s", flush=True)
@@ -685,6 +863,40 @@ def main(argv=None) -> None:
                "LICENSE.md"):
         if (SRC / fn).exists():
             shutil.copy2(SRC / fn, OUT / fn)
+
+    # ── reconcile the template's literal thinking fallback with the vendor's
+    # explicit declaration ──
+    # Two surfaces declare the DEFAULT reasoning mode: the template's own
+    # `enable_thinking | default(...)` fallback (what a plain transformers
+    # caller gets) and generation_config.default_chat_template_kwargs
+    # .enable_thinking (what vLLM and jang_config honour). Raptor-1.0-16B
+    # ships them in direct contradiction — its template descends from
+    # laguna_glm_thinking_v8, which still defaults false, while its
+    # generation_config declares true, as the whole shipped Laguna-2.1
+    # family does. Left alone the same bundle reasons or does not depending
+    # on who loads it, and a reasoning-trained model served reasoning-OFF
+    # measures far below its real capability (the OsaurusAgent-35B
+    # post-mortem). The explicit vendor kwarg is authoritative, so align the
+    # copied template to it. Only ever touches that one default() literal.
+    tpl_out_p = OUT / "chat_template.jinja"
+    declared = (gen_cfg.get("default_chat_template_kwargs") or {}).get(
+        "enable_thinking")
+    if declared is not None and tpl_out_p.exists():
+        tpl_txt = tpl_out_p.read_text(encoding="utf-8")
+        if _template_default_enable_thinking(tpl_txt) != bool(declared):
+            new_txt, n = _set_template_thinking_default(tpl_txt, bool(declared))
+            if n != 1:
+                raise SystemExit(
+                    "chat template disagrees with generation_config "
+                    f"default_chat_template_kwargs.enable_thinking={declared}, "
+                    f"but the `enable_thinking | default(...)` fallback was "
+                    f"matched {n} times — cannot reconcile safely; fix the "
+                    "template by hand before shipping"
+                )
+            tpl_out_p.write_text(new_txt, encoding="utf-8")
+            print(f"  chat_template: aligned literal thinking fallback "
+                  f"default({not bool(declared)}) -> default({bool(declared)}) "
+                  "to match generation_config", flush=True)
 
     # Inline the REAL chat template into tokenizer_config. poolside ships
     # tokenizer_config.chat_template = "{% include 'chat_template.jinja' %}"

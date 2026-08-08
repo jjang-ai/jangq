@@ -15,7 +15,7 @@ def pack_bits(values: np.ndarray, bits: int) -> np.ndarray:
 
     Args:
         values: uint8 or uint16 array of quantized values (each in range [0, 2^bits - 1])
-        bits: bit width per value (2, 3, 4, 5, 6, or 8)
+        bits: bit width per value (1, 2, 3, 4, 5, 6, or 8)
 
     Returns:
         uint8 array of packed bytes (LSB-first packing)
@@ -32,6 +32,16 @@ def pack_bits(values: np.ndarray, bits: int) -> np.ndarray:
 
     if bits == 8:
         return values.astype(np.uint8)
+
+    if bits == 1:
+        # Fast path: 8 values per byte
+        pad = (8 - n % 8) % 8
+        if pad:
+            values = np.append(values, np.zeros(pad, dtype=np.uint64))
+        packed = np.zeros(len(values) // 8, dtype=np.uint64)
+        for shift in range(8):
+            packed |= values[shift::8] << shift
+        return packed[:total_bytes].astype(np.uint8)
 
     if bits == 4:
         # Fast path: 2 values per byte
@@ -78,16 +88,25 @@ def unpack_bits(packed: np.ndarray, bits: int, count: int) -> np.ndarray:
 
     Args:
         packed: uint8 array of packed bytes
-        bits: bit width per value (2, 3, 4, 5, 6, or 8)
+        bits: bit width per value (1, 2, 3, 4, 5, 6, or 8)
         count: number of values to unpack
 
     Returns:
         uint8 or uint16 array of unpacked values
     """
-    packed = np.asarray(packed, dtype=np.uint8)
+    # Callers commonly pass a uint32 packed matrix viewed as uint8. Preserve
+    # row-major byte order but canonicalize to the flat stream every unpack
+    # path expects.
+    packed = np.asarray(packed, dtype=np.uint8).reshape(-1)
 
     if bits == 8:
         return packed[:count].copy()
+
+    if bits == 1:
+        interleaved = np.empty(len(packed) * 8, dtype=np.uint8)
+        for shift in range(8):
+            interleaved[shift::8] = (packed >> shift) & 0x01
+        return interleaved[:count]
 
     if bits == 4:
         # Fast path

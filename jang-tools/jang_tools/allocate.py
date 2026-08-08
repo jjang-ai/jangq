@@ -155,12 +155,40 @@ TIER_RULES = [
     # draft logits — verified: at 2-bit the tensor is 47% rel err. Keep CRITICAL
     # so speculative decoding stays useful. openpangu-v2 + DSV3 + DSV4 all have it.
     ("eh_proj", Tier.CRITICAL),
+    # Inkling names the same embed-hidden mixer `input_proj` ([hidden, 2*hidden],
+    # concat of prev-layer hidden + next-token embedding). Verified on the first
+    # Inkling build: it fell through to COMPRESS and all 8 MTP heads got 2-bit
+    # while the rest of each head was 8-bit — the exact `eh_proj` failure this
+    # rule above exists to prevent. NOTE: distinct from Mamba's `mixer.in_proj`.
+    ("input_proj", Tier.CRITICAL),
     # `shared_head.head` is the MTP layer's OWN lm_head (DSV3/openpangu-v2 MTP
     # blocks each carry one). It must match lm_head's tier — verified on
     # openpangu-v2 JANG_2L build 3: fell through to COMPRESS and got 2-bit
     # while lm_head was 8-bit, breaking MTP draft logits. `shared_head.norm`
     # is a norm and passes through fp16 separately.
     ("shared_head.head", Tier.CRITICAL),
+
+    # ── Inkling (thinkingmachines) — "TML" naming scheme ─────────────────────
+    # Inkling names attention projections wq_du/wk_dv/wv_dv/wo_ud/wr_du and the
+    # head `unembed`. NONE of these match any rule below, so every one of them
+    # fell through to COMPRESS (2-bit attention + 2-bit lm_head = dead bundle).
+    # Same fall-through class that hit openpangu-v2's attn_mhc.phi / eh_proj /
+    # shared_head.head. Must come BEFORE the generic w1/w2/w3/wo/proj catch-alls:
+    # "w13_dn" contains "w1", "w2_md" contains "w2", "wo_ud" contains "wo".
+    ("attn.wq_du", Tier.CRITICAL),
+    ("attn.wk_dv", Tier.CRITICAL),
+    ("attn.wv_dv", Tier.CRITICAL),
+    ("attn.wo_ud", Tier.CRITICAL),
+    # wr_du feeds the relative position bias. Inkling has NO RoPE — this tensor
+    # IS the position encoding, so it is as critical as q/k/v/o.
+    ("attn.wr_du", Tier.CRITICAL),
+    # `unembed` is Inkling's lm_head (never tied to `embed`).
+    ("llm.unembed", Tier.CRITICAL),
+    ("llm.embed", Tier.IMPORTANT),
+    # Dense MLP on layers 0..dense_mlp_idx-1 (and every MTP block). Always active
+    # for every token → same reasoning as first_k_dense_replace / shared MLP.
+    ("w13_dn", Tier.CRITICAL),
+    ("w2_md", Tier.CRITICAL),
 
     # ── Full Softmax Attention ───────────────────────────────
     # Standard Q/K/V/O projections — critical for coherence

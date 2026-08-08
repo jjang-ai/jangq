@@ -83,11 +83,15 @@ def write_jang_v2_model(
             bits = spec.get("bits")
             group_size = spec.get("group_size")
             if isinstance(bits, int) and isinstance(group_size, int):
-                quantization[module_path] = {
+                module_quantization = {
                     "group_size": group_size,
                     "bits": bits,
                     "mode": "affine",
                 }
+                storage_bits = spec.get("storage_bits")
+                if isinstance(storage_bits, int):
+                    module_quantization["storage_bits"] = storage_bits
+                quantization[module_path] = module_quantization
     model_config_out["quantization"] = quantization
     _write_json(output_dir / "config.json", model_config_out)
 

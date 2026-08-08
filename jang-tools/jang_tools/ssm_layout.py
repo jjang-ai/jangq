@@ -20,6 +20,18 @@ def forced_passthrough_bits(tensor_name: str) -> int | None:
     leaf = tensor_name.rsplit(".", 1)[-1]
     if tensor_name.endswith("conv1d.weight") or tensor_name.endswith("conv1d.bias"):
         return 16
+    # Inkling short convolutions: `{attn,mlp,k,v}_sconv.weight`, shape (C, 1, 4).
+    # Same grouped-Conv1d semantics as Mamba's conv1d but a different leaf name,
+    # so the rule above misses them. Last dim is 4, which no MLX group size
+    # divides — they must never reach mx.quantize. Tiny (1.7M params total).
+    if tensor_name.endswith("_sconv.weight") or tensor_name.endswith("_sconv.bias"):
+        return 16
+    # Inkling relative-position bias bank, shape (d_rel=16, rel_extent). 2-D, so
+    # neither the ndim==1 nor the tiny-ndim>2 passthrough gate catches it, and it
+    # would be quantized. With no RoPE in Inkling this tensor IS the position
+    # encoding — quantizing it destroys positional attention.
+    if tensor_name.endswith("rel_logits_proj.proj"):
+        return 16
     if leaf in _STATE_TENSOR_LEAVES:
         return 16
     return None
@@ -35,9 +47,12 @@ def prepare_mlx_passthrough_tensor(tensor_name: str, tensor: np.ndarray) -> np.n
     out = tensor
     if (
         tensor_name.endswith("conv1d.weight")
-        and getattr(out, "ndim", None) == 3
-        and out.shape[-1] != 1
-    ):
+        or tensor_name.endswith("_sconv.weight")
+    ) and getattr(out, "ndim", None) == 3 and out.shape[-1] != 1:
+        # (C, 1, K) -> (C, K, 1). MLX conv1d is NLC with weight
+        # (out_channels, kernel, in_channels/groups); torch grouped Conv1d is
+        # (out_channels, in_channels/groups, kernel). Idempotent: already-MLX
+        # tensors have shape[-1] == 1 and are left alone.
         out = np.transpose(out, (0, 2, 1))
     if getattr(out, "dtype", None) != np.float16:
         out = out.astype(np.float16)
