@@ -194,8 +194,9 @@ identity, and cache commits must remain base-model authoritative.
 
 ## Publication handoff
 
-`JANG_2D` is local-only. Its 15,890,602,696 indexed weight bytes are below
-16 GB decimal while retaining all 809 vision tensors in FP16. Its language
+`JANG_2D` is local-only. Its 15,890,602,696 indexed weight bytes and
+15,919,408,854 complete bundle bytes are below 16 GB decimal while retaining
+all 809 vision tensors in FP16. Its language
 policy is 4-bit for all 260 gated-attention modules and the untied lm head,
 3-bit for token embeddings and dense MLP gate/down projections, and 2-bit for
 dense MLP up projections. This follows the asymmetric protection principle of

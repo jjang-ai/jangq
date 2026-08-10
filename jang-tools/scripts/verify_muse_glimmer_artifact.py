@@ -187,8 +187,10 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     )
     indexed_shard_bytes = sum((artifact / shard).stat().st_size for shard in shards)
     require(runtime.get("total_weight_bytes") == indexed_shard_bytes, "runtime byte-size stamp is inaccurate")
+    bundle_bytes = sum(path.stat().st_size for path in artifact.iterdir() if path.is_file())
     if profile == "JANG_2D":
         require(indexed_shard_bytes < 16_000_000_000, "JANG_2D is not below 16 GB decimal")
+        require(bundle_bytes < 16_000_000_000, "complete JANG_2D bundle is not below 16 GB decimal")
 
     for publication_file in ("README.md", "LICENSE", "USAGE_POLICY.md", "osaurus-x-banner.png"):
         require((artifact / publication_file).is_file(), f"missing publication file {publication_file}")
@@ -232,6 +234,7 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
         "vision_passthrough_tensors": len(vision_keys),
         "all_passthrough_tensors": passthrough_count,
         "indexed_shard_bytes": indexed_shard_bytes,
+        "bundle_bytes": bundle_bytes,
         "assistant_revision_preserved_separately": PINNED_ASSISTANT_REVISION,
         "dequant_rel_l1": rel_l1,
         "failures": failures,
