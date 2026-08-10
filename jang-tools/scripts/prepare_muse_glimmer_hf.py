@@ -30,17 +30,6 @@ def _write(path: Path, value: dict) -> None:
 
 def _model_card(profile: str, size_gb: float, bits: float, shards: int, tensor_keys: int) -> str:
     profile_tag = profile.lower().replace("_", "-")
-    low_memory_warning = ""
-    if profile == "JANG_2L":
-        low_memory_warning = """
-### Experimental low-memory profile
-
-This is the smallest Muse Glimmer bundle in this release set, but it is not
-currently a coherence-proven profile. The selected layer-0 MLP down projection
-has measured dequantization rel-L1 `0.425248`; that is an artifact diagnostic,
-not a quality score, and makes real text/image/video generation proof especially
-important before use. Prefer 4M or 6M when memory allows.
-"""
     return f"""---
 language:
 - en
@@ -97,7 +86,6 @@ runtimes that implement Muse Glimmer's dense multimodal architecture.
 This is a post-training quantization baseline. The upstream BF16 checkpoint
 contains no QAT weights or QAT scale metadata. GPTQ, imatrix, and AWQ were not
 applied, and the metadata says so explicitly.
-{low_memory_warning}
 
 ## Native model contract
 
@@ -245,7 +233,7 @@ def main() -> None:
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--banner", type=Path, required=True)
-    parser.add_argument("--profile", choices=("JANG_2L", "JANG_4M", "JANG_6M"), required=True)
+    parser.add_argument("--profile", choices=("JANG_4M", "JANG_6M"), required=True)
     args = parser.parse_args()
     print(json.dumps(prepare(args.bundle.expanduser(), args.source.expanduser(), args.banner.expanduser(), args.profile), indent=2))
 

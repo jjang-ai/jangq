@@ -1,6 +1,6 @@
 # Muse Glimmer 30B quant and runtime handoff
 
-Status: all three quant artifacts pass structural and dequantization checks. Generation,
+Status: both retained quant artifacts pass structural and dequantization checks. Generation,
 reasoning/tool streaming, image grounding, video grounding, and cache reuse are
 deferred to the vMLX Swift/Python runtime owners and remain unverified.
 
@@ -10,7 +10,6 @@ deferred to the vMLX Swift/Python runtime owners and remain unverified.
 |---|---|---|---|
 | BF16 base | `f84ecc3a0ea984a4c04542a84269e3d065350a6e` | `~/models/meta-models/Muse-Glimmer-30B` | Quant source |
 | Five-layer assistant | `2c86316d689027b91123638739743fef1d425233` | `~/models/meta-models/Muse-Glimmer-30B-assistant` | Separate future DFlash artifact; not part of any base quant |
-| JANG_2L | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2L` | Low-memory base model only |
 | JANG_4M | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_4M` | Base model only |
 | JANG_6M | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_6M` | Base model only |
 
@@ -54,7 +53,6 @@ for this VL artifact and must not be generalized to text-only models.
 
 | Bundle | Effective bits | Indexed size | Quantized modules | Dequant rel-L1: layer-0 K | Dequant rel-L1: layer-0 MLP down |
 |---|---:|---:|---:|---:|---:|
-| JANG_2L | 3.13 | 15.36 GB | 418 | 0.005954 | 0.425248 |
 | JANG_4M | 4.63 | 20.20 GB | 418 | 0.005954 | 0.098860 |
 | JANG_6M | 6.31 | 25.67 GB | 418 | 0.005954 | 0.023647 |
 
@@ -65,12 +63,6 @@ FP16 vision passthrough, and absence of assistant/MTP tensors.
 Run any gate from the repository root:
 
 ```bash
-PYTHONPATH=jang-tools uv run --no-project \
-  --with mlx --with numpy --with safetensors --with tqdm \
-  python jang-tools/scripts/verify_muse_glimmer_artifact.py \
-  ~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2L \
-  --profile JANG_2L --dequant
-
 PYTHONPATH=jang-tools uv run --no-project \
   --with mlx --with numpy --with safetensors --with tqdm \
   python jang-tools/scripts/verify_muse_glimmer_artifact.py \
@@ -88,14 +80,10 @@ These are artifact gates, not generation proof. Do not upload or label any
 bundle runtime-ready until the real target runtime produces coherent text,
 grounded image output, grounded video output, reasoning, and a tool round trip.
 
-The 2L MLP sample has 0.425248 relative-L1 error. That does not prove failure,
-but it is substantially more aggressive than the 4M/6M samples and makes 2L an
-experimental low-memory artifact until real generation proves otherwise.
-
 ## QAT, GPTQ, imatrix, and AWQ
 
 The source is BF16 and exposes no QAT tensors, scale metadata, or QAT checkpoint.
-Therefore `source_qat=not_present` is stamped in all three bundles. A PTQ conversion
+Therefore `source_qat=not_present` is stamped in both bundles. A PTQ conversion
 must never be relabeled as QAT. The official dynamic/K-quant GGUF releases are
 also PTQ references, not proof of a reusable QAT source.
 
@@ -105,7 +93,7 @@ Current method support is deliberately conservative:
 |---|---|---|
 | QAT | unavailable | No QAT source checkpoint exists. Producing one requires training, not a converter flag. |
 | GPTQ/Hessian | not applied | The current generic JANG GPTQ path is limited to expert/3-D MoE tensors. Glimmer is dense; claiming GPTQ would be false. |
-| imatrix | not applied | Fixed `JANG_2L`/`JANG_4M`/`JANG_6M` allocation is tier-based and does not consume imatrix scores. The converter now rejects an ignored Glimmer imatrix. |
+| imatrix | not applied | Fixed `JANG_4M`/`JANG_6M` allocation is tier-based and does not consume imatrix scores. The converter now rejects an ignored Glimmer imatrix. |
 | AWQ | not applied | The generic collector loads text-only `mlx_lm`, which cannot run this VLM and cannot cover media-conditioned language activations. The converter now rejects this unsafe path. |
 
 For a calibrated follow-up, use the official Muse Glimmer model path and collect
@@ -196,8 +184,7 @@ identity, and cache commits must remain base-model authoritative.
 
 ## Publication handoff
 
-The requested targets are `OsaurusAI/Muse-Glimmer-30B-JANG_2L`,
-`OsaurusAI/Muse-Glimmer-30B-JANG_4M`, and
+The requested targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` and
 `OsaurusAI/Muse-Glimmer-30B-JANG_6M`, public visibility. An authenticated Hub
 lookup on 2026-08-10 found no accessible repository at any target. Each local
 bundle has its model card, upstream license and usage policy, and canonical

@@ -150,7 +150,6 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     if "language_model.lm_head" in manifest:
         require(manifest["language_model.lm_head"].get("source_tensor") == "lm_head.weight", "lm_head source mapping is wrong")
     allowed_bits = {
-        "JANG_2L": {2, 6, 8},
         "JANG_4M": {4, 8},
         "JANG_6M": {6, 8},
     }[profile]
@@ -181,7 +180,7 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
                 "model.language_model.layers.0.mlp.down_proj.weight",
         }
         # Artifact sanity ceilings, not language-coherence acceptance gates.
-        thresholds = {"JANG_2L": 0.50, "JANG_4M": 0.16, "JANG_6M": 0.08}
+        thresholds = {"JANG_4M": 0.16, "JANG_6M": 0.08}
         for base, source_key in samples.items():
             actual = _dequant(artifact, output_index, manifest, base)
             expected = _source_tensor(source, source_index, source_key)
@@ -212,7 +211,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--source", type=Path, default=Path("~/models/meta-models/Muse-Glimmer-30B").expanduser())
-    parser.add_argument("--profile", required=True, choices=("JANG_2L", "JANG_4M", "JANG_6M"))
+    parser.add_argument("--profile", required=True, choices=("JANG_4M", "JANG_6M"))
     parser.add_argument("--dequant", action="store_true")
     args = parser.parse_args()
     result = verify(args.source.expanduser(), args.artifact.expanduser(), args.profile, args.dequant)

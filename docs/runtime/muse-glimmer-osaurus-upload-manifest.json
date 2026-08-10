@@ -16,19 +16,6 @@
   },
   "bundles": [
     {
-      "profile": "JANG_2L",
-      "repo": "OsaurusAI/Muse-Glimmer-30B-JANG_2L",
-      "local_path": "/Users/eric/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2L",
-      "indexed_size_gb": 15.36,
-      "effective_bits": 3.13,
-      "shards": 21,
-      "tensor_keys": 2272,
-      "artifact_gate": "PASS",
-      "runtime_gate": "UNVERIFIED",
-      "remote_lookup": "NOT_FOUND_OR_INACCESSIBLE",
-      "quality_note": "experimental; selected 2-bit MLP down projection rel-L1 is 0.425248"
-    },
-    {
       "profile": "JANG_4M",
       "repo": "OsaurusAI/Muse-Glimmer-30B-JANG_4M",
       "local_path": "/Users/eric/models/JANGQ-AI/Muse-Glimmer-30B-JANG_4M",
