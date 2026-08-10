@@ -1,8 +1,8 @@
 {
   "generated_at": "2026-08-10",
   "organization": "OsaurusAI",
-  "requested_visibility": "public",
-  "publication_status": "blocked_runtime_generation_gate",
+  "requested_visibility": "private",
+  "publication_status": "private_staged_runtime_gate_open",
   "source": {
     "repo": "meta-models/Muse-Glimmer-30B",
     "revision": "f84ecc3a0ea984a4c04542a84269e3d065350a6e",
@@ -25,7 +25,20 @@
       "tensor_keys": 2272,
       "artifact_gate": "PASS",
       "runtime_gate": "UNVERIFIED",
-      "remote_lookup": "NOT_FOUND_OR_INACCESSIBLE"
+      "hugging_face": {
+        "visibility": "private",
+        "revision": "9f0e15be1768f9302ce6c16a8734b77afafff976",
+        "files": 45,
+        "bytes": 21721791123,
+        "required_files_missing": []
+      },
+      "external_copy": {
+        "host": "erics-m5-max.local",
+        "path": "/Volumes/EricsLLMDrive/jangq-ai/Muse-Glimmer-30B-JANG_4M",
+        "files": 44,
+        "bytes": 21721789553,
+        "sha256_manifest_match": true
+      }
     },
     {
       "profile": "JANG_6M",
@@ -37,7 +50,20 @@
       "tensor_keys": 2272,
       "artifact_gate": "PASS",
       "runtime_gate": "UNVERIFIED",
-      "remote_lookup": "NOT_FOUND_OR_INACCESSIBLE"
+      "hugging_face": {
+        "visibility": "private",
+        "revision": "f6bfc1a987016c941528aad4c679e9a65291e67d",
+        "files": 50,
+        "bytes": 27595792489,
+        "required_files_missing": []
+      },
+      "external_copy": {
+        "host": "erics-m5-max.local",
+        "path": "/Volumes/EricsLLMDrive/jangq-ai/Muse-Glimmer-30B-JANG_6M",
+        "files": 49,
+        "bytes": 27595790919,
+        "sha256_manifest_match": true
+      }
     }
   ],
   "prepared_publication_files": [

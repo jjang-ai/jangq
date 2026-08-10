@@ -184,14 +184,22 @@ identity, and cache commits must remain base-model authoritative.
 
 ## Publication handoff
 
-The requested targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` and
-`OsaurusAI/Muse-Glimmer-30B-JANG_6M`, public visibility. An authenticated Hub
-lookup on 2026-08-10 found no accessible repository at any target. Each local
-bundle has its model card, upstream license and usage policy, and canonical
-Osaurus banner prepared. No repository was created and no bytes were uploaded,
-because the mandatory target-runtime coherence gate remains open.
+The staged targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` at revision
+`9f0e15be1768f9302ce6c16a8734b77afafff976` and
+`OsaurusAI/Muse-Glimmer-30B-JANG_6M` at revision
+`f6bfc1a987016c941528aad4c679e9a65291e67d`. Both repositories are private and
+contain all required model-card, license, policy, banner, config, tokenizer,
+processor, template, index, and shard files. Keep them private until the
+mandatory target-runtime coherence gate closes.
+
+Byte-identical copies also live on `erics-m5-max.local` under
+`/Volumes/EricsLLMDrive/jangq-ai/`. They were streamed over the direct
+Thunderbolt link using a bridge-bound HTTP server. Sorted SHA-256 manifests
+match for all 44 files in 4M and all 49 files in 6M; local/remote byte totals
+are 21,721,789,553 and 27,595,790,919 respectively. The temporary HTTP listener
+was stopped after verification.
 
 After vmlx-swift proves coherent text generation, run and record image, video,
 reasoning-stream, ATEM tool-round-trip, and cache-reuse rows before publishing.
-Upload one repository at a time and verify remote visibility, revision, file
-count, shard sizes, config/README bytes, and a fresh download after each upload.
+When the runtime matrix passes, change visibility deliberately and verify the
+public revision, file inventory, config/README bytes, and a fresh download.
