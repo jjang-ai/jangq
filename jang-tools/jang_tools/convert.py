@@ -152,6 +152,47 @@ def _muse_glimmer_runtime_metadata(model_config: dict) -> dict:
     }
 
 
+def _muse_glimmer_chat_metadata(model_path: Path) -> dict:
+    """Build the native chat contract from shipped template/gen metadata."""
+    generation_path = model_path / "generation_config.json"
+    generation_defaults: dict = {}
+    if generation_path.exists():
+        try:
+            generation_defaults = json.loads(generation_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid Muse Glimmer generation_config.json: {exc}") from exc
+
+    sampling_defaults = {
+        key: generation_defaults[key]
+        for key in ("do_sample", "temperature", "top_p", "top_k", "min_p", "repetition_penalty")
+        if key in generation_defaults
+    }
+    return {
+        "reasoning_control": "reasoning_strength",
+        "reasoning_default": "high",
+        "reasoning_values": ["low", "medium", "high", "xhigh"],
+        "reasoning_parser": "muse_glimmer",
+        "tool_format": "atem",
+        "tool_parser": "atem",
+        "reasoning": {
+            "supported": True,
+            "parser": "muse_glimmer",
+            "control": "reasoning_strength",
+            "default_mode": "high",
+            "modes": ["low", "medium", "high", "xhigh"],
+        },
+        "tool_calling": {
+            "supported": True,
+            "parser": "atem",
+            "format": "atem",
+        },
+        "sampling_defaults": sampling_defaults,
+        # Keep every shipped generation field and do not invent model-card
+        # sampler recommendations absent from generation_config.json.
+        "generation_defaults": generation_defaults,
+    }
+
+
 def _is_mtp_tensor_name(tensor_name: str) -> bool:
     """Return true for model-family MTP tensor namespaces."""
     name = tensor_name.lower()
@@ -1468,12 +1509,15 @@ def convert_model(
                         convert_model._gptq_hinv_cache[_layer_idx] = _hinv
                     _gptq_hinv = convert_model._gptq_hinv_cache[_layer_idx]
 
+        # Resolve this before importing MLX so the RTN fallback has the same
+        # per-tensor group size when MLX is unavailable.
+        tensor_gs = _get_tensor_group_size(tensor_name, block_size, num_experts)
+
         # --- Quantize via mx.quantize() or GPTQ → MLX-native uint32 output ---
         try:
             import mlx.core as mx
 
             # Per-tensor group_size: router/gate gets gs=64, experts get model default
-            tensor_gs = _get_tensor_group_size(tensor_name, block_size, num_experts)
             compatible_gs = _get_mlx_compatible_group_size(
                 int(weights.shape[-1]), int(tensor_gs)
             )
@@ -1918,6 +1962,7 @@ def convert_model(
     )
 
     jang_config = {
+        "weight_format": "jang_affine",
         "quantization": {
             "method": "jang-importance",
             "profile": profile if profile else None,
@@ -1929,7 +1974,7 @@ def convert_model(
             "scoring_method": "weight-magnitude" if calibration_method == "weights" else "awq+hessian",
             "bit_widths_used": bit_widths_used,
             "passthrough_bit_widths_used": passthrough_bit_widths_used,
-            "passthrough_tensor_count": len(passthrough_bits),
+            "passthrough_tensor_count": len(passthrough),
             "quantization_scheme": "asymmetric",
             "quantization_backend": "mx.quantize",
             "hadamard_rotation": hadamard,
@@ -1991,6 +2036,17 @@ def convert_model(
             print(f"  WARNING: could not inspect processor_config.json for modalities: {exc}")
     jang_config["has_vision"] = _has_vision
     jang_config["has_video"] = _has_video
+    jang_config["modalities"] = {
+        "text": True,
+        "vision": _has_vision,
+        "audio": bool(model_config.get("audio_config")),
+        "video": _has_video,
+    }
+    model_config["weight_format"] = "jang_affine"
+    model_config["has_vision"] = _has_vision
+    model_config["has_audio"] = bool(model_config.get("audio_config"))
+    model_config["has_video"] = _has_video
+    model_config["modalities"] = dict(jang_config["modalities"])
 
     if str(model_config.get("model_type", "")).lower() == "muse_glimmer":
         # The public BF16 checkpoint has no QAT tensors or QAT metadata.  Keep
@@ -2001,14 +2057,7 @@ def convert_model(
         jang_config["quantization"]["imatrix_applied"] = bool(imatrix_path and needs_calibration)
         jang_config["quantization"]["awq_applied"] = bool(use_awq and awq_norms)
         jang_config["runtime"].update(_muse_glimmer_runtime_metadata(model_config))
-        jang_config["chat"] = {
-            "reasoning_control": "reasoning_strength",
-            "reasoning_default": "high",
-            "reasoning_values": ["low", "medium", "high", "xhigh"],
-            "reasoning_parser": "muse_glimmer",
-            "tool_format": "atem",
-            "tool_parser": "atem",
-        }
+        jang_config["chat"] = _muse_glimmer_chat_metadata(model_path)
     _mtp_meta = _build_mtp_runtime_metadata(model_config, source_tensor_names)
     if _mtp_meta:
         jang_config["runtime"].update(_mtp_meta["runtime"])
@@ -2023,6 +2072,7 @@ def convert_model(
     _caps = build_capabilities(jang_config, model_config)
     if _caps is not None:
         jang_config["capabilities"] = _caps
+        model_config["capabilities"] = _caps
         print(
             f"  capabilities: family={_caps['family']} "
             f"reasoning={_caps['reasoning_parser']} tool={_caps['tool_parser']} "

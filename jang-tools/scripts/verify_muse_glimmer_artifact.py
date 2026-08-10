@@ -103,6 +103,8 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     require(_hf_revision(source) == PINNED_SOURCE_REVISION, "source revision is not pinned Muse Glimmer commit")
     require(source_config.get("model_type") == "muse_glimmer", "source model_type != muse_glimmer")
     require(output_config.get("model_type") == "muse_glimmer", "output model_type != muse_glimmer")
+    require(output_config.get("weight_format") == "jang_affine", "config weight_format != jang_affine")
+    require(jang.get("weight_format") == "jang_affine", "jang_config weight_format != jang_affine")
     require(jang.get("source_model", {}).get("revision") == PINNED_SOURCE_REVISION, "missing source revision stamp")
     require(jang.get("quantization", {}).get("profile") == profile, f"profile stamp != {profile}")
     require(jang.get("quantization", {}).get("source_qat") == "not_present", "QAT provenance is not explicit")
@@ -114,6 +116,14 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     require(caps.get("reasoning_parser") == "muse_glimmer", "wrong reasoning parser stamp")
     require(caps.get("tool_parser") == "atem", "wrong ATEM tool parser stamp")
     require(caps.get("has_vision") is True and caps.get("has_video") is True, "vision/video capability missing")
+    require(output_config.get("capabilities") == caps, "config/jang capability stamps differ")
+
+    chat = jang.get("chat", {})
+    require(chat.get("reasoning_default") == "high", "reasoning default != high")
+    require(chat.get("reasoning", {}).get("default_mode") == "high", "structured reasoning default != high")
+    require(chat.get("tool_calling", {}).get("parser") == "atem", "structured ATEM tool stamp missing")
+    require(chat.get("generation_defaults") == _json(source / "generation_config.json"), "generation defaults drifted")
+    require(chat.get("sampling_defaults") == {"do_sample": False}, "sampling defaults are not source-exact")
 
     runtime = jang.get("runtime", {})
     require(runtime.get("sliding_window") == 2048, "sliding window != 2048")
@@ -139,8 +149,28 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     require("language_model.lm_head" in manifest, "wrapped VL lm_head manifest missing")
     if "language_model.lm_head" in manifest:
         require(manifest["language_model.lm_head"].get("source_tensor") == "lm_head.weight", "lm_head source mapping is wrong")
-    allowed_bits = {4, 8} if profile == "JANG_4M" else {6, 8}
+    allowed_bits = {
+        "JANG_2L": {2, 6, 8},
+        "JANG_4M": {4, 8},
+        "JANG_6M": {6, 8},
+    }[profile]
     require({entry.get("bits") for entry in manifest.values()} <= allowed_bits, "unexpected profile bit width")
+    quant_keys = {
+        entry[key]
+        for entry in manifest.values()
+        for key in ("weight_key", "scales_key", "biases_key")
+    }
+    passthrough_count = len(set(output_index) - quant_keys)
+    require(
+        jang.get("quantization", {}).get("passthrough_tensor_count") == passthrough_count,
+        "passthrough tensor count stamp is inaccurate",
+    )
+
+    for publication_file in ("README.md", "LICENSE", "USAGE_POLICY.md", "osaurus-x-banner.png"):
+        require((artifact / publication_file).is_file(), f"missing publication file {publication_file}")
+    for inherited_file in ("LICENSE", "USAGE_POLICY.md"):
+        if (artifact / inherited_file).exists():
+            require((artifact / inherited_file).read_bytes() == (source / inherited_file).read_bytes(), f"{inherited_file} drifted")
 
     rel_l1: dict[str, float] = {}
     if dequant and not failures:
@@ -150,7 +180,8 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
             "language_model.model.layers.0.mlp.down_proj":
                 "model.language_model.layers.0.mlp.down_proj.weight",
         }
-        thresholds = {"JANG_4M": 0.16, "JANG_6M": 0.08}
+        # Artifact sanity ceilings, not language-coherence acceptance gates.
+        thresholds = {"JANG_2L": 0.50, "JANG_4M": 0.16, "JANG_6M": 0.08}
         for base, source_key in samples.items():
             actual = _dequant(artifact, output_index, manifest, base)
             expected = _source_tensor(source, source_index, source_key)
@@ -168,6 +199,7 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
         "tensor_keys": len(headers),
         "quantized_modules": len(manifest),
         "vision_passthrough_tensors": len(vision_keys),
+        "all_passthrough_tensors": passthrough_count,
         "assistant_revision_preserved_separately": PINNED_ASSISTANT_REVISION,
         "dequant_rel_l1": rel_l1,
         "failures": failures,
@@ -180,7 +212,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--source", type=Path, default=Path("~/models/meta-models/Muse-Glimmer-30B").expanduser())
-    parser.add_argument("--profile", required=True, choices=("JANG_4M", "JANG_6M"))
+    parser.add_argument("--profile", required=True, choices=("JANG_2L", "JANG_4M", "JANG_6M"))
     parser.add_argument("--dequant", action="store_true")
     args = parser.parse_args()
     result = verify(args.source.expanduser(), args.artifact.expanduser(), args.profile, args.dequant)

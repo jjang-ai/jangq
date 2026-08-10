@@ -4,6 +4,7 @@ from jang_tools.architectures import ArchType, detect_architecture
 from jang_tools.capabilities import build_capabilities
 from jang_tools.convert import (
     _is_vision_tensor_name,
+    _muse_glimmer_chat_metadata,
     _muse_glimmer_runtime_metadata,
     _read_hf_local_revision,
     _remap_tokenizer_class_for_swift,
@@ -101,3 +102,21 @@ def test_hf_local_revision_is_read_from_download_metadata(tmp_path):
     metadata.parent.mkdir(parents=True)
     metadata.write_text("f84ecc3a0ea984a4c04542a84269e3d065350a6e\nblob-id\n")
     assert _read_hf_local_revision(tmp_path) == "f84ecc3a0ea984a4c04542a84269e3d065350a6e"
+
+
+def test_chat_metadata_preserves_native_defaults_without_inventing_sampling(tmp_path):
+    generation = {
+        "bos_token_id": 200000,
+        "eos_token_id": [200001, 200008],
+        "pad_token_id": 200018,
+        "max_length": 131072,
+        "do_sample": False,
+    }
+    (tmp_path / "generation_config.json").write_text(json.dumps(generation))
+    chat = _muse_glimmer_chat_metadata(tmp_path)
+    assert chat["reasoning"]["default_mode"] == "high"
+    assert chat["reasoning"]["control"] == "reasoning_strength"
+    assert chat["tool_calling"] == {"supported": True, "parser": "atem", "format": "atem"}
+    assert chat["sampling_defaults"] == {"do_sample": False}
+    assert chat["generation_defaults"] == generation
+    assert "temperature" not in chat["sampling_defaults"]

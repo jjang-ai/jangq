@@ -1,6 +1,6 @@
 # Muse Glimmer 30B quant and runtime handoff
 
-Status: quant artifacts pass structural and dequantization checks. Generation,
+Status: all three quant artifacts pass structural and dequantization checks. Generation,
 reasoning/tool streaming, image grounding, video grounding, and cache reuse are
 deferred to the vMLX Swift/Python runtime owners and remain unverified.
 
@@ -9,7 +9,8 @@ deferred to the vMLX Swift/Python runtime owners and remain unverified.
 | Artifact | Revision | Local path | Relationship |
 |---|---|---|---|
 | BF16 base | `f84ecc3a0ea984a4c04542a84269e3d065350a6e` | `~/models/meta-models/Muse-Glimmer-30B` | Quant source |
-| Five-layer assistant | `2c86316d689027b91123638739743fef1d425233` | `~/models/meta-models/Muse-Glimmer-30B-assistant` | Separate future DFlash artifact; not part of either quant |
+| Five-layer assistant | `2c86316d689027b91123638739743fef1d425233` | `~/models/meta-models/Muse-Glimmer-30B-assistant` | Separate future DFlash artifact; not part of any base quant |
+| JANG_2L | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2L` | Low-memory base model only |
 | JANG_4M | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_4M` | Base model only |
 | JANG_6M | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_6M` | Base model only |
 
@@ -43,7 +44,7 @@ model.vision_adapter.*
 model.vision_projection.*
 ```
 
-All 809 tensors in those namespaces are FP16 passthrough in both JANG bundles.
+All 809 tensors in those namespaces are FP16 passthrough in all JANG bundles.
 This deliberately avoids a text-only calibration damaging image or video
 quality. The VL bundle maps the untied bare source `lm_head.weight` to
 `language_model.lm_head.{weight,scales,biases}`; that wrapped head is correct
@@ -53,6 +54,7 @@ for this VL artifact and must not be generalized to text-only models.
 
 | Bundle | Effective bits | Indexed size | Quantized modules | Dequant rel-L1: layer-0 K | Dequant rel-L1: layer-0 MLP down |
 |---|---:|---:|---:|---:|---:|
+| JANG_2L | 3.13 | 15.36 GB | 418 | 0.005954 | 0.425248 |
 | JANG_4M | 4.63 | 20.20 GB | 418 | 0.005954 | 0.098860 |
 | JANG_6M | 6.31 | 25.67 GB | 418 | 0.005954 | 0.023647 |
 
@@ -60,9 +62,15 @@ The verifier also checks finalized shard names, index/header equality, source
 revision, exact processor/template/generation sidecars, capability stamps,
 FP16 vision passthrough, and absence of assistant/MTP tensors.
 
-Run either gate from the repository root:
+Run any gate from the repository root:
 
 ```bash
+PYTHONPATH=jang-tools uv run --no-project \
+  --with mlx --with numpy --with safetensors --with tqdm \
+  python jang-tools/scripts/verify_muse_glimmer_artifact.py \
+  ~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2L \
+  --profile JANG_2L --dequant
+
 PYTHONPATH=jang-tools uv run --no-project \
   --with mlx --with numpy --with safetensors --with tqdm \
   python jang-tools/scripts/verify_muse_glimmer_artifact.py \
@@ -76,9 +84,13 @@ PYTHONPATH=jang-tools uv run --no-project \
   --profile JANG_6M --dequant
 ```
 
-These are artifact gates, not generation proof. Do not upload or label either
+These are artifact gates, not generation proof. Do not upload or label any
 bundle runtime-ready until the real target runtime produces coherent text,
 grounded image output, grounded video output, reasoning, and a tool round trip.
+
+The 2L MLP sample has 0.425248 relative-L1 error. That does not prove failure,
+but it is substantially more aggressive than the 4M/6M samples and makes 2L an
+experimental low-memory artifact until real generation proves otherwise.
 
 ## QAT, GPTQ, imatrix, and AWQ
 
@@ -181,3 +193,18 @@ suffix and never replay a prior partial reasoning/ATEM fragment.
 The five-layer assistant is excluded from this contract. When DFlash is added
 later, assistant revision, mode, depth, and acceptance policy must join the cache
 identity, and cache commits must remain base-model authoritative.
+
+## Publication handoff
+
+The requested targets are `OsaurusAI/Muse-Glimmer-30B-JANG_2L`,
+`OsaurusAI/Muse-Glimmer-30B-JANG_4M`, and
+`OsaurusAI/Muse-Glimmer-30B-JANG_6M`, public visibility. An authenticated Hub
+lookup on 2026-08-10 found no accessible repository at any target. Each local
+bundle has its model card, upstream license and usage policy, and canonical
+Osaurus banner prepared. No repository was created and no bytes were uploaded,
+because the mandatory target-runtime coherence gate remains open.
+
+After vmlx-swift proves coherent text generation, run and record image, video,
+reasoning-stream, ATEM tool-round-trip, and cache-reuse rows before publishing.
+Upload one repository at a time and verify remote visibility, revision, file
+count, shard sizes, config/README bytes, and a fresh download after each upload.
