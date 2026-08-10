@@ -1,8 +1,9 @@
 # Muse Glimmer 30B quant and runtime handoff
 
-Status: all three retained quant artifacts pass structural and dequantization checks. Generation,
-reasoning/tool streaming, image grounding, video grounding, and cache reuse are
-deferred to the vMLX Swift/Python runtime owners and remain unverified.
+Status: all three retained quant artifacts pass structural and dequantization checks. JANG_2D
+also has coherent text-generation proof in the real Osaurus/vmlx-swift target
+runtime. Image grounding, video grounding, ATEM tool behavior, multi-turn behavior,
+and cache reuse remain unverified.
 
 ## Pinned local artifacts
 
@@ -84,9 +85,10 @@ PYTHONPATH=jang-tools uv run --no-project \
   --profile JANG_6M --dequant
 ```
 
-These are artifact gates, not generation proof. Do not upload or label any
-bundle runtime-ready until the real target runtime produces coherent text,
-grounded image output, grounded video output, reasoning, and a tool round trip.
+These are artifact gates, not generation proof. JANG_2D separately closed the
+minimum pre-upload text gate described below. Do not label any bundle fully
+runtime-ready until the target runtime also proves grounded image and video
+output, ATEM tools, multi-turn behavior, and cache reuse.
 
 ## QAT, GPTQ, imatrix, and AWQ
 
@@ -194,15 +196,23 @@ identity, and cache commits must remain base-model authoritative.
 
 ## Publication handoff
 
-`JANG_2D` is local-only. Its 15,890,602,696 indexed weight bytes and
-15,919,408,854 complete bundle bytes are below 16 GB decimal while retaining
+`JANG_2D` has 15,890,602,696 indexed weight bytes and remains below 16 GB
+decimal as a complete bundle while retaining
 all 809 vision tensors in FP16. Its language
 policy is 4-bit for all 260 gated-attention modules and the untied lm head,
 3-bit for token embeddings and dense MLP gate/down projections, and 2-bit for
 dense MLP up projections. This follows the asymmetric protection principle of
 Muse's published K-Quant releases but uses MLX-native affine weights; it is not
-byte- or algorithm-equivalent to GGUF K-Quant. Do not upload it until coherent
-vmlx-swift generation closes the mandatory runtime gate.
+byte- or algorithm-equivalent to GGUF K-Quant.
+
+The mandatory pre-upload text gate closed on 2026-08-10 against the exact local
+JANG_2D files. Osaurus/vmlx-swift shape-walked 418 per-module quantization
+overrides. A `/v1/chat/completions` request containing `Reply with exactly: FOUR`
+and no sampling or reasoning override returned visible `FOUR`, a separate
+non-empty `reasoning_content`, `finish_reason=stop`, and 36.87 tokens/s. The
+running process had all 21 local shard paths open. This proves coherent text,
+the native default reasoning path, reasoning-channel separation, and EOS for
+that request; it does not prove media, tools, multi-turn, or cache behavior.
 
 The staged targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` at revision
 `24a68502d68554cd8b596be1b7703d16d7f8eb49` and

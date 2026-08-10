@@ -28,13 +28,50 @@ def _write(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def _model_card(profile: str, size_gb: float, bits: float, shards: int, tensor_keys: int) -> str:
+def _model_card(
+    profile: str,
+    weight_bytes: int,
+    bits: float,
+    shards: int,
+    tensor_keys: int,
+    *,
+    text_runtime_verified: bool = False,
+) -> str:
     profile_tag = profile.lower().replace("_", "-")
     profile_policy = {
         "JANG_2D": "4-bit attention/lm_head; 3-bit embeddings and MLP gate/down; 2-bit MLP up; FP16 vision",
         "JANG_4M": "8-bit critical; 4-bit important/compress; FP16 vision",
         "JANG_6M": "8-bit critical; 6-bit important/compress; FP16 vision",
     }[profile]
+    size_gb = weight_bytes / 1_000_000_000
+    size_gib = weight_bytes / (1024**3)
+    runtime_status = (
+        """**PARTIAL / text generation verified in the target runtime.** On 2026-08-10,
+the exact local JANG_2D bundle was loaded by Osaurus/vmlx-swift with all 418
+per-module mixed-bit overrides. A request with no sampling or reasoning override,
+`Reply with exactly: FOUR`, returned visible content `FOUR`, a separate non-empty
+`reasoning_content`, and `finish_reason=stop` at 36.87 tokens/s. This covers
+coherent text generation, the native default reasoning path, reasoning-channel
+separation, and EOS handling.
+
+Still unverified: grounded image input, grounded video input, ATEM tool round
+trips, multi-turn behavior, and prefix/partial-block/suffix cache reuse."""
+        if text_runtime_verified
+        else """**PARTIAL / runtime unverified.** Current validation covers source identity,
+safetensor headers, index integrity, mixed-bit metadata, exact processor/chat
+sidecars, deployment generation metadata, FP16 vision preservation, and selected
+dequantized-vs-BF16 tensor comparisons. It does not cover coherent target-runtime
+generation, image/video grounding, reasoning streaming, ATEM tools, multi-turn
+behavior, or prefix/partial-block/suffix cache reuse."""
+    )
+    korean_runtime = (
+        "실제 Osaurus/vmlx-swift에서 기본 추론 경로의 일관된 텍스트 생성, "
+        "분리된 reasoning_content 및 EOS 종료를 확인했습니다. 이미지/비디오, ATEM "
+        "도구 왕복, 멀티턴 및 캐시 재사용은 아직 검증되지 않았습니다."
+        if text_runtime_verified
+        else "실제 vmlx-swift 생성, 이미지/비디오, 추론 스트리밍, 도구 왕복 및 "
+        "캐시 재사용은 아직 검증되지 않았습니다."
+    )
     return f"""---
 language:
 - en
@@ -82,7 +119,7 @@ runtimes that implement Muse Glimmer's dense multimodal architecture.
 | Profile | `{profile}` |
 | Bit policy | {profile_policy} |
 | Effective language-weight bits | {bits:.2f} |
-| Indexed size | {size_gb:.2f} GB |
+| Indexed weights | {size_gb:.2f} GB / {size_gib:.2f} GiB |
 | Safetensor shards | {shards} |
 | Indexed tensor keys | {tensor_keys} |
 | Language layers | 52: 39 sliding + 13 full attention |
@@ -113,13 +150,7 @@ applied, and the metadata says so explicitly.
 
 ## Runtime status
 
-**PARTIAL / runtime unverified.** Current validation covers source identity,
-safetensor headers, index integrity, mixed-bit metadata, exact processor/chat
-sidecars, deployment generation metadata, FP16 vision preservation, and
-selected dequantized-vs-BF16 tensor comparisons. It does not yet cover coherent
-generation in vmlx-swift,
-image grounding, video grounding, reasoning streaming, an ATEM tool round trip,
-multi-turn behavior, or prefix/partial-block/suffix cache reuse.
+{runtime_status}
 
 Do not interpret repository availability or structural loading as production
 readiness. This format is not a uniform `mlx_lm` quant; loaders must honor every
@@ -161,9 +192,8 @@ PYTHONPATH=jang-tools uv run --no-project \\
 혼합 affine 형식으로 변환한 `{profile}` PTQ 모델입니다. 52개 언어 레이어는
 슬라이딩/전체 어텐션 구조를 유지하며, 비전 타워·어댑터·프로젝션 809개 텐서는
 FP16으로 보존됩니다. 기본 추론 강도는 `high`이고 도구 호출은 ATEM 형식입니다.
-현재 파일 구조, 메타데이터, 사이드카 및 일부 역양자화 비교는 확인했지만,
-vmlx-swift 실제 생성, 이미지/비디오, 추론 스트리밍, 도구 왕복 및 캐시 재사용은
-아직 검증되지 않았습니다. 별도 5레이어 DFlash assistant는 포함하지 않습니다.
+현재 파일 구조, 메타데이터, 사이드카 및 일부 역양자화 비교를 확인했습니다.
+{korean_runtime} 별도 5레이어 DFlash assistant는 포함하지 않습니다.
 
 ## License and use
 
@@ -176,7 +206,16 @@ eric@osaurus.ai
 """
 
 
-def prepare(bundle: Path, source: Path, banner: Path, profile: str) -> dict:
+def prepare(
+    bundle: Path,
+    source: Path,
+    banner: Path,
+    profile: str,
+    *,
+    text_runtime_verified: bool = False,
+) -> dict:
+    if text_runtime_verified and profile != "JANG_2D":
+        raise ValueError("the recorded target-runtime proof applies only to JANG_2D")
     config = _load(bundle / "config.json")
     jang = _load(bundle / "jang_config.json")
     index = _load(bundle / "model.safetensors.index.json")["weight_map"]
@@ -219,13 +258,22 @@ def prepare(bundle: Path, source: Path, banner: Path, profile: str) -> dict:
     _write(bundle / "generation_config.json", jang["chat"]["generation_defaults"])
     shutil.copy2(source / "LICENSE", bundle / "LICENSE")
     shutil.copy2(source / "USAGE_POLICY.md", bundle / "USAGE_POLICY.md")
-    shutil.copy2(banner, bundle / "osaurus-x-banner.png")
+    banner_target = bundle / "osaurus-x-banner.png"
+    if banner.resolve() != banner_target.resolve():
+        shutil.copy2(banner, banner_target)
 
     shards = len(set(index.values()))
-    size_gb = float(jang["runtime"]["total_weight_gb"])
+    weight_bytes = sum((bundle / shard).stat().st_size for shard in set(index.values()))
     actual_bits = float(jang["quantization"]["actual_bits"])
     (bundle / "README.md").write_text(
-        _model_card(profile, size_gb, actual_bits, shards, len(index)),
+        _model_card(
+            profile,
+            weight_bytes,
+            actual_bits,
+            shards,
+            len(index),
+            text_runtime_verified=text_runtime_verified,
+        ),
         encoding="utf-8",
     )
     return {
@@ -235,7 +283,10 @@ def prepare(bundle: Path, source: Path, banner: Path, profile: str) -> dict:
         "passthrough_tensor_count": passthrough_count,
         "shards": shards,
         "tensor_keys": len(index),
-        "publication_status": "prepared_not_uploaded_runtime_gate_open",
+        "publication_status": (
+            "prepared_text_runtime_verified" if text_runtime_verified
+            else "prepared_not_uploaded_runtime_gate_open"
+        ),
     }
 
 
@@ -245,8 +296,15 @@ def main() -> None:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--banner", type=Path, required=True)
     parser.add_argument("--profile", choices=("JANG_2D", "JANG_4M", "JANG_6M"), required=True)
+    parser.add_argument("--text-runtime-verified", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(prepare(args.bundle.expanduser(), args.source.expanduser(), args.banner.expanduser(), args.profile), indent=2))
+    print(json.dumps(prepare(
+        args.bundle.expanduser(),
+        args.source.expanduser(),
+        args.banner.expanduser(),
+        args.profile,
+        text_runtime_verified=args.text_runtime_verified,
+    ), indent=2))
 
 
 if __name__ == "__main__":
