@@ -214,6 +214,13 @@ running process had all 21 local shard paths open. This proves coherent text,
 the native default reasoning path, reasoning-channel separation, and EOS for
 that request; it does not prove media, tools, multi-turn, or cache behavior.
 
+`JANG_2D` is staged privately at
+`OsaurusAI/Muse-Glimmer-30B-JANG_2D`, revision
+`d1e47761a08cf6a50d420e96424e48ec7e0b2498`. Authenticated Hub readback
+confirmed private visibility, the exact 33-file bundle plus Hub
+`.gitattributes`, matching SHA-256 and size metadata for all 22 LFS objects,
+and byte-identical downloads of the 11 remaining bundle files.
+
 The staged targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` at revision
 `24a68502d68554cd8b596be1b7703d16d7f8eb49` and
 `OsaurusAI/Muse-Glimmer-30B-JANG_6M` at revision
@@ -225,9 +232,9 @@ mandatory target-runtime coherence gate closes.
 Byte-identical copies also live on `erics-m5-max.local` under
 `/Volumes/EricsLLMDrive/jangq-ai/`. They were streamed over the direct
 Thunderbolt link using a bridge-bound HTTP server. Sorted SHA-256 manifests
-match for all 44 files in 4M and all 49 files in 6M; local/remote byte totals
-are 21,721,789,553 and 27,595,790,919 respectively. The temporary HTTP listener
-was stopped after verification.
+match for all 33 files in 2D, all 44 files in 4M, and all 49 files in 6M;
+local/remote byte totals are 15,919,409,169, 21,721,789,553, and 27,595,790,919
+respectively. The temporary HTTP listener was stopped after verification.
 
 After vmlx-swift proves coherent text generation, run and record image, video,
 reasoning-stream, ATEM tool-round-trip, and cache-reuse rows before publishing.
