@@ -16,6 +16,7 @@ import numpy as np
 from safetensors import safe_open
 
 from jang_tools.calibrate import _load_bf16_tensor
+from jang_tools.convert import MUSE_GLIMMER_RECOMMENDED_SAMPLING
 
 
 PINNED_SOURCE_REVISION = "f84ecc3a0ea984a4c04542a84269e3d065350a6e"
@@ -119,11 +120,13 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     require(output_config.get("capabilities") == caps, "config/jang capability stamps differ")
 
     chat = jang.get("chat", {})
+    expected_generation = _json(source / "generation_config.json")
+    expected_generation.update(MUSE_GLIMMER_RECOMMENDED_SAMPLING)
     require(chat.get("reasoning_default") == "high", "reasoning default != high")
     require(chat.get("reasoning", {}).get("default_mode") == "high", "structured reasoning default != high")
     require(chat.get("tool_calling", {}).get("parser") == "atem", "structured ATEM tool stamp missing")
-    require(chat.get("generation_defaults") == _json(source / "generation_config.json"), "generation defaults drifted")
-    require(chat.get("sampling_defaults") == {"do_sample": False}, "sampling defaults are not source-exact")
+    require(chat.get("generation_defaults") == expected_generation, "generation defaults drifted")
+    require(chat.get("sampling_defaults") == MUSE_GLIMMER_RECOMMENDED_SAMPLING, "sampling defaults mismatch")
 
     runtime = jang.get("runtime", {})
     require(runtime.get("sliding_window") == 2048, "sliding window != 2048")
@@ -135,10 +138,11 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     require(all(output_index[key] in shards for key in output_index), "index references a missing shard")
     require(not any("assistant" in key.lower() or "mtp" in key.lower() for key in output_index), "assistant/MTP tensors leaked into base bundle")
 
-    for sidecar in ("chat_template.jinja", "processor_config.json", "generation_config.json"):
+    for sidecar in ("chat_template.jinja", "processor_config.json"):
         require((artifact / sidecar).exists(), f"missing {sidecar}")
         if (artifact / sidecar).exists():
             require((artifact / sidecar).read_bytes() == (source / sidecar).read_bytes(), f"{sidecar} bytes drifted")
+    require(_json(artifact / "generation_config.json") == expected_generation, "generation_config deployment defaults mismatch")
 
     vision_keys = [key for key in source_index if key.startswith("model.vision_")]
     require(bool(vision_keys), "source vision namespace not found")

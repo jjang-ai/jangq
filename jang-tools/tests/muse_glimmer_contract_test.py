@@ -3,6 +3,7 @@ import json
 from jang_tools.architectures import ArchType, detect_architecture
 from jang_tools.capabilities import build_capabilities
 from jang_tools.convert import (
+    MUSE_GLIMMER_RECOMMENDED_SAMPLING,
     _is_vision_tensor_name,
     _muse_glimmer_chat_metadata,
     _muse_glimmer_runtime_metadata,
@@ -104,7 +105,7 @@ def test_hf_local_revision_is_read_from_download_metadata(tmp_path):
     assert _read_hf_local_revision(tmp_path) == "f84ecc3a0ea984a4c04542a84269e3d065350a6e"
 
 
-def test_chat_metadata_preserves_native_defaults_without_inventing_sampling(tmp_path):
+def test_chat_metadata_applies_model_card_recommended_sampling(tmp_path):
     generation = {
         "bos_token_id": 200000,
         "eos_token_id": [200001, 200008],
@@ -117,6 +118,8 @@ def test_chat_metadata_preserves_native_defaults_without_inventing_sampling(tmp_
     assert chat["reasoning"]["default_mode"] == "high"
     assert chat["reasoning"]["control"] == "reasoning_strength"
     assert chat["tool_calling"] == {"supported": True, "parser": "atem", "format": "atem"}
-    assert chat["sampling_defaults"] == {"do_sample": False}
-    assert chat["generation_defaults"] == generation
-    assert "temperature" not in chat["sampling_defaults"]
+    assert chat["sampling_defaults"] == MUSE_GLIMMER_RECOMMENDED_SAMPLING
+    assert chat["generation_defaults"] == {
+        **generation,
+        **MUSE_GLIMMER_RECOMMENDED_SAMPLING,
+    }

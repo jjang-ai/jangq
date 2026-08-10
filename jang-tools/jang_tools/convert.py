@@ -103,6 +103,15 @@ OSAURUS_TOKENIZER_MAP: dict[str, str] = {
 }
 
 
+# Source: pinned Muse Glimmer README "Best Practices" sampling parameters.
+MUSE_GLIMMER_RECOMMENDED_SAMPLING: dict[str, object] = {
+    "do_sample": True,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 64,
+}
+
+
 def _remap_tokenizer_class_for_swift(tokenizer_config: dict, model_type: str) -> str | None:
     """Apply only source-backed TokenizersBackend compatibility aliases.
 
@@ -152,8 +161,8 @@ def _muse_glimmer_runtime_metadata(model_config: dict) -> dict:
     }
 
 
-def _muse_glimmer_chat_metadata(model_path: Path) -> dict:
-    """Build the native chat contract from shipped template/gen metadata."""
+def _muse_glimmer_generation_defaults(model_path: Path) -> dict:
+    """Merge source token limits with the model-card deployment sampler."""
     generation_path = model_path / "generation_config.json"
     generation_defaults: dict = {}
     if generation_path.exists():
@@ -161,6 +170,13 @@ def _muse_glimmer_chat_metadata(model_path: Path) -> dict:
             generation_defaults = json.loads(generation_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid Muse Glimmer generation_config.json: {exc}") from exc
+    generation_defaults.update(MUSE_GLIMMER_RECOMMENDED_SAMPLING)
+    return generation_defaults
+
+
+def _muse_glimmer_chat_metadata(model_path: Path) -> dict:
+    """Build the native chat contract from shipped template/gen metadata."""
+    generation_defaults = _muse_glimmer_generation_defaults(model_path)
 
     sampling_defaults = {
         key: generation_defaults[key]
@@ -187,8 +203,8 @@ def _muse_glimmer_chat_metadata(model_path: Path) -> dict:
             "format": "atem",
         },
         "sampling_defaults": sampling_defaults,
-        # Keep every shipped generation field and do not invent model-card
-        # sampler recommendations absent from generation_config.json.
+        # Preserve source token IDs/limits and apply the pinned model card's
+        # explicit best-practice sampler recommendation.
         "generation_defaults": generation_defaults,
     }
 
@@ -2277,6 +2293,13 @@ def convert_model(
     for extra_file in extra_configs:
         extra_path = model_path / extra_file
         if extra_path.exists():
+            if extra_file == "generation_config.json" and model_type == "muse_glimmer":
+                (output_path / extra_file).write_text(
+                    json.dumps(jang_config["chat"]["generation_defaults"], indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                extras_copied.append(f"{extra_file} (Muse sampler-patched)")
+                continue
             # M212 (iter 143): if we already patched + wrote
             # generation_config.json via the eos-fix path above, skip
             # the byte-copy here — otherwise we'd overwrite the fixed

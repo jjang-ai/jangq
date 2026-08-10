@@ -98,17 +98,20 @@ applied, and the metadata says so explicitly.
   addressed `to=user`.
 - Tools use the ATEM function-call grammar. A Muse-specific incremental
   reasoning parser and ATEM tool parser are required.
-- The shipped generation default is greedy (`do_sample=false`) with BOS
-  `200000`, EOS `[200001, 200008]`, pad `200018`, and maximum length `131072`.
+- Deployment sampling follows the upstream model-card recommendation:
+  `do_sample=true`, `temperature=1.0`, `top_p=0.95`, and `top_k=64`. BOS is
+  `200000`, EOS is `[200001, 200008]`, pad is `200018`, and maximum length is
+  `131072`.
 - Cache topology is heterogeneous: rotating KV with window 2048 on 39 layers
   and unbounded KV on full-attention layers `3, 7, ..., 51`.
 
 ## Runtime status
 
 **PARTIAL / runtime unverified.** Current validation covers source identity,
-safetensor headers, index integrity, mixed-bit metadata, exact processor/chat/
-generation sidecars, FP16 vision preservation, and selected dequantized-vs-BF16
-tensor comparisons. It does not yet cover coherent generation in vmlx-swift,
+safetensor headers, index integrity, mixed-bit metadata, exact processor/chat
+sidecars, deployment generation metadata, FP16 vision preservation, and
+selected dequantized-vs-BF16 tensor comparisons. It does not yet cover coherent
+generation in vmlx-swift,
 image grounding, video grounding, reasoning streaming, an ATEM tool round trip,
 multi-turn behavior, or prefix/partial-block/suffix cache reuse.
 
@@ -123,7 +126,8 @@ per-module entry in `config.json.quantization`.
   modality, generation, and mixed full/sliding cache metadata.
 - `chat_template.jinja`: exact upstream Muse channel/ATEM template.
 - `processor_config.json`: exact upstream image/video processor contract.
-- `generation_config.json`: exact upstream generation defaults.
+- `generation_config.json`: upstream-recommended deployment sampling plus the
+  source token IDs and maximum length.
 - `LICENSE` and `USAGE_POLICY.md`: copied from the pinned upstream source.
 
 ## Download
@@ -206,6 +210,7 @@ def prepare(bundle: Path, source: Path, banner: Path, profile: str) -> dict:
 
     _write(bundle / "jang_config.json", jang)
     _write(bundle / "config.json", config)
+    _write(bundle / "generation_config.json", jang["chat"]["generation_defaults"])
     shutil.copy2(source / "LICENSE", bundle / "LICENSE")
     shutil.copy2(source / "USAGE_POLICY.md", bundle / "USAGE_POLICY.md")
     shutil.copy2(banner, bundle / "osaurus-x-banner.png")

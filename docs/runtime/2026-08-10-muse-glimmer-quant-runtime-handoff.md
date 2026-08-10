@@ -57,8 +57,8 @@ for this VL artifact and must not be generalized to text-only models.
 | JANG_6M | 6.31 | 25.67 GB | 418 | 0.005954 | 0.023647 |
 
 The verifier also checks finalized shard names, index/header equality, source
-revision, exact processor/template/generation sidecars, capability stamps,
-FP16 vision passthrough, and absence of assistant/MTP tensors.
+revision, exact processor/template sidecars, deployment generation metadata,
+capability stamps, FP16 vision passthrough, and absence of assistant/MTP tensors.
 
 Run any gate from the repository root:
 
@@ -105,10 +105,12 @@ these baselines on all three modalities. A language-only win is insufficient.
 
 ## Generation, reasoning, and tools
 
-The shipped `generation_config.json` is authoritative: greedy decoding
-(`do_sample=false`), BOS 200000, EOS `[200001, 200008]`, pad 200018, maximum
-length 131072. The model card's temperature/top-p/top-k suggestions are
-recommendations, not bundle defaults; do not stamp them over the shipped file.
+Deployment sampling follows the pinned model card's explicit best-practice
+recommendation: `do_sample=true`, `temperature=1.0`, `top_p=0.95`, and
+`top_k=64`. The source token contract remains BOS 200000, EOS
+`[200001, 200008]`, pad 200018, and maximum length 131072. These values must be
+identical in `generation_config.json`, `jang_config.chat.sampling_defaults`,
+and `jang_config.chat.generation_defaults`.
 
 The native chat-template control is `reasoning_strength`, with values `low`,
 `medium`, `high`, and `xhigh`; omission means `high`. Do not translate this to a
@@ -185,9 +187,9 @@ identity, and cache commits must remain base-model authoritative.
 ## Publication handoff
 
 The staged targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` at revision
-`9f0e15be1768f9302ce6c16a8734b77afafff976` and
+`24a68502d68554cd8b596be1b7703d16d7f8eb49` and
 `OsaurusAI/Muse-Glimmer-30B-JANG_6M` at revision
-`f6bfc1a987016c941528aad4c679e9a65291e67d`. Both repositories are private and
+`dd625c14cea6b63b6b558b262bbce8cf53a83afc`. Both repositories are private and
 contain all required model-card, license, policy, banner, config, tokenizer,
 processor, template, index, and shard files. Keep them private until the
 mandatory target-runtime coherence gate closes.
