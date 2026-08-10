@@ -87,6 +87,71 @@ EOS_FIXES: dict[str, dict[int, int]] = {
 }
 
 
+OSAURUS_TOKENIZER_MAP: dict[str, str] = {
+    "qwen3_5": "Qwen2Tokenizer",
+    "qwen3_5_moe": "Qwen2Tokenizer",
+    "qwen3": "Qwen2Tokenizer",
+    "qwen2": "Qwen2Tokenizer",
+    "qwen2_moe": "Qwen2Tokenizer",
+    "llama": "LlamaTokenizer",
+    "mistral": "LlamaTokenizer",
+    "gemma": "GemmaTokenizer",
+    "gemma2": "GemmaTokenizer",
+    "gemma3": "GemmaTokenizer",
+    "phi": "LlamaTokenizer",
+    "phi3": "LlamaTokenizer",
+}
+
+
+def _remap_tokenizer_class_for_swift(tokenizer_config: dict, model_type: str) -> str | None:
+    """Apply only source-backed TokenizersBackend compatibility aliases.
+
+    Returns the replacement class, or None when the config is unchanged.
+    Unknown families intentionally retain TokenizersBackend because current
+    swift-transformers can instantiate that generic BPE implementation.
+    """
+    if tokenizer_config.get("tokenizer_class") != "TokenizersBackend":
+        return None
+    concrete = OSAURUS_TOKENIZER_MAP.get(model_type)
+    if concrete is not None:
+        tokenizer_config["tokenizer_class"] = concrete
+    return concrete
+
+
+def _read_hf_local_revision(model_path: Path) -> str | None:
+    """Read the pinned Hub commit recorded by ``hf download --local-dir``."""
+    metadata = model_path / ".cache" / "huggingface" / "download" / "config.json.metadata"
+    try:
+        revision = metadata.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    return revision or None
+
+
+def _muse_glimmer_runtime_metadata(model_config: dict) -> dict:
+    """Build source-backed runtime metadata for the mixed SWA/full KV stack."""
+    text_config = model_config.get("text_config") or {}
+    layer_types = list(text_config.get("layer_types") or [])
+    full_layers = [i for i, layer_type in enumerate(layer_types) if layer_type == "full_attention"]
+    sliding_layers = [i for i, layer_type in enumerate(layer_types) if layer_type == "sliding_attention"]
+    return {
+        "attention": "hybrid_sliding_full_3to1",
+        "sliding_window": text_config.get("sliding_window"),
+        "full_attention_layers": full_layers,
+        "sliding_attention_layers": sliding_layers,
+        "cache_topology": {
+            "family": "hybrid_full_swa_kv",
+            "one_cache_per_text_layer": True,
+            "full_attention": "unbounded_kv",
+            "sliding_attention": "rotating_kv",
+            # These are integration requirements, not unearned runtime proof.
+            "prefix_cache_required": True,
+            "partial_block_restore_required": True,
+            "suffix_prefill_required": True,
+        },
+    }
+
+
 def _is_mtp_tensor_name(tensor_name: str) -> bool:
     """Return true for model-family MTP tensor namespaces."""
     name = tensor_name.lower()
@@ -99,6 +164,12 @@ def _is_vision_tensor_name(tensor_name: str) -> bool:
     return (
         name.startswith("model.visual")
         or ".visual." in name
+        # Muse Glimmer keeps the complete multimodal front-end below
+        # model.vision_{tower,adapter,projection}.  These tensors must remain
+        # floating-point until a modality-balanced quantization policy has
+        # been validated; treating them as language weights silently breaks
+        # both image and video inference.
+        or name.startswith("model.vision_")
         or name.startswith("vision_tower")
         or "vision_model" in name
         or "vision_encoder" in name
@@ -748,6 +819,18 @@ def convert_model(
     # Also skip for integer target bits (routed to K-quant in step 3)
     if not needs_calibration and target_bits in (2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
         needs_calibration = False
+
+    _is_muse_glimmer = str(_raw_config.get("model_type", "")).lower() == "muse_glimmer"
+    if _is_muse_glimmer and imatrix_path and not needs_calibration:
+        raise ValueError(
+            "Muse Glimmer fixed profiles do not consume imatrix scores; refusing "
+            "to produce a bundle that would falsely claim imatrix calibration."
+        )
+    if _is_muse_glimmer and use_awq:
+        raise ValueError(
+            "Muse Glimmer requires a modality-balanced text/image/video AWQ "
+            "collector; the generic mlx_lm text collector is not compatible."
+        )
 
     if needs_calibration:
         progress.phase(2, 5, "calibrate")
@@ -1870,6 +1953,7 @@ def convert_model(
         },
         "source_model": {
             "name": model_path.name,
+            "revision": _read_hf_local_revision(model_path),
             "dtype": "bfloat16",
             "parameters": _count_params_str(model_config),
         },
@@ -1890,6 +1974,41 @@ def convert_model(
             "total_weight_gb": round(total_weight_bytes / (1024 ** 3), 2),
         },
     }
+
+    # Source-backed modality stamps.  HF VLMs commonly describe video only
+    # in processor_config.json (Muse Glimmer is one such model), so checking
+    # config.json::video_config alone incorrectly advertises image-only
+    # support even though the checkpoint and processor support video.
+    _has_vision = bool(jang_config["architecture"]["has_vision"])
+    _has_video = bool(model_config.get("video_config"))
+    _processor_config_path = model_path / "processor_config.json"
+    if _processor_config_path.exists():
+        try:
+            with open(_processor_config_path, encoding="utf-8") as _f:
+                _processor_config = json.load(_f)
+            _has_video = _has_video or bool(_processor_config.get("video_processor"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            print(f"  WARNING: could not inspect processor_config.json for modalities: {exc}")
+    jang_config["has_vision"] = _has_vision
+    jang_config["has_video"] = _has_video
+
+    if str(model_config.get("model_type", "")).lower() == "muse_glimmer":
+        # The public BF16 checkpoint has no QAT tensors or QAT metadata.  Keep
+        # provenance explicit: fixed JANG profiles are PTQ baselines; imatrix
+        # and AWQ must only be claimed by a later modality-balanced calibration
+        # pass that actually consumes those artifacts.
+        jang_config["quantization"]["source_qat"] = "not_present"
+        jang_config["quantization"]["imatrix_applied"] = bool(imatrix_path and needs_calibration)
+        jang_config["quantization"]["awq_applied"] = bool(use_awq and awq_norms)
+        jang_config["runtime"].update(_muse_glimmer_runtime_metadata(model_config))
+        jang_config["chat"] = {
+            "reasoning_control": "reasoning_strength",
+            "reasoning_default": "high",
+            "reasoning_values": ["low", "medium", "high", "xhigh"],
+            "reasoning_parser": "muse_glimmer",
+            "tool_format": "atem",
+            "tool_parser": "atem",
+        }
     _mtp_meta = _build_mtp_runtime_metadata(model_config, source_tensor_names)
     if _mtp_meta:
         jang_config["runtime"].update(_mtp_meta["runtime"])
@@ -2041,28 +2160,21 @@ def convert_model(
     # Memory ref: feedback_jang_studio_audit_coverage.md (hard requirement).
     # This fix previously lived only in convert_qwen35_jangtq.py — regular
     # JANG conversions for the same family were shipping broken.
-    _OSAURUS_TOKENIZER_MAP = {
-        "qwen3_5": "Qwen2Tokenizer",
-        "qwen3_5_moe": "Qwen2Tokenizer",
-        "qwen3": "Qwen2Tokenizer",
-        "qwen2": "Qwen2Tokenizer",
-        "qwen2_moe": "Qwen2Tokenizer",
-        "llama": "LlamaTokenizer",
-        "mistral": "LlamaTokenizer",
-        "gemma": "GemmaTokenizer",
-        "gemma2": "GemmaTokenizer",
-        "gemma3": "GemmaTokenizer",
-        "phi": "LlamaTokenizer",
-        "phi3": "LlamaTokenizer",
-    }
     if "tokenizer_config.json" in tokenizer_files:
         _tc = tokenizer_files["tokenizer_config.json"]
         if _tc.get("tokenizer_class") == "TokenizersBackend":
-            # Resolve based on source model_type; default Qwen2Tokenizer because
-            # most currently-supported TokenizersBackend sources are Qwen-family.
-            _concrete = _OSAURUS_TOKENIZER_MAP.get(model_type, "Qwen2Tokenizer")
-            _tc["tokenizer_class"] = _concrete
-            print(f"  [osaurus-fix] tokenizer_class: TokenizersBackend → {_concrete}")
+            # Rewrite only families whose tokenizer ABI is known.  A Qwen
+            # default corrupts unrelated modern BPE tokenizers (including
+            # Muse Glimmer), and current swift-transformers supports the
+            # TokenizersBackend class directly.
+            _concrete = _remap_tokenizer_class_for_swift(_tc, model_type)
+            if _concrete is None:
+                print(
+                    "  tokenizer_class: preserving TokenizersBackend "
+                    f"for unmapped model_type={model_type!r}"
+                )
+            else:
+                print(f"  [osaurus-fix] tokenizer_class: TokenizersBackend → {_concrete}")
 
     # Copy VL processor, chat template, and extra config files.
     # Chat templates are CRITICAL — missing or wrong template causes:

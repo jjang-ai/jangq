@@ -339,7 +339,16 @@ def _classify_architecture(
     )
 
     # --- Pure Vision-Language Models (no SSM/MoE) ---
-    if has_vision and not _cfg("layer_types", None) and not _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0))):
+    # Muse Glimmer is a dense VLM whose text decoder uses layer_types to
+    # describe a 3:1 sliding/full-attention schedule.  layer_types does not
+    # imply SSM; excluding it here misclassifies Glimmer as text-only.
+    if has_vision and (
+        model_type == "muse_glimmer"
+        or (
+            not _cfg("layer_types", None)
+            and not _cfg("num_local_experts", _cfg("num_experts", _cfg("n_routed_experts", 0)))
+        )
+    ):
         layers = {**TRANSFORMER_LAYER_CONFIGS, **VISION_LAYER_CONFIGS}
         return ArchConfig(
             arch_type=ArchType.VISION_LANGUAGE,

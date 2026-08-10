@@ -26,6 +26,12 @@ from typing import Any
 
 # (family, reasoning_parser, tool_parser, think_in_template, cache_type)
 FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
+    # Muse Glimmer emits reasoning as an assistant-to-self channel and ATEM
+    # function calls.  The template selects reasoning_strength=high by
+    # default, but does not pre-open the output reasoning channel, hence
+    # think_in_template=False.
+    "muse_glimmer":     ("muse_glimmer", "muse_glimmer", "atem", False, "kv"),
+    "muse_glimmer_text": ("muse_glimmer", "muse_glimmer", "atem", False, "kv"),
     # ZAYA / Zyphra — CCA attention + top-1 MoE. ZAYA and ZAYA1-VL are
     # reasoning-capable and use qwen3 parser metadata. think_in_template stays
     # False because default/no-thinking prompts must start generation in
@@ -339,7 +345,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
     if missing:
         return False, f"capabilities missing keys: {sorted(missing)}"
 
-    valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4",
+    valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4", "muse_glimmer",
                        "openai_gptoss", None}
     valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
                   "kimi", "granite", "nemotron", "step3p5", "xlam",
@@ -353,7 +359,7 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
                   # Tencent Hy3-preview emits its own XML-like tool tags
                   # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
                   # registers this parser as "hy_v3", SGLang as "hunyuan".
-                  "hunyuan"}
+                  "hunyuan", "atem"}
     valid_cache = {"kv", "hybrid", "mla", "mamba"}
     valid_modality = {"text", "vision", "audio", "multimodal", "embedding", "rerank", "image"}
 
