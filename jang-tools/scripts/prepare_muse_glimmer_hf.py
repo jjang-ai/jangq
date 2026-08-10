@@ -30,6 +30,11 @@ def _write(path: Path, value: dict) -> None:
 
 def _model_card(profile: str, size_gb: float, bits: float, shards: int, tensor_keys: int) -> str:
     profile_tag = profile.lower().replace("_", "-")
+    profile_policy = {
+        "JANG_2D": "4-bit attention/lm_head; 3-bit embeddings and MLP gate/down; 2-bit MLP up; FP16 vision",
+        "JANG_4M": "8-bit critical; 4-bit important/compress; FP16 vision",
+        "JANG_6M": "8-bit critical; 6-bit important/compress; FP16 vision",
+    }[profile]
     return f"""---
 language:
 - en
@@ -75,6 +80,7 @@ runtimes that implement Muse Glimmer's dense multimodal architecture.
 | Source revision | `{SOURCE_REVISION}` |
 | Format | `jang_affine` / JANG v2 |
 | Profile | `{profile}` |
+| Bit policy | {profile_policy} |
 | Effective language-weight bits | {bits:.2f} |
 | Indexed size | {size_gb:.2f} GB |
 | Safetensor shards | {shards} |
@@ -238,7 +244,7 @@ def main() -> None:
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--banner", type=Path, required=True)
-    parser.add_argument("--profile", choices=("JANG_4M", "JANG_6M"), required=True)
+    parser.add_argument("--profile", choices=("JANG_2D", "JANG_4M", "JANG_6M"), required=True)
     args = parser.parse_args()
     print(json.dumps(prepare(args.bundle.expanduser(), args.source.expanduser(), args.banner.expanduser(), args.profile), indent=2))
 

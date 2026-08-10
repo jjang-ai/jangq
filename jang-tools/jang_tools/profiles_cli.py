@@ -58,7 +58,7 @@ _JANGTQ_PROFILES = [
 
 def list_profiles() -> dict[str, Any]:
     jang = []
-    # JANG_PROFILES holds tier-based profiles (11 entries).
+    # JANG_PROFILES holds the tier-based profiles, including dense JANG_2D.
     for name, (crit, imp, comp) in JANG_PROFILES.items():
         avg = round((crit + imp + comp * 2) / 4, 2)  # rough avg; real val depends on arch
         jang.append({

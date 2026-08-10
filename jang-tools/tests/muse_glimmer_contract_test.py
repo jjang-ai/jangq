@@ -1,6 +1,7 @@
 import json
 
 from jang_tools.architectures import ArchType, detect_architecture
+from jang_tools.allocate import allocate_bits_profile_compact
 from jang_tools.capabilities import build_capabilities
 from jang_tools.convert import (
     MUSE_GLIMMER_RECOMMENDED_SAMPLING,
@@ -28,6 +29,28 @@ def _source_config() -> dict:
                 for i in range(52)
             ],
         },
+    }
+
+
+def test_jang_2d_dense_asymmetric_allocation():
+    tensor_info = [
+        ("model.language_model.layers.0.self_attn.q_proj.weight", 100),
+        ("model.language_model.layers.0.self_attn.gate_proj.weight", 100),
+        ("model.language_model.layers.0.mlp.gate_proj.weight", 100),
+        ("model.language_model.layers.0.mlp.up_proj.weight", 100),
+        ("model.language_model.layers.0.mlp.down_proj.weight", 100),
+        ("model.language_model.embed_tokens.weight", 100),
+        ("lm_head.weight", 100),
+    ]
+    bits = allocate_bits_profile_compact(tensor_info, "JANG_2D", num_experts=0)
+    assert bits == {
+        "model.language_model.layers.0.self_attn.q_proj.weight": 4,
+        "model.language_model.layers.0.self_attn.gate_proj.weight": 4,
+        "model.language_model.layers.0.mlp.gate_proj.weight": 3,
+        "model.language_model.layers.0.mlp.up_proj.weight": 2,
+        "model.language_model.layers.0.mlp.down_proj.weight": 3,
+        "model.language_model.embed_tokens.weight": 3,
+        "lm_head.weight": 4,
     }
 
 

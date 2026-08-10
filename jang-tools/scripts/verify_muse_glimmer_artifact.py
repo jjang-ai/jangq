@@ -154,10 +154,27 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
     if "language_model.lm_head" in manifest:
         require(manifest["language_model.lm_head"].get("source_tensor") == "lm_head.weight", "lm_head source mapping is wrong")
     allowed_bits = {
+        "JANG_2D": {2, 3, 4},
         "JANG_4M": {4, 8},
         "JANG_6M": {6, 8},
     }[profile]
     require({entry.get("bits") for entry in manifest.values()} <= allowed_bits, "unexpected profile bit width")
+    if profile == "JANG_2D":
+        role_policy = (
+            (".self_attn.", 4),
+            (".mlp.gate_proj.", 3),
+            (".mlp.up_proj.", 2),
+            (".mlp.down_proj.", 3),
+            ("embed_tokens", 3),
+            ("lm_head", 4),
+        )
+        for needle, expected_bits in role_policy:
+            matches = [entry for entry in manifest.values() if needle in entry.get("source_tensor", "")]
+            require(bool(matches), f"JANG_2D role missing: {needle}")
+            require(
+                all(entry.get("bits") == expected_bits for entry in matches),
+                f"JANG_2D role bits mismatch: {needle} != {expected_bits}",
+            )
     quant_keys = {
         entry[key]
         for entry in manifest.values()
@@ -168,6 +185,10 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
         jang.get("quantization", {}).get("passthrough_tensor_count") == passthrough_count,
         "passthrough tensor count stamp is inaccurate",
     )
+    indexed_shard_bytes = sum((artifact / shard).stat().st_size for shard in shards)
+    require(runtime.get("total_weight_bytes") == indexed_shard_bytes, "runtime byte-size stamp is inaccurate")
+    if profile == "JANG_2D":
+        require(indexed_shard_bytes < 16_000_000_000, "JANG_2D is not below 16 GB decimal")
 
     for publication_file in ("README.md", "LICENSE", "USAGE_POLICY.md", "osaurus-x-banner.png"):
         require((artifact / publication_file).is_file(), f"missing publication file {publication_file}")
@@ -184,13 +205,20 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
                 "model.language_model.layers.0.mlp.down_proj.weight",
         }
         # Artifact sanity ceilings, not language-coherence acceptance gates.
-        thresholds = {"JANG_4M": 0.16, "JANG_6M": 0.08}
+        thresholds = {
+            "JANG_2D": {
+                "language_model.model.layers.0.self_attn.k_proj": 0.16,
+                "language_model.model.layers.0.mlp.down_proj": 0.30,
+            },
+            "JANG_4M": {base: 0.16 for base in samples},
+            "JANG_6M": {base: 0.08 for base in samples},
+        }
         for base, source_key in samples.items():
             actual = _dequant(artifact, output_index, manifest, base)
             expected = _source_tensor(source, source_index, source_key)
             score = _rel_l1(actual, expected)
             rel_l1[base] = score
-            require(score < thresholds[profile], f"{base} rel-L1 {score:.6f} exceeds threshold")
+            require(score < thresholds[profile][base], f"{base} rel-L1 {score:.6f} exceeds threshold")
             del actual, expected
 
     result = {
@@ -203,6 +231,7 @@ def verify(source: Path, artifact: Path, profile: str, dequant: bool) -> dict:
         "quantized_modules": len(manifest),
         "vision_passthrough_tensors": len(vision_keys),
         "all_passthrough_tensors": passthrough_count,
+        "indexed_shard_bytes": indexed_shard_bytes,
         "assistant_revision_preserved_separately": PINNED_ASSISTANT_REVISION,
         "dequant_rel_l1": rel_l1,
         "failures": failures,
@@ -215,7 +244,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--source", type=Path, default=Path("~/models/meta-models/Muse-Glimmer-30B").expanduser())
-    parser.add_argument("--profile", required=True, choices=("JANG_4M", "JANG_6M"))
+    parser.add_argument("--profile", required=True, choices=("JANG_2D", "JANG_4M", "JANG_6M"))
     parser.add_argument("--dequant", action="store_true")
     args = parser.parse_args()
     result = verify(args.source.expanduser(), args.artifact.expanduser(), args.profile, args.dequant)

@@ -1,6 +1,6 @@
 # Muse Glimmer 30B quant and runtime handoff
 
-Status: both retained quant artifacts pass structural and dequantization checks. Generation,
+Status: all three retained quant artifacts pass structural and dequantization checks. Generation,
 reasoning/tool streaming, image grounding, video grounding, and cache reuse are
 deferred to the vMLX Swift/Python runtime owners and remain unverified.
 
@@ -10,6 +10,7 @@ deferred to the vMLX Swift/Python runtime owners and remain unverified.
 |---|---|---|---|
 | BF16 base | `f84ecc3a0ea984a4c04542a84269e3d065350a6e` | `~/models/meta-models/Muse-Glimmer-30B` | Quant source |
 | Five-layer assistant | `2c86316d689027b91123638739743fef1d425233` | `~/models/meta-models/Muse-Glimmer-30B-assistant` | Separate future DFlash artifact; not part of any base quant |
+| JANG_2D | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2D` | Dense-safe sub-16-GB base candidate only |
 | JANG_4M | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_4M` | Base model only |
 | JANG_6M | base revision above | `~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_6M` | Base model only |
 
@@ -53,6 +54,7 @@ for this VL artifact and must not be generalized to text-only models.
 
 | Bundle | Effective bits | Indexed size | Quantized modules | Dequant rel-L1: layer-0 K | Dequant rel-L1: layer-0 MLP down |
 |---|---:|---:|---:|---:|---:|
+| JANG_2D | 2.96 | 14.80 GiB / 15.89 GB | 418 | 0.100382 | 0.206680 |
 | JANG_4M | 4.63 | 20.20 GB | 418 | 0.005954 | 0.098860 |
 | JANG_6M | 6.31 | 25.67 GB | 418 | 0.005954 | 0.023647 |
 
@@ -63,6 +65,12 @@ capability stamps, FP16 vision passthrough, and absence of assistant/MTP tensors
 Run any gate from the repository root:
 
 ```bash
+PYTHONPATH=jang-tools uv run --no-project \
+  --with mlx --with numpy --with safetensors --with tqdm \
+  python jang-tools/scripts/verify_muse_glimmer_artifact.py \
+  ~/models/JANGQ-AI/Muse-Glimmer-30B-JANG_2D \
+  --profile JANG_2D --dequant
+
 PYTHONPATH=jang-tools uv run --no-project \
   --with mlx --with numpy --with safetensors --with tqdm \
   python jang-tools/scripts/verify_muse_glimmer_artifact.py \
@@ -93,7 +101,7 @@ Current method support is deliberately conservative:
 |---|---|---|
 | QAT | unavailable | No QAT source checkpoint exists. Producing one requires training, not a converter flag. |
 | GPTQ/Hessian | not applied | The current generic JANG GPTQ path is limited to expert/3-D MoE tensors. Glimmer is dense; claiming GPTQ would be false. |
-| imatrix | not applied | Fixed `JANG_4M`/`JANG_6M` allocation is tier-based and does not consume imatrix scores. The converter now rejects an ignored Glimmer imatrix. |
+| imatrix | not applied | Fixed `JANG_2D`/`JANG_4M`/`JANG_6M` allocation is tier-based and does not consume imatrix scores. The converter rejects an ignored Glimmer imatrix. |
 | AWQ | not applied | The generic collector loads text-only `mlx_lm`, which cannot run this VLM and cannot cover media-conditioned language activations. The converter now rejects this unsafe path. |
 
 For a calibrated follow-up, use the official Muse Glimmer model path and collect
@@ -185,6 +193,15 @@ later, assistant revision, mode, depth, and acceptance policy must join the cach
 identity, and cache commits must remain base-model authoritative.
 
 ## Publication handoff
+
+`JANG_2D` is local-only. Its 15,890,602,696 indexed weight bytes are below
+16 GB decimal while retaining all 809 vision tensors in FP16. Its language
+policy is 4-bit for all 260 gated-attention modules and the untied lm head,
+3-bit for token embeddings and dense MLP gate/down projections, and 2-bit for
+dense MLP up projections. This follows the asymmetric protection principle of
+Muse's published K-Quant releases but uses MLX-native affine weights; it is not
+byte- or algorithm-equivalent to GGUF K-Quant. Do not upload it until coherent
+vmlx-swift generation closes the mandatory runtime gate.
 
 The staged targets are `OsaurusAI/Muse-Glimmer-30B-JANG_4M` at revision
 `24a68502d68554cd8b596be1b7703d16d7f8eb49` and

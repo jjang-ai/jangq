@@ -144,6 +144,7 @@ TIER_RULES = [
     ("k_proj", Tier.CRITICAL),
     ("v_proj", Tier.CRITICAL),
     ("o_proj", Tier.CRITICAL),
+    ("self_attn.gate_proj", Tier.CRITICAL),
     ("self_attn.out_proj", Tier.CRITICAL),
     ("self_attn.g_proj", Tier.CRITICAL),
 
@@ -415,6 +416,9 @@ JANG_PROFILES = {
     # ── 2-bit COMPRESS tier ──────────────────────────────────
     # At 2-bit, attention MUST be protected or model breaks completely.
     # IMPORTANT tier also needs protection (linear attention, embeddings).
+    # Dense K-quant-style lane. The allocator promotes gate/down MLP
+    # projections to 3-bit while leaving up_proj at 2-bit.
+    "JANG_2D": (4, 3, 2),   # Dense 3/2/3 MLP, protected attention/token I/O
     "JANG_2S": (6, 4, 2),   # Tightest 2-bit
     "JANG_2M": (8, 4, 2),   # Balanced 2-bit
     "JANG_2L": (8, 6, 2),   # Best quality 2-bit (proven: 73% MMLU on 122B)
@@ -779,6 +783,12 @@ def allocate_bits_profile(
                 runs.append((cache[prev_name], run_count))
             if name not in cache:
                 assigned = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
+                if profile == "JANG_2D" and num_experts == 0:
+                    name_lower = name.lower()
+                    if ".self_attn." not in name_lower and any(component in name_lower for component in (
+                        "gate_proj", "down_proj", "mlp.fc1", "mlp.fc2", "w1", "w2",
+                    )):
+                        assigned = max(assigned, 3)
                 if apply_mlp_asymmetry:
                     assigned = _apply_mlp_asymmetry_floor(name, assigned, num_experts)
                 cache[name] = assigned
@@ -1028,6 +1038,12 @@ def allocate_bits_profile_compact(
     result = {}
     for name, n_blocks in tensor_info:
         bits = tier_to_bits[classify_tensor(name, num_experts, has_shared_mlp)]
+        if profile == "JANG_2D" and num_experts == 0:
+            name_lower = name.lower()
+            if ".self_attn." not in name_lower and any(component in name_lower for component in (
+                "gate_proj", "down_proj", "mlp.fc1", "mlp.fc2", "w1", "w2",
+            )):
+                bits = max(bits, 3)
         if apply_mlp_asymmetry:
             bits = _apply_mlp_asymmetry_floor(name, bits, num_experts)
         result[name] = bits
