@@ -95,7 +95,7 @@ experimental low-memory artifact until real generation proves otherwise.
 ## QAT, GPTQ, imatrix, and AWQ
 
 The source is BF16 and exposes no QAT tensors, scale metadata, or QAT checkpoint.
-Therefore `source_qat=not_present` is stamped in both bundles. A PTQ conversion
+Therefore `source_qat=not_present` is stamped in all three bundles. A PTQ conversion
 must never be relabeled as QAT. The official dynamic/K-quant GGUF releases are
 also PTQ references, not proof of a reusable QAT source.
 
@@ -105,7 +105,7 @@ Current method support is deliberately conservative:
 |---|---|---|
 | QAT | unavailable | No QAT source checkpoint exists. Producing one requires training, not a converter flag. |
 | GPTQ/Hessian | not applied | The current generic JANG GPTQ path is limited to expert/3-D MoE tensors. Glimmer is dense; claiming GPTQ would be false. |
-| imatrix | not applied | Fixed `JANG_4M`/`JANG_6M` allocation is tier-based and does not consume imatrix scores. The converter now rejects an ignored Glimmer imatrix. |
+| imatrix | not applied | Fixed `JANG_2L`/`JANG_4M`/`JANG_6M` allocation is tier-based and does not consume imatrix scores. The converter now rejects an ignored Glimmer imatrix. |
 | AWQ | not applied | The generic collector loads text-only `mlx_lm`, which cannot run this VLM and cannot cover media-conditioned language activations. The converter now rejects this unsafe path. |
 
 For a calibrated follow-up, use the official Muse Glimmer model path and collect
