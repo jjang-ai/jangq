@@ -272,14 +272,30 @@ Crucially, VC-test-S reaches 7.87 GB — **the same size as JANG_4 (7.9 GB)**. A
 has no reason to exist for this model. A uniform 3-bit build is the real answer:
 it speaks, and at 7.16 GB it is genuinely smaller.
 
-### Shipping matrix (3 runs each, LCS overlap)
+### Shipping matrix
 
-| tier | size | overlap |
-|---|---|---|
-| MXFP8 | 11 GB | 100 / 100 / 100 |
-| JANG_4 | 7.9 GB | 96 / 100 / 98 |
-| **JANG_3** | **7.2 GB** | **100 / 100 / 100** |
-| JANG_2 | 5.7 GB | 0 / 0 / 0 — do not ship |
+Harness, 8 runs each (LCS overlap), plus live runs in the app's
+Speech-to-Speech panel:
+
+| tier | size | harness x8 | live in app |
+|---|---|---|---|
+| MXFP8 | 11 GB | 100 x3 | 32 tok, 32 tok — verbatim both |
+| **JANG_4** | **7.9 GB** | 100 97 100 100 98 89 89 100 | 55 tok verbatim |
+| JANG_3 | 7.2 GB | 100 100 **59** 100 100 100 100 100 | 33, **NOTHING**, 8, 33, 32 |
+| JANG_2 | 5.7 GB | 0 x3 | (said nothing) — do not ship |
+
+🚨 **JANG_3 speaks, but not reliably.** Its text channel is correct and
+identical every single run; the SPEECH is what varies. That is the MoG head,
+and it is faithful to the reference — component choice is a Gumbel-max over
+1024 mixture components (`noise_scale` is only 0.001, so the Gaussian term is
+negligible). At 3 bits the mixture logits are noisy enough that the pick lands
+on unintelligible audio a noticeable fraction of the time: one 59% in eight
+harness runs, and two poor reads in five live runs.
+
+**Recommendation: JANG_4 is the small tier.** JANG_3 saves 0.7 GB and costs
+reliability. Do not judge either from three runs — an earlier promotion of
+JANG_3 rested on exactly that and the live panel disproved it within five turns.
+Any future tier needs a pass-RATE, not a pass.
 
 Built with `python -m jang_tools.convert_voicechat_jang <bf16> <out>
 <calib.json> <calib.safetensors> --base-bits 3 --group-size 32`. The converter
