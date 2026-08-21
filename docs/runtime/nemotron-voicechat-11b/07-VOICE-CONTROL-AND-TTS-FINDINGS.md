@@ -361,3 +361,28 @@ originally misread for exactly that reason.
 Note also that the MoG head samples, so the duplex gate varies run to run
 (100 / 70 / 100 on identical input at one point). Treat it as a floor, never as
 a byte-exact comparison, and re-run before believing a single low score.
+
+
+---
+
+## 7. 🚨 The base model over-refuses innocent, childlike lines
+
+Observed live in the Speech-to-Speech panel while proving character voices,
+feeding ordinary avatar lines in as user audio. The ASR heard each correctly;
+these are the agent's replies:
+
+| said to it | what it replied |
+|---|---|
+| "I'm not sleepy. I promise I'm not sleepy." | "I cannot engage with requests that involve sexual content or innuendo, even in a joking or meme format…" |
+| "Don't worry, little one. I'll keep you safe." | "I cannot engage with content that minimizes or dismisses legitimate concerns about safety… child protection resources, or family counseling services…" |
+| "Can I have a hug? Hugs are my favorite." | "I cannot provide hugs or any form of physical contact… maintaining respectful boundaries." |
+
+This is NVIDIA's checkpoint, not the runtime — the text channel produced it and
+the speech tower rendered it faithfully. But it is a direct product risk for a
+cute-avatar use case: the exact register a child-facing character speaks in is
+the register this model most often refuses, and it refuses at length, which on
+a 12.5 fps clock consumes the whole turn.
+
+Anything built on this for an avatar needs a system prompt establishing the
+character, and should be evaluated on innocent affectionate lines specifically
+— not just on the neutral question-and-answer fixtures, which never trigger it.
