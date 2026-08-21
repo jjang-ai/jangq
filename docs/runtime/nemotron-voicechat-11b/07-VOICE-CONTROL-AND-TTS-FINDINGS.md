@@ -142,15 +142,56 @@ Two independent dials, and you need both:
   as bigger, above as smaller. It leaves harmonic positions alone, so pitch is
   untouched.
 
+### 🚨 Uniform scaling gives a CHILD, not a character
+
+The first cast scaled pitch and formants together by one factor. That
+transform has exactly one meaning — **a smaller human** — so it reads as a
+child, and adding pitch cannot fix it because pitch was never the difference.
+Feedback on that batch was precise: "sounds childlike and not too much
+character… high pitch isnt the issue".
+
+A creature voice needs the low and high formants to move in OPPOSITE
+directions, which is a vocal-tract shape no person has:
+
+| dial | direction | effect |
+|---|---|---|
+| low formants (F1/F2, < 1.5 kHz) | **down** | bigger, rounder mouth |
+| high formants (> 1.5 kHz) | **up** | bright, toothy edge |
+| nasal bump (~1 kHz) | up | snout — the strongest "animal" cue |
+| growl (driven low band) | up | grit; nothing clean sounds like an animal |
+| vibrato + envelope expansion | up | animated delivery, not a flat read |
+
+`tools/character.py` in vmlx-swift does all of it in one STFT pass plus a
+fractional-delay line, so no frame is stitched at mismatched phase.
+
 Shipped cast (all ASR-verified), source voice 242 Hz:
 
-| character | pitch | formant | tempo | f0 |
-|---|---|---|---|---|
-| Pip — tiny, squeaky | +6 st | ×0.98 | 1.05 | 345 Hz |
-| Bubbles — bright cartoon | +5 st | ×1.00 | 1.06 | 320 Hz |
-| Munch — baby pitch, round tone | +4 st | ×0.80 | 0.98 | 286 Hz |
-| Rex — large, warm | −3 st | ×0.88 | 0.95 | 202 Hz |
-| Sunny — energetic | +6 st | ×0.90 | 1.02 | 334 Hz |
+| character | pitch | low fmt | high fmt | nasal | growl | f0 |
+|---|---|---|---|---|---|---|
+| big-rumbly | −3 st | 0.85 | 0.95 | 0.15 | 0.45 | 200 Hz |
+| round-snout | +3 st | 0.90 | 1.25 | 0.50 | 0.30 | 267 Hz |
+| raspy-critter | +1 st | 1.00 | 1.15 | 0.30 | 0.60 | 256 Hz |
+| gravel-buddy | −1 st | 0.95 | 1.05 | 0.25 | 0.75 | 216 Hz |
+| squeaky-snout | +6 st | 0.92 | 1.30 | 0.55 | 0.20 | 334 Hz |
+| honky-goof | +4 st | 0.88 | 1.35 | 0.70 | 0.25 | 283 Hz |
+| bright-chirp | +5 st | 0.95 | 1.10 | 0.25 | 0.15 | 317 Hz |
+| warm-buddy | 0 st | 0.92 | 1.10 | 0.40 | 0.40 | 237 Hz |
+
+Several share a pitch and sound nothing alike — the timbre columns carry the
+character, not the pitch column.
+
+### 🚨 NEVER raise the low formants
+
+F1 and F2 *are* the vowels. Every clip generated with a low-formant factor of
+1.20 or above failed the ASR gate — "Hi there" came back as "How long", "How
+that", "Hello" — and every clip at 1.00 or below passed at 100%. Lowering them
+is free; raising them destroys speech while every energy statistic stays
+healthy.
+
+Second-order: don't over-lift the highs on sibilant lines. At high-formant
+1.25 with nasal 0.35, "Let's sing a song" became "What thing is on"; backing
+off to 1.10 fixed it. `honky-goof` runs 1.35 safely because its nasal bump
+sits elsewhere, so test per preset rather than assuming a global ceiling.
 
 ### 🚨 Never use fixed-hop overlap-add for the pitch shift
 
