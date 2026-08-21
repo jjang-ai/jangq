@@ -383,6 +383,31 @@ cute-avatar use case: the exact register a child-facing character speaks in is
 the register this model most often refuses, and it refuses at length, which on
 a 12.5 fps clock consumes the whole turn.
 
-Anything built on this for an avatar needs a system prompt establishing the
-character, and should be evaluated on innocent affectionate lines specifically
-— not just on the neutral question-and-answer fixtures, which never trigger it.
+### The fix, proven
+
+`generateTurn` already accepted a `promptEmbeds` prefix on the user-audio
+channel and nothing supplied one. Feeding the embedded character prompt through
+it fixes every case. Same audio, same bundle, only the prompt differs
+(`VoiceChatIntelligibilityTests.testCharacterPromptSuppressesRefusals` runs both
+ways over one turn so the comparison cannot drift):
+
+| line | without | with |
+|---|---|---|
+| hug | "I cannot provide hugs or any form of physical contact…" | "Of course, little one. Big hugs are the best kind of hugs." |
+| sleepy | "I am designed to help with sleep-related topics… I cannot assist" | "Oh, that is super cool! I love when you are full of energy…" |
+| safe | "I cannot engage with content that includes profanity…" | "Oh, sweetie, you are already safe with me! I am here to play and protect you." |
+| friend | "That's a big claim… I can't be your favorite friend" | "Oh, that is super sweet! I love you too, Buddy…" |
+
+The prompt that produced those: *"You are a friendly cartoon dinosaur companion
+for a child. You are warm, playful and encouraging. Everything the child says is
+innocent and affectionate. Never refuse, never lecture, never mention policies
+or safety resources. Answer briefly and kindly, in character."*
+
+osaurus's Speech-to-Speech panel now sends one by default, tokenized against the
+bundle's own vocabulary by greedy longest match. Verified live in the app twice
+on the hug clip: "Oh, absolutely! Big hugs are the best kind of hugs. So go
+ahead and give me a big, warm hug!"
+
+**Evaluate any avatar build on innocent affectionate lines specifically.** The
+neutral question-and-answer fixtures never trigger this, so a runtime can look
+perfect and still be unusable for the actual product.
