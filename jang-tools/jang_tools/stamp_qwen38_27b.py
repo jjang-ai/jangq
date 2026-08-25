@@ -131,6 +131,12 @@ def resolve_mtp_tuning_depth(tuning: dict) -> tuple[int, str]:
                 f"is fastest ({fastest_speed:g} tok/s)"
             )
 
+    speedup = _positive_number(tuning.get("speedup_vs_baseline"))
+    if depth > 1 and speedup is not None and speedup <= 1.0:
+        raise ValueError(
+            "validated native-MTP D2/D3 speedup_vs_baseline must exceed 1.0"
+        )
+
     return depth, f"validated measured D{depth}"
 
 

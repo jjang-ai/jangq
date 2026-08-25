@@ -86,6 +86,16 @@ def test_claimed_d3_is_rejected_when_its_speed_table_selects_d2(tmp_path):
         resolve_mtp_tuning_depth(tuning)
 
 
+def test_deeper_depth_requires_wall_speedup_above_baseline():
+    tuning = _validated_tuning(depth=2)
+    tuning["speedup_vs_baseline"] = 1.0
+
+    with pytest.raises(
+        ValueError, match="D2/D3 speedup_vs_baseline must exceed 1.0"
+    ):
+        resolve_mtp_tuning_depth(tuning)
+
+
 def test_missing_tuning_gets_atomic_conservative_d1_seed(tmp_path):
     bundle = _bundle(tmp_path, video=False)
 
