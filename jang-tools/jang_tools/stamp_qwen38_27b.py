@@ -1,4 +1,4 @@
-"""Stamp the Qwen3.6-27B bundle contract (vision + video + MTP + reasoning).
+"""Stamp the Qwen3.8-27B bundle contract (vision + video + MTP + reasoning).
 
 Everything here is taken from the model card and `generation_config.json` of
 `Qwen/Qwen3.8-27B`, verified against the downloaded source on 2026-08-14.
@@ -43,6 +43,9 @@ import json
 import sys
 from pathlib import Path
 
+from ._json_utils import write_json_object_atomic
+from .capabilities import write_validated_jang_config
+
 # Qwen3.8's card documents exactly TWO presets (unlike 3.6's three — the
 # coding preset does not exist on the 3.8 card; do not carry it over):
 #   Thinking:  temp 1.0  top_p 0.95  top_k 20  min_p 0  presence 0.0
@@ -61,6 +64,74 @@ EOS_IDS = [248046, 248044]
 BOS_ID = 248044
 PAD_ID = 248044
 SOURCE_TAG = "vendor_card+generation_config_2026-08-14"
+
+
+def _depth(raw: object) -> int | None:
+    if type(raw) is not int or not 1 <= raw <= 3:
+        return None
+    return raw
+
+
+def _positive_number(raw: object) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    return value if value > 0 else None
+
+
+def resolve_mtp_tuning_depth(tuning: dict) -> tuple[int, str]:
+    """Resolve a safe default draft depth from one tuning sidecar.
+
+    Tokens per verification cycle are acceptance diagnostics, not a throughput
+    oracle. A validated recommendation therefore needs measured wall speed,
+    and a per-depth speed table must agree with ``best_depth``. Unvalidated
+    stamps may only carry the conservative D1 seed.
+    """
+    if not isinstance(tuning, dict):
+        raise ValueError("vmlx_mtp_tuning.json must contain a JSON object")
+    if tuning.get("blocked") is True:
+        raise ValueError("vmlx_mtp_tuning.json blocks native MTP")
+
+    depth = _depth(tuning.get("best_depth"))
+    if depth is None:
+        raise ValueError("vmlx_mtp_tuning.json best_depth must be an integer from 1 to 3")
+
+    if tuning.get("validated") is not True:
+        if depth != 1:
+            raise ValueError("unvalidated native-MTP tuning may only recommend depth 1")
+        return 1, "conservative unmeasured D1"
+
+    if tuning.get("output_equivalent") is False:
+        raise ValueError("validated native-MTP tuning explicitly failed output equivalence")
+    evidence_keys = ("baseline_tok_s", "best_tok_s", "speedup_vs_baseline")
+    missing = [key for key in evidence_keys if _positive_number(tuning.get(key)) is None]
+    if missing:
+        raise ValueError(f"validated native-MTP tuning lacks positive wall-speed evidence: {missing}")
+
+    raw_speeds = tuning.get("measured_tok_s_by_depth")
+    if raw_speeds is not None:
+        if not isinstance(raw_speeds, dict):
+            raise ValueError("measured_tok_s_by_depth must be a JSON object")
+        speeds: dict[int, float] = {}
+        for raw_key, raw_speed in raw_speeds.items():
+            try:
+                key = int(raw_key)
+            except (TypeError, ValueError):
+                continue
+            speed = _positive_number(raw_speed)
+            if 1 <= key <= 3 and speed is not None:
+                speeds[key] = speed
+        if depth not in speeds:
+            raise ValueError(f"measured_tok_s_by_depth has no valid D{depth} result")
+        fastest_speed = max(speeds.values())
+        fastest_depth = min(key for key, speed in speeds.items() if speed == fastest_speed)
+        if fastest_depth != depth:
+            raise ValueError(
+                f"best_depth={depth} contradicts measured wall speed; D{fastest_depth} "
+                f"is fastest ({fastest_speed:g} tok/s)"
+            )
+
+    return depth, f"validated measured D{depth}"
 
 
 def stamp(b: Path) -> dict:
@@ -139,6 +210,35 @@ def stamp(b: Path) -> dict:
     if idx.exists():
         wm = json.loads(idx.read_text()).get("weight_map", {})
         mtp_n = sum(1 for k in wm if k.startswith("mtp."))
+
+    tuning_p = b / "vmlx_mtp_tuning.json"
+    tuning_to_write: dict | None = None
+    resolved_depth = 1
+    depth_basis = "no MTP artifact"
+    if mtp_n:
+        if tuning_p.exists():
+            tuning = json.loads(tuning_p.read_text())
+        else:
+            q = cfg.get("quantization", {})
+            tuning = {
+                "best_depth": 1,
+                "blocked": False,
+                "model_types": ["qwen3_5"],
+                "artifact": b.name,
+                "quantization_mode": q.get("mode", "affine"),
+                "quantization_bits": q.get("bits"),
+                "note": (
+                    "Conservative UNMEASURED default: 1 draft/step. "
+                    "Tokens per cycle do not choose a wall-throughput winner; "
+                    "run matched-output D1/D2/D3 timing before validating a deeper depth."
+                ),
+                "reason": "stamped by stamp_qwen38_27b; recommendation, not measurement",
+            }
+            tuning_to_write = tuning
+        try:
+            resolved_depth, depth_basis = resolve_mtp_tuning_depth(tuning)
+        except ValueError as exc:
+            raise ValueError(f"{tuning_p}: {exc}") from exc
     # ── MTP: stamp the keys the RUNTIMES actually read ────────────────────
     # Verified against both runtimes (2026-08-13):
     #   vmlx  : native_mtp.py reads jang_config.runtime.mtp_layers,
@@ -159,9 +259,10 @@ def stamp(b: Path) -> dict:
         "mtp_layers": 1 if mtp_n else 0,
         "mtp_mode": "preserved_enabled" if mtp_n else "none",
         "mtp_num_speculative_tokens": 2,   # upstream serving config (drafts)
-        "mtp_status": ("MTP head preserved for native speculative decode; "
-                       "recommended 1 draft/step on Apple silicon (unmeasured "
-                       "on this artifact — run a depth sweep to validate)."),
+        "mtp_status": (
+            "MTP head preserved for native speculative decode; "
+            f"recommended {resolved_depth} draft(s)/step from {depth_basis}."
+        ),
     })
     jang["runtime"] = runtime
     jang["mtp"] = {
@@ -173,45 +274,19 @@ def stamp(b: Path) -> dict:
         "upstream_method": "qwen3_next_mtp",
         "upstream_num_speculative_tokens": 2,   # DRAFTS (== kit D3)
         "trained_multi_step": True,   # card: "MTP: trained with multiple steps"
-        "recommended_num_drafts": 1,            # == kit D2 == vmlx depth 1
+        "recommended_num_drafts": resolved_depth,
         "notation": ("Draft count is the unambiguous unit. vmlx native-MTP "
                      "'depth' and vLLM num_speculative_tokens both count "
                      "DRAFTS; kit docs' D<n> counts tokens/cycle "
                      "(kit D2 == 1 draft == vmlx depth 1)."),
     }
 
-    # vmlx_mtp_tuning.json — the file BOTH runtimes consult for launch depth.
-    # Without it vmlx defaults to 3 drafts. Top-level best_depth is vmlx's
-    # ungated third candidate; Swift decodes the same flat file but will not
-    # use best_depth until validated/output_equivalent + tok/s are measured
-    # in (correct: this stamp is a recommendation, not a measurement).
-    if mtp_n:
-        tuning_p = b / "vmlx_mtp_tuning.json"
-        if not tuning_p.exists():   # never clobber a real measured sweep
-            q = cfg.get("quantization", {})
-            tuning_p.write_text(json.dumps({
-                "best_depth": 1,
-                "blocked": False,
-                "model_types": ["qwen3_5"],
-                "artifact": b.name,
-                "quantization_mode": q.get("mode", "affine"),
-                "quantization_bits": q.get("bits"),
-                "note": ("Conservative UNMEASURED default: 1 draft/step. "
-                         "NOTE: the 3.8 card states MTP was trained with "
-                         "MULTIPLE steps, so 2-3 drafts may hold accept rate "
-                         "on this model — a depth sweep is worth running. "
-                         "Write validated, output_equivalent, baseline_tok_s, "
-                         "best_tok_s, speedup_vs_baseline to let Swift honor "
-                         "best_depth."),
-                "reason": "stamped by stamp_qwen38_27b; recommendation, not measurement",
-            }, indent=2) + "\n")
-
     caps = jang.get("capabilities") or cfg.get("capabilities") or {}
     caps.update({
         "has_vision": True,
         "has_video": bool(jang["vision"]["video_supported"]),
         "has_audio": False,
-        "modality": "video" if jang["vision"]["video_supported"] else "vision",
+        "modality": "multimodal" if jang["vision"]["video_supported"] else "vision",
         "modalities": {"text": True, "vision": True,
                        "video": bool(jang["vision"]["video_supported"]),
                        "audio": False},
@@ -223,11 +298,14 @@ def stamp(b: Path) -> dict:
     jang["capabilities"] = caps
     cfg["capabilities"] = caps
 
-    gen_p.write_text(json.dumps(gen, indent=2) + "\n")
-    jang_p.write_text(json.dumps(jang, indent=2) + "\n")
-    cfg_p.write_text(json.dumps(cfg, indent=2) + "\n")
+    write_json_object_atomic(gen_p, gen)
+    write_json_object_atomic(cfg_p, cfg)
+    write_validated_jang_config(b, jang, cfg)
+    if tuning_to_write is not None:
+        write_json_object_atomic(tuning_p, tuning_to_write)
     return {"bundle": b.name, "mtp": mtp_n,
-            "video": jang["vision"]["video_supported"]}
+            "video": jang["vision"]["video_supported"],
+            "mtp_depth": resolved_depth, "mtp_depth_basis": depth_basis}
 
 
 def main(argv):

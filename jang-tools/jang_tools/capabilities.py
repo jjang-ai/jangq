@@ -34,10 +34,10 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "zaya":              ("zaya",        "qwen3",       "zaya_xml", False, "hybrid"),
     "zaya1_vl":          ("zaya1_vl",    "qwen3",       "zaya_xml", False, "hybrid"),
     # Qwen 3.5 / 3.6 family (hybrid SSM + attention)
-    "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
-    "qwen3_5_text":     ("qwen3_5",     "qwen3",       "qwen",     True,  "hybrid"),
-    "qwen3_5_moe":      ("qwen3_5_moe", "qwen3",       "qwen",     True,  "hybrid"),
-    "qwen3_5_moe_text": ("qwen3_5_moe", "qwen3",       "qwen",     True,  "hybrid"),
+    "qwen3_5":          ("qwen3_5",     "qwen3",       "qwen3_coder", True, "hybrid"),
+    "qwen3_5_text":     ("qwen3_5",     "qwen3",       "qwen3_coder", True, "hybrid"),
+    "qwen3_5_moe":      ("qwen3_5_moe", "qwen3",       "qwen3_coder", True, "hybrid"),
+    "qwen3_5_moe_text": ("qwen3_5_moe", "qwen3",       "qwen3_coder", True, "hybrid"),
     "qwen3_next":       ("qwen3_next",  "qwen3",       "qwen",     True,  "hybrid"),
     "qwen3":            ("qwen3",       "qwen3",       "qwen",     True,  "kv"),
     # MiniMax M2.x
@@ -297,9 +297,20 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
 
 def _resolve_modalities(jang: dict, config: dict) -> dict[str, bool]:
     """Resolve source-backed modal components from JANG and HF config stamps."""
-    has_vision = bool(jang.get("has_vision", config.get("has_vision", bool(config.get("vision_config")))))
-    has_audio = bool(jang.get("has_audio", config.get("has_audio", bool(config.get("audio_config")))))
-    has_video = bool(jang.get("has_video", config.get("has_video", bool(config.get("video_config")))))
+    caps = jang.get("capabilities")
+    caps = caps if isinstance(caps, dict) else {}
+    has_vision = bool(jang.get(
+        "has_vision",
+        caps.get("has_vision", config.get("has_vision", bool(config.get("vision_config")))),
+    ))
+    has_audio = bool(jang.get(
+        "has_audio",
+        caps.get("has_audio", config.get("has_audio", bool(config.get("audio_config")))),
+    ))
+    has_video = bool(jang.get(
+        "has_video",
+        caps.get("has_video", config.get("has_video", bool(config.get("video_config")))),
+    ))
     return {
         "text": True,
         "vision": has_vision,
