@@ -39,9 +39,16 @@ def main(argv) -> int:
         return 1
     src, bitmap_p, out = Path(argv[1]), Path(argv[2]), Path(argv[3])
     mode = "affine"
+    awq_calib, awq_alpha = None, 0.25
     for i, a in enumerate(argv):
         if a == "--mode":
             mode = argv[i + 1]
+        # AWQ is opt-in and needs the capture; without --awq-calib nothing
+        # about the existing behaviour changes.
+        if a == "--awq-calib":
+            awq_calib = argv[i + 1]
+        if a == "--awq-alpha":
+            awq_alpha = float(argv[i + 1])
     plan = json.loads(bitmap_p.read_text())
     gs = plan["group_size"]
     bits_by_path = {m["path"]: m["bits"] for m in plan["modules"]}
@@ -53,6 +60,22 @@ def main(argv) -> int:
     t0 = time.time()
     model, proc = load(str(src))
     print(f"  loaded in {time.time()-t0:.1f}s", flush=True)
+
+    # ── AWQ (opt-in): salient-channel scaling, absorbed into the producing
+    # norm. MUST run while the model is still sanitized — the in-memory norm
+    # is (stored + 1), and the un-sanitize step below writes back
+    # (stored + 1)/s - 1, which is the verified absorption formula.
+    awq_info = None
+    if awq_calib:
+        from .ornith_awq_fold import apply_awq
+        # Scales are written NEXT TO THE CALIB (not into the bundle): a stray
+        # .safetensors inside a bundle is picked up by anything that globs the
+        # directory. qwen36_imatrix_refit MUST be given this path or it will
+        # revert W*s to W from source while the norms stay folded.
+        out.mkdir(parents=True, exist_ok=True)
+        scales_p = str(Path(awq_calib).with_suffix("")) + f"-awq-{out.name}.safetensors"
+        awq_info = apply_awq(model, awq_calib, alpha=awq_alpha,
+                             scales_out=scales_p)
 
     applied: dict[str, dict] = {}
     skipped: list[str] = []
@@ -104,6 +127,12 @@ def main(argv) -> int:
         q[path] = dict(spec)
     cfg["quantization"] = q
     cfg["quantization_config"] = q
+    if awq_info:
+        # Provenance: AWQ is folded into the weights + norms, so it leaves no
+        # sidecar. Record it or the bundle is indistinguishable from a non-AWQ
+        # build.
+        cfg["awq"] = dict(awq_info, folded_into="producing RMSNorm",
+                          formula="(stored+1)/s - 1")
 
     # ── UNDO sanitize() before saving ────────────────────────────────────
     # mlx_vlm's qwen3_5 sanitize() is NOT idempotent: it adds +1.0 to every

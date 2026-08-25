@@ -27,6 +27,30 @@ AFFINE1_STORAGE_BITS = 1
 SUPPORTED_AFFINE_GROUP_SIZES = frozenset({32, 64, 128})
 
 
+# Smallest magnitude float16 can hold. The float32 scale guards elsewhere in
+# this file are 1e-8 / 1e-7, but the scale is STORED as float16 — and float32
+# 1e-8 and 2e-8 both cast to float16 0.0 (the smallest subnormal is 5.96e-8).
+# A stored scale of exactly zero then divides by zero when the codes are
+# re-derived, producing inf/nan codes for that group. Guarding the float32
+# value is not enough; the guard has to survive the cast.
+#
+# The replacement value is the smallest NORMAL float16 rather than the smallest
+# subnormal, so no downstream arithmetic lands in the subnormal range. A group
+# whose true scale is below this is flat to well under one quantization step,
+# so every code becomes 0 and the group reconstructs to its bias — which is the
+# correct answer for a near-constant group, and is what the divide-by-zero was
+# destroying.
+_FP16_TINY = np.float32(np.finfo(np.float16).smallest_normal)
+
+
+def _to_f16_nonzero(scale: np.ndarray) -> np.ndarray:
+    """Cast a float32 scale to float16 without letting it underflow to zero."""
+    safe = np.where(np.abs(scale) < _FP16_TINY,
+                    np.copysign(_FP16_TINY, np.where(scale == 0, 1.0, scale)),
+                    scale)
+    return safe.astype(np.float16)
+
+
 def _validate_matrix_shape(weights: np.ndarray, group_size: int) -> tuple[int, int]:
     if weights.ndim != 2:
         raise ValueError(f"affine quantization expects a 2D matrix, got {weights.shape}")
@@ -227,7 +251,7 @@ def quantize_native_affine_numpy(
             np.rint((grouped - bias[..., None]) / scale[..., None]), bins
         ).astype(np.uint8)
 
-        scale_f16 = scale.astype(np.float16)
+        scale_f16 = _to_f16_nonzero(scale)
         bias_f16 = bias.astype(np.float16)
         packed_bytes = pack_bits(codes.reshape(-1), bits)
         expected_bytes = (end - start) * packed_columns * 4
@@ -332,7 +356,7 @@ def quantize_imatrix_affine_numpy(
                 np.rint((values - bias[..., None]) / scale[..., None]), 0, bins
             )
 
-        scale_f16 = scale.astype(np.float16)
+        scale_f16 = _to_f16_nonzero(scale)
         bias_f16 = bias.astype(np.float16)
         stored_scale = scale_f16.astype(np.float32)
         stored_bias = bias_f16.astype(np.float32)

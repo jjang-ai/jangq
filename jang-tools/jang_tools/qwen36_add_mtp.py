@@ -90,12 +90,33 @@ def main(argv) -> int:
     idx["metadata"]["total_size"] = idx["metadata"].get("total_size", 0) + nbytes
     idx_p.write_text(json.dumps(idx, indent=2))
 
+    # 🚨 Write the per-module overrides under BOTH `mtp.*` and
+    # `language_model.mtp.*`.
+    #
+    # The source tensors are named `mtp.*`, but mlx_vlm's qwen3_5 `sanitize()`
+    # relocates them to `language_model.mtp.*`, which is the path the quantized
+    # loader uses when it looks up a module's per-module spec. With only the
+    # bare `mtp.*` keys the lookup MISSES, the loader falls back to the bundle's
+    # DEFAULT bits/group_size, and `load_weights` then dies on a shape mismatch:
+    #
+    #   ValueError: Expected shape (5120, 1280) but received shape (5120, 1920)
+    #               for parameter language_model.mtp.fc.weight
+    #
+    # i.e. the head is unloadable at any width that differs from the bundle
+    # default. MEASURED on the shipped v1 Qwen3.8 bundles too (6-bit gs128 head
+    # against a 4-bit gs128 default), so every Qwen3.8 bundle we have published
+    # carries an MTP head the runtime cannot instantiate. The bare key is kept
+    # as well so older readers keep working.
+    aliased = {f"language_model.{k}": dict(v) for k, v in overrides.items()}
     cfg_p = bundle / "config.json"
     cfg = json.loads(cfg_p.read_text())
     for key in ("quantization", "quantization_config"):
         if key in cfg:
             cfg[key].update(overrides)
+            cfg[key].update(aliased)
     cfg_p.write_text(json.dumps(cfg, indent=2))
+    print(f"  quant overrides: {len(overrides)} mtp.* + "
+          f"{len(aliased)} language_model.mtp.* (loader looks up the latter)")
 
     print(f"  index now {len(idx['weight_map'])} tensors "
           f"({sum(1 for k in idx['weight_map'] if k.startswith('mtp.'))} mtp.*)")

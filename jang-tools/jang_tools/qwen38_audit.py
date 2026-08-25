@@ -61,10 +61,28 @@ def audit(b: Path) -> tuple[list[str], list[str]]:
         gate(isinstance(refit, dict) and refit.get("modules", 0) >= 580,
              f"imatrix refit applied ({(refit or {}).get('modules')} modules, "
              f"max_bits {(refit or {}).get('max_bits')})")
-    ok.append("Hessian: bit map from tr(H)*||W||^2_F capture (qwen36_allocate)")
-    ok.append("AWQ: NOT applied (norm-fold vs zero-centered/+1 convention; "
-              "per-tensor imatrix fit is the GDN-safe substitute)")
-    ok.append("GPTQ: NOT applied (needs off-diagonal H; logged follow-up)")
+    # 🚨 These three were `ok.append(...)` — hardcoded strings on the PASS list
+    # that verified nothing. Worse, the AWQ line asserted "NOT applied", which
+    # became FALSE the moment v2 started folding AWQ, and it kept printing a ✓.
+    # An audit that states a method's status without reading it is worse than
+    # no check: it launders an assumption into a green tick. Now gated on the
+    # bundle's own provenance record.
+    awq = cfg.get("awq") if isinstance(cfg.get("awq"), dict) else None
+    if is_mx:
+        gate(awq is None,
+             "AWQ: not applied (MXFP8 is the uncalibrated reference tier)")
+    else:
+        gate(isinstance(awq, dict) and awq.get("linears", 0) >= 360
+             and awq.get("groups", 0) >= 120,
+             f"AWQ applied (alpha={(awq or {}).get('alpha')}, "
+             f"{(awq or {}).get('groups')} norm groups, "
+             f"{(awq or {}).get('linears')} linears, "
+             f"folded_into={(awq or {}).get('folded_into')})")
+    hess = jq.get("hessian_bitmap") or jq.get("bitmap_method") or q.get("method")
+    gate(bool(hess) or bool(ov),
+         f"Hessian: bit map from tr(H)*||W||^2_F capture ({hess or 'per-module overrides present'})")
+    gate("gptq" not in cfg and "gptq" not in jq,
+         "GPTQ: not applied (needs off-diagonal H; logged follow-up)")
 
     # ── MTP ──────────────────────────────────────────────────────────────
     mtp_n = sum(1 for k in wm if k.startswith("mtp."))

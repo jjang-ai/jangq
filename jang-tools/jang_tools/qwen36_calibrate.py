@@ -18,7 +18,14 @@ Accumulates in float64 to avoid drift over long corpora. Memory is trivial —
 one vector of `in_features` per module (607 modules, max 17408 wide).
 
     python -m jang_tools.qwen36_calibrate <model_dir> <out.safetensors> \
-        [--limit N] [--max-tokens N] [--images dir]
+        [--limit N] [--max-tokens N] [--images dir] \
+        [--corpus corpus.jsonl] [--corpus-tokens N] [--corpus-gen-tokens N]
+
+`--corpus` draws real domain-weighted text on top of the built-in prompt set.
+Volume matters for more than averaging quality: GPTQ needs `tokens >> d_in` or
+its Hessian is rank-deficient and the solve silently degrades to RTN. The
+built-in prompts alone give ~7 k tokens against a 17408-wide `down_proj`
+(0.4x — singular); ~140 k is the 8x floor for this model.
 """
 from __future__ import annotations
 
@@ -135,6 +142,69 @@ IMAGE_PROMPTS = [
 ]
 
 
+# Domain weights for corpus draw. Coding-weighted (calibration mix v4) because
+# the speed-targeted bundles are coding/agent artifacts; a corpus that does not
+# match the serving distribution optimises for the wrong thing.
+CORPUS_MIX = {
+    "coding": 0.35, "agentic": 0.20, "academic_mc": 0.15, "general": 0.12,
+    "chinese": 0.10, "longctx": 0.04, "science": 0.02, "cybersec": 0.02,
+}
+
+
+def build_text_corpus(tokenizer, corpus_path: Path, target_tokens: int,
+                      mix: dict[str, float] | None = None,
+                      max_prompt_tokens: int = 2048):
+    """Draw ~`target_tokens` of real corpus text, domain-weighted, chat-rendered.
+
+    The hardcoded PROMPTS_* above give the right *shape* (thinking traces, tool
+    frames, a non-thinking slice) but only ~7 k tokens, which leaves the Hessian
+    of a 17408-wide `down_proj` badly rank-deficient — GPTQ on that silently
+    falls back to RTN with no error. This draws the volume from a real corpus
+    while keeping the same chat rendering, so both properties hold at once.
+
+    Records are interleaved round-robin across domains rather than drawn
+    domain-by-domain, so a truncated run still carries the whole mix.
+    """
+    mix = mix or CORPUS_MIX
+    by_domain: dict[str, list[str]] = {}
+    with corpus_path.open() as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = (rec.get("text") or "").strip()
+            if text:
+                by_domain.setdefault(rec.get("domain", "general"), []).append(text)
+
+    budgets = {d: int(target_tokens * w) for d, w in mix.items() if d in by_domain}
+    queues = {d: iter(by_domain[d]) for d in budgets}
+    spent = {d: 0 for d in budgets}
+    items, total = [], 0
+    while queues:
+        for d in list(queues):
+            if spent[d] >= budgets[d]:
+                queues.pop(d)
+                continue
+            try:
+                text = next(queues[d])
+            except StopIteration:
+                queues.pop(d)
+                continue
+            ids = tokenizer.encode(text)
+            if len(ids) > max_prompt_tokens:
+                text = tokenizer.decode(ids[:max_prompt_tokens])
+                n = max_prompt_tokens
+            else:
+                n = len(ids)
+            items.append(tokenizer.apply_chat_template(
+                [{"role": "user", "content": text}],
+                add_generation_prompt=True, tokenize=False, enable_thinking=True))
+            spent[d] += n
+            total += n
+    return items, total, spent
+
+
 def build_image_corpus(proc, model, image_dir: Path):
     """Vision-tower calibration. Video reuses these same Linears (only the
     temporal patching upstream differs), so images cover the tower."""
@@ -176,6 +246,9 @@ def main(argv) -> int:
     limit = None
     max_tokens = 96
     image_dir = None
+    corpus_path = None
+    corpus_tokens = 0
+    corpus_gen_tokens = 8
     for i, a in enumerate(argv):
         if a == "--limit":
             limit = int(argv[i + 1])
@@ -183,6 +256,12 @@ def main(argv) -> int:
             max_tokens = int(argv[i + 1])
         if a == "--images":
             image_dir = Path(argv[i + 1])
+        if a == "--corpus":
+            corpus_path = Path(argv[i + 1])
+        if a == "--corpus-tokens":
+            corpus_tokens = int(argv[i + 1])
+        if a == "--corpus-gen-tokens":
+            corpus_gen_tokens = int(argv[i + 1])
 
     from mlx_vlm import load, generate
 
@@ -205,6 +284,23 @@ def main(argv) -> int:
         if i % 3 == 0 or i == len(corpus):
             print(f"    text {i}/{len(corpus)}  ({time.time()-t0:.0f}s, "
                   f"{len(_SUMSQ)} modules seen)", flush=True)
+
+    corpus_meta = None
+    if corpus_path and corpus_tokens > 0:
+        extra, drawn, per_domain = build_text_corpus(
+            proc.tokenizer, corpus_path, corpus_tokens)
+        corpus_meta = {"path": str(corpus_path), "records": len(extra),
+                       "prompt_tokens": drawn, "per_domain": per_domain,
+                       "gen_tokens_each": corpus_gen_tokens}
+        print(f"  corpus draw: {len(extra)} records, {drawn:,} prompt tokens "
+              f"({per_domain})", flush=True)
+        t0 = time.time()
+        for i, prompt in enumerate(extra, 1):
+            generate(model, proc, prompt, max_tokens=corpus_gen_tokens,
+                     temperature=1.0, verbose=False)
+            if i % 25 == 0 or i == len(extra):
+                print(f"    corpus {i}/{len(extra)}  ({time.time()-t0:.0f}s)",
+                      flush=True)
 
     if image_dir and image_dir.is_dir():
         img_corpus = build_image_corpus(proc, model, image_dir)
@@ -232,7 +328,7 @@ def main(argv) -> int:
     save_file(tensors, str(out))
     (out.with_suffix(".json")).write_text(json.dumps(
         {"source": str(src), "modules": len(meta), "prompts": len(corpus),
-         "max_tokens": max_tokens, "stats": meta}, indent=1))
+         "max_tokens": max_tokens, "corpus": corpus_meta, "stats": meta}, indent=1))
 
     print(f"\n  captured {len(meta)} modules -> {out}")
     print(f"  sidecar  -> {out.with_suffix('.json')}")

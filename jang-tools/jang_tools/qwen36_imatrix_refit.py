@@ -54,14 +54,35 @@ def main(argv) -> int:
         return 1
     src, calib_p, bundle = Path(argv[1]), Path(argv[2]), Path(argv[3])
     max_bits, gs = 3, 128
+    awq_scales_p = None
     for i, a in enumerate(argv):
         if a == "--max-bits":
             max_bits = int(argv[i + 1])
         if a == "--group-size":
             gs = int(argv[i + 1])
+        # 🚨 REQUIRED whenever the bundle was built with AWQ. This refit
+        # re-derives codes from the ORIGINAL SOURCE weight (see the W = ...
+        # load below), so without re-applying the AWQ scales it silently
+        # reverts W*s -> W while the bundle's norms stay divided by s, leaving
+        # every folded layer off by a factor of s per channel. Tell-tale: the
+        # rel-err printed here is byte-identical with and without AWQ.
+        if a == "--awq-scales":
+            awq_scales_p = argv[i + 1]
 
     calib = load_file(str(calib_p))
+    awq_s = {}
+    if awq_scales_p:
+        awq_s = {k[: -len(".awq_scale")]: v
+                 for k, v in load_file(awq_scales_p).items()
+                 if k.endswith(".awq_scale")}
+        print(f"  AWQ scales loaded for {len(awq_s)} modules "
+              f"(re-applied to the source weight before fitting)")
     cfg = json.loads((bundle / "config.json").read_text())
+    if cfg.get("awq") and not awq_s:
+        print("  !! bundle config records an AWQ fold but no --awq-scales was "
+              "given: refitting from unscaled source would BREAK the fold "
+              "(norms stay /s, weights revert). Refusing.")
+        return 2
     q = cfg["quantization"]
     targets = {k: v for k, v in q.items()
                if isinstance(v, dict) and v.get("bits", 99) <= max_bits}
@@ -97,6 +118,11 @@ def main(argv) -> int:
             if imp_key not in calib:
                 continue
             W = np.array(mx.load(str(src / src_wm[skey]))[skey].astype(mx.float32))
+            # Re-apply the AWQ column scaling that the build folded in — this
+            # load came from the SOURCE, which knows nothing about it.
+            s_awq = awq_s.get(path)
+            if s_awq is not None and s_awq.shape[0] == W.shape[-1]:
+                W = W * s_awq[None, :].astype(np.float32)
             imp = calib[imp_key].astype(np.float32)
             packed, scales, biases, werr = quantize_imatrix_affine_numpy(
                 W, imp, bits=bits, group_size=g)
