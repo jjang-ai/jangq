@@ -98,9 +98,24 @@ def audit(b: Path) -> tuple[list[str], list[str]]:
     tuning_p = b / "vmlx_mtp_tuning.json"
     if tuning_p.exists():
         t = json.loads(tuning_p.read_text())
-        gate(t.get("best_depth") == 1 and t.get("blocked") is False
-             and "validated" not in t and "output_equivalent" not in t,
-             "tuning sidecar: best_depth=1 drafts, unvalidated-recommendation semantics")
+        # 🚨 This used to hard-require best_depth==1 with no `validated` key.
+        # That encoded a MOMENT (nothing had been measured yet) as a RULE, so
+        # the day a depth sweep actually ran the audit failed the correct
+        # bundle — same defect class as the "AWQ: NOT applied" assertion.
+        # Gate the SEMANTICS instead: either an honest unvalidated default, or
+        # a validated recommendation that carries its evidence.
+        depth = t.get("best_depth")
+        blocked_ok = t.get("blocked") is False
+        if t.get("validated") is True:
+            ev = ("baseline_tok_s", "best_tok_s", "speedup_vs_baseline")
+            has_ev = all(isinstance(t.get(k), (int, float)) for k in ev)
+            gate(isinstance(depth, int) and depth >= 1 and blocked_ok and has_ev,
+                 f"tuning sidecar: VALIDATED best_depth={depth} drafts "
+                 f"({t.get('baseline_tok_s')} -> {t.get('best_tok_s')} tok/s, "
+                 f"{t.get('speedup_vs_baseline')}x)")
+        else:
+            gate(depth == 1 and blocked_ok and "output_equivalent" not in t,
+                 "tuning sidecar: best_depth=1 drafts, unvalidated-recommendation semantics")
     else:
         bad.append("vmlx_mtp_tuning.json MISSING")
 

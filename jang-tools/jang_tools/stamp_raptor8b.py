@@ -32,6 +32,9 @@ import shutil
 import sys
 from pathlib import Path
 
+from ._json_utils import write_json_object_atomic
+from .capabilities import build_capabilities, write_validated_jang_config
+
 SRC_DEFAULT = Path("/Users/eric/models/Raptor-8B-A1B")
 
 # from the tokenizer, verified 2026-08-24
@@ -104,38 +107,22 @@ def main(argv) -> int:
                      "argument values; a trailing newline is content."),
         },
         "vision": {"supported": False},
-        # 🚨 `capabilities` is the RUNTIME contract, not a friendly summary.
-        # vmlx_engine/model_config_registry.py `_try_jang_stamp` treats it as
-        # AUTHORITATIVE and builds the ModelConfig straight from it, bypassing
-        # the family registry — so a missing `family` is a hard load failure:
-        #   RuntimeError: authoritative JANG stamp .../jang_config.json has no family
-        # Values below are copied from the registry's own lfm2 entry
-        # (model_configs.py: family_name="lfm2", model_types=["lfm2",
-        # "lfm2_moe"], cache_type="hybrid",
-        # cache_subtype="lfm2_moe_hybrid_ssm", tool_parser="lfm2",
-        # reasoning_parser="qwen3") and match the shipped LFM2.5-2.6B stamps.
-        "capabilities": {
-            "reasoning_parser": "qwen3",
-            "tool_parser": "lfm2",
-            "think_in_template": True,
-            "supports_tools": True,
-            "supports_thinking": True,
-            "family": "lfm2",
-            "modality": "text",
-            "modalities": {"text": True, "vision": False,
-                           "audio": False, "video": False},
-            "has_vision": False, "has_audio": False, "has_video": False,
-            "cache_type": "hybrid",
-            "cache_subtype": "lfm2_moe_hybrid_ssm",
-            "default_reasoning": "on",
-        },
+        "cache_subtype": "lfm2_moe_hybrid_ssm",
         "runtime": {
             "architecture": "lfm2_moe_hybrid",
             "loads_with": "stock mlx_lm >= 0.31 (mlx_lm.load), no custom code",
         },
         "version": 1,
         "weight_format": "mxfp8",
-        "source_model": "Raptor-8B-A1B",
+        # DICT, not a bare string: capabilities._resolve_family_str reads
+        # `source_model["architecture"]` as its first family candidate and
+        # calls .get() on it, so a string here is an AttributeError at stamp
+        # time. This is also the documented priority-1 form.
+        "source_model": {
+            "name": "Raptor-8B-A1B",
+            "architecture": cfg.get("model_type", "lfm2_moe"),
+            "release": "RELEASE-CANDIDATE-v112-t609k",
+        },
         "has_vision": False,
         "has_audio": False,
         "architecture": {
@@ -164,18 +151,19 @@ def main(argv) -> int:
     jang["runtime"]["total_weight_bytes"] = total
     jang["runtime"]["total_weight_gb"] = round(total / 1e9, 2)
 
-    # FAIL CLOSED: the runtime treats this block as authoritative, so a stamp
-    # that is missing a required key produces a load-time RuntimeError rather
-    # than a fallback. Catch it here instead of in the app.
-    caps = jang["capabilities"]
-    required = ("family", "reasoning_parser", "tool_parser", "think_in_template",
-                "supports_tools", "supports_thinking", "modality", "cache_type")
-    missing = [k for k in required if caps.get(k) in (None, "")]
-    if missing:
-        raise SystemExit(f"refusing to write an unloadable stamp — "
-                         f"capabilities missing {missing}")
-
-    (bundle / "jang_config.json").write_text(json.dumps(jang, indent=2))
+    # Build the runtime contract through the same family table as every other
+    # JANG converter. A hand-authored friendly summary caused the original
+    # family-less stamp regression and must never be reintroduced.
+    caps = build_capabilities(jang, cfg, bundle)
+    if caps is None:
+        raise SystemExit(
+            "refusing to write an unloadable stamp — capabilities family "
+            f"could not be derived from config model_type={cfg.get('model_type')!r}"
+        )
+    caps["cache_subtype"] = jang["cache_subtype"]
+    caps["default_reasoning"] = "on"
+    jang["capabilities"] = caps
+    write_validated_jang_config(bundle, jang, cfg)
 
     # two-file contract: generation_config must agree with sampling_defaults
     gen = json.loads((bundle / "generation_config.json").read_text())
@@ -190,7 +178,7 @@ def main(argv) -> int:
             gen[k] = d[k]
         else:
             gen.pop(k, None)          # greedy: sampling params must be ABSENT
-    (bundle / "generation_config.json").write_text(json.dumps(gen, indent=2))
+    write_json_object_atomic(bundle / "generation_config.json", gen)
 
     print(f"  stamped {bundle.name}")
     print(f"    default mode   : {d['mode']} (do_sample={d['do_sample']}, "
