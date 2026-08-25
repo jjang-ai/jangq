@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from ._json_utils import read_json_object_safe
+from .capabilities import validate_jang_runtime_contract, verify_directory
 from .modelcard import generate_card
 from .progress import ProgressEmitter
 
@@ -81,6 +83,34 @@ def cmd_publish(args) -> None:
     if not model_dir.exists():
         print(f"ERROR: model dir not found: {model_dir}", file=sys.stderr)
         sys.exit(2)
+
+    # Reject incomplete authoritative metadata before token resolution, model
+    # card writes, repository creation, or upload. Truly legacy bundles with
+    # neither authoritative schema remain compatible with config.json fallback.
+    jang_path = model_dir / "jang_config.json"
+    if jang_path.exists():
+        jang, error = read_json_object_safe(
+            jang_path,
+            purpose="jang_config.json publish metadata",
+        )
+        if error is not None:
+            print(f"ERROR: refusing to publish invalid JANG metadata: {error}", file=sys.stderr)
+            sys.exit(2)
+        ok, message = validate_jang_runtime_contract(jang)
+        if not ok:
+            print(
+                f"ERROR: refusing to publish invalid JANG metadata: {message}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "capabilities" in jang:
+            ok, message = verify_directory(model_dir)
+            if not ok:
+                print(
+                    f"ERROR: refusing to publish invalid JANG metadata: {message}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
 
     # Resolve HF token. PRIORITY:
     #   1. --token FILEPATH  (read token from a file — safe; file mode 600 recommended)

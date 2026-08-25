@@ -26,6 +26,8 @@ Two contracts are supported:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -84,3 +86,55 @@ def read_json_object_safe(path: Path, *, purpose: str) -> tuple[dict[str, Any] |
         return read_json_object(path, purpose=purpose), None
     except ValueError as exc:
         return None, str(exc)
+
+
+def write_json_object_atomic(
+    path: Path,
+    data: dict[str, Any],
+    *,
+    indent: int = 2,
+) -> None:
+    """Atomically replace a model metadata JSON object.
+
+    The temporary file lives beside the destination, so ``os.replace`` stays
+    on one filesystem. Readers therefore see either the previous complete
+    object or the new complete object, never a truncated/intermediate stamp.
+    The file and containing directory are fsynced best-effort before return.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=indent, ensure_ascii=False) + "\n"
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=p.parent,
+            prefix=f".{p.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if p.exists():
+            os.chmod(temporary, p.stat().st_mode & 0o777)
+        os.replace(temporary, p)
+        temporary = None
+        try:
+            directory_fd = os.open(p.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            # Some filesystems do not permit directory fsync. The atomic
+            # same-directory replace still prevents torn reader-visible JSON.
+            pass
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass

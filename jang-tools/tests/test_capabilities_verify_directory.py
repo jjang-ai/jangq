@@ -10,9 +10,16 @@ wires it into both verify_directory and stamp_directory.
 from __future__ import annotations
 
 import json
+import ast
 from pathlib import Path
 
-from jang_tools.capabilities import verify_directory, stamp_directory
+from jang_tools.capabilities import (
+    stamp_directory,
+    validate_capabilities_block,
+    validate_jang_runtime_contract,
+    verify_directory,
+    write_validated_jang_config,
+)
 
 
 def _make_dir(tmp_path: Path, jang: dict | None, config: dict | None,
@@ -82,6 +89,96 @@ def test_verify_directory_malformed_model_config_returns_false(tmp_path):
     assert ok is False
     assert "config.json" in msg
     assert "not valid JSON" in msg
+
+
+def test_authoritative_capabilities_reject_empty_family_even_when_unresolvable():
+    caps = {
+        "reasoning_parser": "qwen3",
+        "tool_parser": "qwen",
+        "think_in_template": True,
+        "supports_tools": True,
+        "supports_thinking": True,
+        "family": "",
+        "modality": "text",
+        "cache_type": "kv",
+    }
+
+    ok, msg = validate_capabilities_block(caps)
+
+    assert ok is False
+    assert "family" in msg
+    assert "non-empty" in msg
+
+
+def test_authoritative_capabilities_reject_non_object_block():
+    ok, msg = validate_capabilities_block(["qwen3"])
+
+    assert ok is False
+    assert "JSON object" in msg
+
+
+def test_runtime_contract_preserves_legacy_but_rejects_familyless_chat_schema():
+    assert validate_jang_runtime_contract({"format": "JANG"})[0] is True
+
+    ok, msg = validate_jang_runtime_contract({"chat": {}})
+
+    assert ok is False
+    assert "model_family" in msg
+
+
+def test_validated_writer_leaves_existing_bytes_untouched_on_rejection(tmp_path):
+    d = _make_dir(
+        tmp_path,
+        jang={"format": "JANG", "preserved": True},
+        config={"model_type": "qwen3"},
+    )
+    original = (d / "jang_config.json").read_bytes()
+
+    try:
+        write_validated_jang_config(
+            d,
+            {"capabilities": {"family": ""}},
+            {"model_type": "qwen3"},
+        )
+    except ValueError as exc:
+        assert "family" in str(exc)
+    else:
+        raise AssertionError("invalid authoritative stamp was written")
+
+    assert (d / "jang_config.json").read_bytes() == original
+
+
+def test_every_literal_authoritative_capabilities_block_names_a_family():
+    """Catch the exact Raptor regression before a stamper can run.
+
+    Dynamic blocks are checked by ``verify_directory``. Literal blocks are
+    statically knowable and must never use ``capabilities`` as a friendly
+    boolean summary without the runtime's required ``family`` key.
+    """
+    package = Path(__file__).resolve().parents[1] / "jang_tools"
+    missing: list[str] = []
+    for source_path in package.rglob("*.py"):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), source_path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if not (
+                    isinstance(key, ast.Constant)
+                    and key.value == "capabilities"
+                    and isinstance(value, ast.Dict)
+                ):
+                    continue
+                keys = {
+                    child.value
+                    for child in value.keys
+                    if isinstance(child, ast.Constant)
+                    and isinstance(child.value, str)
+                }
+                if "family" not in keys:
+                    missing.append(f"{source_path.relative_to(package)}:{node.lineno}")
+
+    assert missing == [], f"literal capabilities blocks without family: {missing}"
 
 
 # ──────────── stamp_directory ────────────

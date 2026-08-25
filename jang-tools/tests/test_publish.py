@@ -71,6 +71,50 @@ def test_cli_rejects_literal_token_via_argv(fake_converted):
     assert "hf_literal_looking_token_abc123xyz" not in r.stderr
 
 
+def test_publish_rejects_familyless_authoritative_stamp_before_token_or_card(
+    fake_converted,
+):
+    (fake_converted / "jang_config.json").write_text(json.dumps({
+        "format": "JANG",
+        "capabilities": {
+            "reasoning_parser": "qwen3",
+            "tool_parser": "qwen",
+            "think_in_template": True,
+            "supports_tools": True,
+            "supports_thinking": True,
+            "modality": "text",
+            "cache_type": "kv",
+        },
+    }))
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("HF_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jang_tools",
+            "publish",
+            "--model",
+            str(fake_converted),
+            "--repo",
+            "test/model",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "capabilities.family" in result.stderr
+    assert "HF_HUB_TOKEN" not in result.stderr
+    assert not (fake_converted / "README.md").exists()
+
+
 def test_cli_accepts_token_file(fake_converted, tmp_path):
     """--token FILEPATH should read the file and proceed (dry-run).
 

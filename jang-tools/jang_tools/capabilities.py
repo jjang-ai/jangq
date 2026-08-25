@@ -396,7 +396,145 @@ def build_capabilities(
 # M152 (iter 75): migrated from local M150 implementation to the shared
 # tuple-return helper in `_json_utils`. Keeps this module's call sites
 # unchanged via the thin alias.
-from ._json_utils import read_json_object_safe as _safe_load_json_dict
+from ._json_utils import (
+    read_json_object_safe as _safe_load_json_dict,
+    write_json_object_atomic,
+)
+
+
+def validate_capabilities_block(caps: Any) -> tuple[bool, str]:
+    """Validate the runtime-authoritative capabilities object.
+
+    A top-level ``capabilities`` key is not a friendly feature summary. vMLX
+    treats the object as an authoritative parser/cache/family contract. Keep
+    this validator independent of a specific model so every converter,
+    stamper, and publisher can reject the same malformed shape before users
+    discover it at engine startup.
+    """
+    if not isinstance(caps, dict):
+        return False, "capabilities must be a JSON object"
+
+    family = caps.get("family")
+    if not isinstance(family, str) or not family.strip():
+        return False, "capabilities.family must be a non-empty string"
+
+    required = {
+        "reasoning_parser",
+        "tool_parser",
+        "think_in_template",
+        "supports_tools",
+        "supports_thinking",
+        "family",
+        "modality",
+        "cache_type",
+    }
+    missing = required - set(caps)
+    if missing:
+        return False, f"capabilities missing keys: {sorted(missing)}"
+
+    reasoning_parser = caps.get("reasoning_parser")
+    if reasoning_parser is not None and (
+        not isinstance(reasoning_parser, str) or not reasoning_parser.strip()
+    ):
+        return False, "capabilities.reasoning_parser must be null or a non-empty string"
+
+    tool_parser = caps.get("tool_parser")
+    if not isinstance(tool_parser, str) or not tool_parser.strip():
+        return False, "capabilities.tool_parser must be a non-empty string"
+
+    for key in ("think_in_template", "supports_tools", "supports_thinking"):
+        if type(caps.get(key)) is not bool:
+            return False, f"capabilities.{key} must be a boolean"
+
+    # Derive parser/cache allowlists from the same family table used to build
+    # stamps. Hand-maintained subsets had already drifted: MiniMax-M3, Muse,
+    # openPangu, ATEM, and single-video modality were legitimate but absent.
+    valid_reasoning = {row[1] for row in FAMILY_MAP.values()} | {
+        "openai_gptoss",
+        None,
+    }
+    valid_tool = {row[2] for row in FAMILY_MAP.values()}
+    valid_cache = {row[4] for row in FAMILY_MAP.values()} | {"mamba"}
+    valid_modality = {
+        "text",
+        "vision",
+        "video",
+        "audio",
+        "multimodal",
+        "embedding",
+        "rerank",
+        "image",
+    }
+
+    if reasoning_parser not in valid_reasoning:
+        return False, f"reasoning_parser={reasoning_parser!r} is not registered"
+    if tool_parser not in valid_tool:
+        return False, f"tool_parser={tool_parser!r} is not registered"
+    if caps.get("cache_type") not in valid_cache:
+        return False, f"cache_type={caps.get('cache_type')!r} is not registered"
+    if caps.get("modality") not in valid_modality:
+        return False, f"modality={caps.get('modality')!r} is not registered"
+
+    return True, f"capabilities schema OK (family={family.strip()})"
+
+
+def validate_jang_runtime_contract(jang: Any) -> tuple[bool, str]:
+    """Validate whichever JANG schema makes runtime routing authoritative.
+
+    Pre-capabilities bundles intentionally fall through to ``config.json``.
+    Once a bundle declares a capabilities object or chat-authoritative schema,
+    however, its family is mandatory because vMLX no longer uses that legacy
+    fallback.
+    """
+    if not isinstance(jang, dict):
+        return False, "jang_config.json must contain a JSON object"
+    if "capabilities" in jang:
+        return validate_capabilities_block(jang.get("capabilities"))
+    if isinstance(jang.get("chat"), dict):
+        family = jang.get("model_family")
+        if not isinstance(family, str) or not family.strip():
+            return False, (
+                "chat-authoritative jang_config.json requires a non-empty "
+                "top-level model_family"
+            )
+        return True, f"chat-authoritative schema OK (family={family.strip()})"
+    return True, "legacy JANG schema; runtime family falls back to config.json"
+
+
+def _capabilities_match_canonical_fields(caps: dict, expected: dict) -> bool:
+    """Allow forward-compatible extras while pinning every canonical field."""
+    return all(caps.get(key) == value for key, value in expected.items())
+
+
+def write_validated_jang_config(
+    model_dir: Path,
+    jang: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Validate and atomically publish ``jang_config.json`` for a bundle."""
+    model_dir = Path(model_dir)
+    if config is None:
+        cfg_path = model_dir / "config.json"
+        if cfg_path.exists():
+            config, err = _safe_load_json_dict(cfg_path, purpose="config.json")
+            if err is not None:
+                raise ValueError(err)
+        else:
+            config = {}
+
+    caps = jang.get("capabilities")
+    ok, message = validate_capabilities_block(caps)
+    if not ok:
+        raise ValueError(message)
+
+    expected = build_capabilities(jang, config, model_dir)
+    if expected is not None and not _capabilities_match_canonical_fields(caps, expected):
+        raise ValueError(
+            "capabilities mismatch: authoritative fields do not match "
+            f"build_capabilities output {expected}"
+        )
+
+    write_json_object_atomic(model_dir / "jang_config.json", jang)
 
 
 def verify_directory(model_dir: Path) -> tuple[bool, str]:
@@ -450,43 +588,12 @@ def verify_directory(model_dir: Path) -> tuple[bool, str]:
     caps = jang.get("capabilities")
     if caps is None:
         return False, "missing `capabilities` block (converter forgot to stamp)"
-
-    required = {"reasoning_parser", "tool_parser", "think_in_template",
-                "supports_tools", "supports_thinking", "family", "modality",
-                "cache_type"}
-    missing = required - set(caps.keys())
-    if missing:
-        return False, f"capabilities missing keys: {sorted(missing)}"
-
-    valid_reasoning = {"qwen3", "deepseek_r1", "mistral", "gemma4",
-                       "openai_gptoss", None}
-    valid_tool = {"qwen", "qwen3", "hermes", "llama", "mistral", "deepseek",
-                  "kimi", "granite", "nemotron", "step3p5", "xlam",
-                  "functionary", "glm47", "minimax", "gemma4", "native",
-                  "lfm2",
-                  # DSV4 native DSML format + Zaya XML tool format. Both
-                  # have dedicated parsers in vmlx_engine.tool_parsers.
-                  # Without these, verify_directory rejected legitimate
-                  # DSV4 / Zaya bundles after stamp.
-                  "dsml", "zaya_xml",
-                  # Tencent Hy3-preview emits its own XML-like tool tags
-                  # (<tool_call><tool_sep><arg_key>/<arg_value>); vLLM
-                  # registers this parser as "hy_v3", SGLang as "hunyuan".
-                  "hunyuan"}
-    valid_cache = {"kv", "hybrid", "mla", "mamba"}
-    valid_modality = {"text", "vision", "audio", "multimodal", "embedding", "rerank", "image"}
-
-    if caps["reasoning_parser"] not in valid_reasoning:
-        return False, f"reasoning_parser={caps['reasoning_parser']!r} not in {sorted(valid_reasoning - {None})}"
-    if caps["tool_parser"] not in valid_tool:
-        return False, f"tool_parser={caps['tool_parser']!r} not in {sorted(valid_tool)}"
-    if caps["cache_type"] not in valid_cache:
-        return False, f"cache_type={caps['cache_type']!r} not in {sorted(valid_cache)}"
-    if caps["modality"] not in valid_modality:
-        return False, f"modality={caps['modality']!r} not in {sorted(valid_modality)}"
+    ok, message = validate_capabilities_block(caps)
+    if not ok:
+        return False, message
 
     expected = build_capabilities(jang, config, model_dir)
-    if expected is not None and expected != caps:
+    if expected is not None and not _capabilities_match_canonical_fields(caps, expected):
         # Stamp drift: file says one family, build_capabilities computes another.
         # Most often happens when converter stamps a stale value before later
         # mutating jang_config (e.g. flipping has_vision after capabilities).
@@ -548,7 +655,5 @@ def stamp_directory(model_dir: Path, write: bool = False, verbose: bool = True) 
             f"tool={caps['tool_parser']} cache={caps['cache_type']}"
         )
     if write:
-        with open(jang_path, "w") as f:
-            json.dump(jang, f, indent=2)
-            f.write("\n")
+        write_validated_jang_config(model_dir, jang, config)
     return True
