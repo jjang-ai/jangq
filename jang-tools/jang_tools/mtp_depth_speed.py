@@ -81,16 +81,34 @@ def main():
 
     t_head = _median_time(head_step)
 
-    # target forward verifying n tokens at once (n = depth + 1)
+    # Target forward verifying n tokens at once (n = depth + 1).
+    #
+    # 🚨 MUST run against a warm KV cache. Calling lm(full_sequence) with no
+    # cache re-prefills the whole context every iteration, which measures
+    # PREFILL, not a decode step — it overstated the per-cycle cost by ~4x here
+    # and produced tok/s numbers a quarter of what the model actually does.
+    from mlx_vlm.models.cache import KVCache, make_prompt_cache
+
     def target_n(n):
         def f():
+            cache = make_prompt_cache(lm)
             lm._position_ids = None
             lm._rope_deltas = None
-            o = lm(mx.array([ids[-64:] + [tok_last.item()] * (n - 1)]))
+            lm(mx.array([ids]), cache=cache)          # prefill (not timed below)
+            mx.eval([c.state for c in cache if hasattr(c, "state")])
+            t0 = time.perf_counter()
+            lm._position_ids = None
+            lm._rope_deltas = None
+            o = lm(mx.array([[tok_last.item()] * n]), cache=cache)
             mx.eval(o.logits if hasattr(o, "logits") else o)
+            return time.perf_counter() - t0
         return f
 
-    t_target = {n: _median_time(target_n(n)) for n in sorted({d + 1 for d in depths})}
+    def _median_step(f, repeats=7):
+        f()
+        return statistics.median([f() for _ in range(repeats)])
+
+    t_target = {n: _median_step(target_n(n)) for n in sorted({d + 1 for d in depths})}
 
     curve_p = Path(f"/Users/eric/models/Logs/q38v2/mtp-depth-{bundle.name}.json")
     tokens = {}
