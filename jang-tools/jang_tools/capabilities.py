@@ -388,11 +388,19 @@ def build_capabilities(
     # a closed </think> block) with model-capability claims. Keep
     # think_in_template=False, but mark supports_thinking=True.
     supports_thinking = reasoning is not None
+    # Zyphra's released ZAYA1-VL bundle does not publish a tool-aware chat
+    # template or tool capability. Its text trunk is related to ZAYA1-8B, but
+    # inheriting that model's zaya_xml capability makes downstream runtimes
+    # expose tools through a template the VL checkpoint was not shipped with.
+    # Keep the parser dialect as descriptive family metadata while making the
+    # capability gate truthful; a future upstream VL tool template can opt in
+    # through a separately proven converter update.
+    supports_tools = matched != "zaya1_vl"
     return {
         "reasoning_parser": reasoning,
         "tool_parser": tool,
         "think_in_template": think_in_template,
-        "supports_tools": True,
+        "supports_tools": supports_tools,
         "supports_thinking": supports_thinking,
         "family": family,
         "modality": modality,

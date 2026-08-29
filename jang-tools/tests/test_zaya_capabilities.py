@@ -30,6 +30,7 @@ def test_zaya_capability_builder_matches_converter_contract():
     assert caps is not None
     assert caps["family"] == "zaya"
     assert caps["tool_parser"] == "zaya_xml"
+    assert caps["supports_tools"] is True
     assert caps["reasoning_parser"] == "qwen3"
     assert caps["think_in_template"] is False
     assert caps["supports_thinking"] is True
@@ -53,10 +54,23 @@ def test_zaya1_vl_capability_builder_keeps_parser_metadata_thinking_supported():
     assert caps["family"] == "zaya1_vl"
     assert caps["modality"] == "vision"
     assert caps["tool_parser"] == "zaya_xml"
+    assert caps["supports_tools"] is False
     assert caps["reasoning_parser"] == "qwen3"
     assert caps["think_in_template"] is False
     assert caps["supports_thinking"] is True
     assert caps["cache_type"] == "hybrid"
+
+
+def test_zaya1_vl_converter_does_not_inherit_text_only_tool_capability():
+    from jang_tools.capabilities import validate_capabilities_block
+    from jang_tools.convert_zaya1_vl_common import zaya1_vl_capabilities
+
+    caps = zaya1_vl_capabilities()
+
+    assert caps["family"] == "zaya1_vl"
+    assert caps["tool_parser"] == "zaya_xml"
+    assert caps["supports_tools"] is False
+    assert validate_capabilities_block(caps)[0] is True
 
 
 def test_zaya_converter_console_scripts_are_registered():
