@@ -43,6 +43,10 @@ def zaya1_vl_capabilities() -> dict:
     caps = CAPABILITIES.copy()
     caps["family"] = "zaya1_vl"
     caps["modality"] = "vision"
+    # The released ZAYA1-VL tokenizer/chat templates do not implement the
+    # text-only ZAYA tool contract. Do not advertise an agent surface merely
+    # because the LM trunk shares a family name.
+    caps["supports_tools"] = False
     caps["supports_thinking"] = False
     return caps
 
