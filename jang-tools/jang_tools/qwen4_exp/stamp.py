@@ -74,7 +74,10 @@ def stamp(bundle: Path, no_mtp: bool = False):
         "has_audio": False,
         "supports_thinking": True, "default_reasoning": "on",
         "think_in_template": True, "reasoning_parser": "qwen3",
-        "tool_parser": "hermes",  # <tool_call> literals verified in template
+        # Flash-Next emits Qwen XML function/parameter bodies inside
+        # <tool_call>. The qwen parser accepts that native dialect (and the
+        # legacy JSON body), whereas hermes rejects the XML form.
+        "tool_parser": "qwen",
     }
     jang["capabilities"] = caps
     cfg["capabilities"] = caps
