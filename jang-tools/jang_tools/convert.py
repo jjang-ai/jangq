@@ -361,6 +361,24 @@ def _is_n2_expert_down(tensor_name: str) -> bool:
     return tensor_name.endswith(".mlp.experts.down_proj")
 
 
+def _contiguous_for_save(tensors: dict) -> dict:
+    """Make every tensor C-contiguous before handing it to ``safetensors.save_file``.
+
+    safetensors serialises an array's underlying BUFFER and ignores numpy strides, so a
+    non-contiguous view is written as whatever bytes happen to follow its start offset. The result
+    has the right name, dtype and shape, and silently wrong contents.
+
+    An axis-1 slice of a 3D expert stack -- ``mlx_weight[:, :mid, :]`` when splitting a fused
+    ``experts.gate_up_proj`` -- is exactly such a view, and produced models where only expert 0 was
+    correct. Leading-axis slices (``a[:mid]``) stay contiguous and were unaffected, which is why this
+    only ever showed up on fused MoE sources.
+
+    ``np.ascontiguousarray`` returns the SAME object when the array is already contiguous, so this
+    costs nothing for the overwhelming majority of tensors.
+    """
+    return {name: np.ascontiguousarray(value) for name, value in tensors.items()}
+
+
 def _is_moe_router_gate(tensor_name: str) -> bool:
     name_lower = tensor_name.lower()
     if "shared_expert_gate.weight" in name_lower:
@@ -1419,7 +1437,7 @@ def convert_model(
                 _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
                 _shard_path = output_path / _shard_name
                 from safetensors.numpy import save_file as _save_shard
-                _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+                _save_shard(_contiguous_for_save(v2_tensors), str(_shard_path), metadata={"format": "mlx"})
                 if not hasattr(convert_model, '_shard_map'):
                     convert_model._shard_map = {}
                 for _k in v2_tensors:
@@ -1752,7 +1770,7 @@ def convert_model(
             _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
             _shard_path = output_path / _shard_name
             from safetensors.numpy import save_file as _save_shard
-            _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+            _save_shard(_contiguous_for_save(v2_tensors), str(_shard_path), metadata={"format": "mlx"})
             if not hasattr(convert_model, '_shard_map'):
                 convert_model._shard_map = {}
             for _k in v2_tensors:
