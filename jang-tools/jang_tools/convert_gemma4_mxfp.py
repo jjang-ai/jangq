@@ -49,6 +49,7 @@ from tqdm import tqdm
 from jang_tools.calibrate import _load_bf16_tensor
 from jang_tools.capabilities import build_capabilities, verify_directory
 from jang_tools.convert import _remove_stale_jang_artifacts
+from jang_tools.format.aligned_safetensors import rewrite_aligned_safetensors
 from jang_tools.progress import ProgressEmitter
 from jang_tools.ssm_layout import prepare_mlx_passthrough_tensor
 
@@ -473,13 +474,15 @@ def main(default_bits: int = 4) -> None:
             return
         shard_idx += 1
         name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
+        shard_path = out / name
         mx.save_safetensors(
-            str(out / name),
+            str(shard_path),
             {
                 k: (mx.array(v) if isinstance(v, np.ndarray) else v)
                 for k, v in shard_tensors.items()
             },
         )
+        rewrite_aligned_safetensors(shard_path)
         for key in shard_tensors:
             shard_map[key] = name
         print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.2f} GB")

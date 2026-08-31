@@ -34,6 +34,7 @@ from safetensors.numpy import save_file
 
 from jang_tools.capabilities import build_capabilities, verify_directory
 from jang_tools.convert import _remove_stale_jang_artifacts
+from jang_tools.format.aligned_safetensors import rewrite_aligned_safetensors
 from jang_tools.progress import ProgressEmitter
 from jang_tools.convert_gemma4_mxfp import (
     MAX_SHARD,
@@ -398,13 +399,15 @@ def main() -> None:
             return
         shard_idx += 1
         name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
+        shard_path = out / name
         mx.save_safetensors(
-            str(out / name),
+            str(shard_path),
             {
                 k: (mx.array(v) if isinstance(v, np.ndarray) else v)
                 for k, v in shard_tensors.items()
             },
         )
+        rewrite_aligned_safetensors(shard_path)
         for k in shard_tensors:
             shard_map[k] = name
         print(f"    Shard {shard_idx}: {len(shard_tensors)} tensors, {shard_bytes / 1e9:.2f} GB")

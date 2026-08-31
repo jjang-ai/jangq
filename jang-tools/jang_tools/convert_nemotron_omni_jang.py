@@ -70,6 +70,7 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 from .allocate import allocate_bits_profile_compact
+from .format.aligned_safetensors import rewrite_aligned_safetensors
 
 TOWER_PREFIXES = ("vision_model.", "sound_encoder.", "mlp1.", "sound_projection.")
 
@@ -263,6 +264,7 @@ def main() -> int:
         # mx.save_safetensors, not safetensors.numpy: the tower tensors keep
         # their source dtype, and numpy has no bfloat16.
         mx.save_safetensors(str(p), tensors, metadata={"format": "pt"})
+        rewrite_aligned_safetensors(p)
         written.append((p.name, list(tensors.keys())))
         tensors, nbytes = {}, 0
         gc.collect()
