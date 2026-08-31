@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 from safetensors.numpy import save_file
 
+from .aligned_safetensors import rewrite_aligned_safetensors
+
 from .spec import (
     FORMAT_NAME,
     FORMAT_VERSION,
@@ -155,6 +157,7 @@ def write_jang_v2_model(
         # CRITICAL: metadata={"format":"mlx"} tells mlx_lm to use the fast
         # loader path. Without this, speed drops 67% (50→15 tok/s).
         save_file(shard_data, str(shard_path), metadata={"format": "mlx"})
+        rewrite_aligned_safetensors(shard_path)
 
     # Rename all shard files with correct total count
     n_total_shards = preflushed_count + len(shards)
