@@ -44,6 +44,7 @@ from safetensors.numpy import load_file
 
 from .affine import quantize_imatrix_affine_numpy
 from .convert_voicechat_mxfp8 import PROTECTED, MIN_ROWS_TO_QUANTIZE, _is_protected
+from .format.aligned_safetensors import rewrite_aligned_safetensors
 
 SHARD_BYTES = 4 * 1024**3
 
@@ -304,6 +305,7 @@ def main() -> int:
         name = f"model-{i:05d}-of-{len(shards):05d}.safetensors"
         mx.save_safetensors(str(a.out / name), {k: out_t[k] for k in grp},
                             metadata={"format": "pt"})
+        rewrite_aligned_safetensors(a.out / name)
         for k in grp:
             wmap[k] = name; total += out_t[k].nbytes
         print(f"  wrote {name} ({len(grp)} tensors)")

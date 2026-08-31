@@ -50,6 +50,8 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 
+from ..format.aligned_safetensors import rewrite_aligned_safetensors
+
 GROUP_SIZE = 64
 MX_GROUP_SIZE = 32   # MX spec: one shared e8m0 scale per 32 elements
 
@@ -274,7 +276,9 @@ def main(argv: list[str]) -> int:
     out_cfg["quantization"].update({"per_tensor": quantization})
     out_cfg["jang_profile"] = args.profile
 
-    mx.save_safetensors(str(out / "model.safetensors"), outw, metadata={"format": "mlx"})
+    model_path = out / "model.safetensors"
+    mx.save_safetensors(str(model_path), outw, metadata={"format": "mlx"})
+    rewrite_aligned_safetensors(model_path)
     (out / "config.json").write_text(json.dumps(out_cfg, indent=2))
 
     for f in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",

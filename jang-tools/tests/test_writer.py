@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from safetensors.numpy import save_file
 
+from jang_tools.format.aligned_safetensors import verify_safetensors_alignment
 from jang_tools.format.writer import write_jang_v2_model
 
 
@@ -65,6 +66,11 @@ def test_jang_v2_writer_emits_manifest_quantization_overrides(tmp_path):
 
     config = json.loads((tmp_path / "config.json").read_text())
     quant = config["quantization"]
+
+    for shard in tmp_path.glob("model-*.safetensors"):
+        tensor_count, unaligned_count = verify_safetensors_alignment(shard)
+        assert tensor_count > 0
+        assert unaligned_count == 0
 
     assert quant["bits"] == 2
     assert quant["group_size"] == 64

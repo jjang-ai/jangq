@@ -1419,7 +1419,9 @@ def convert_model(
                 _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
                 _shard_path = output_path / _shard_name
                 from safetensors.numpy import save_file as _save_shard
+                from .format.aligned_safetensors import rewrite_aligned_safetensors
                 _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+                rewrite_aligned_safetensors(_shard_path)
                 if not hasattr(convert_model, '_shard_map'):
                     convert_model._shard_map = {}
                 for _k in v2_tensors:
@@ -1752,7 +1754,9 @@ def convert_model(
             _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
             _shard_path = output_path / _shard_name
             from safetensors.numpy import save_file as _save_shard
+            from .format.aligned_safetensors import rewrite_aligned_safetensors
             _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+            rewrite_aligned_safetensors(_shard_path)
             if not hasattr(convert_model, '_shard_map'):
                 convert_model._shard_map = {}
             for _k in v2_tensors:

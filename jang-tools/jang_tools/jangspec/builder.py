@@ -31,6 +31,7 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 from . import format as fmt
+from ..format.aligned_safetensors import rewrite_aligned_safetensors
 from .blob import ExpertTensors, pack_expert_blob
 from .index import ExpertIndexEntry, write_index
 from .manifest import Manifest, write_manifest
@@ -179,6 +180,7 @@ class JangSpecBuilder:
         out_path = self.out_dir / fmt.HOT_CORE_FILENAME
         out_path.parent.mkdir(parents=True, exist_ok=True)
         save_file(tensors, str(out_path))
+        rewrite_aligned_safetensors(out_path)
         self.hot_core_bytes = hot_bytes
 
     # -------------------------------------------------------------- experts
@@ -327,6 +329,7 @@ class JangSpecBuilder:
         # it maps directly into unified memory with no restack cost.
         fat_path = self.out_dir / "experts.safetensors"
         save_file(fat_tensors, str(fat_path))
+        rewrite_aligned_safetensors(fat_path)
 
     # ------------------------------------------------------------- tokenizer
 
