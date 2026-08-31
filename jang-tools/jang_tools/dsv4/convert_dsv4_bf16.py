@@ -28,6 +28,7 @@ import torch
 from safetensors.numpy import save_file as sf_save_np
 
 from jang_tools.dsv4.weight_loader import ShardIndex
+from jang_tools.format.aligned_safetensors import rewrite_aligned_safetensors
 
 
 def convert(src: Path, dst: Path) -> None:
@@ -51,6 +52,7 @@ def convert(src: Path, dst: Path) -> None:
             return
         name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
         sf_save_np(shard_buf, str(dst / name))
+        rewrite_aligned_safetensors(dst / name)
         for k in shard_buf:
             shard_map[k] = name
         print(f"    shard {shard_idx}: {len(shard_buf)} tensors, "

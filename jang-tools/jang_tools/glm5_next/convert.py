@@ -29,6 +29,8 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from jang_tools.format.aligned_safetensors import rewrite_aligned_safetensors
+
 SHARD_BYTES = 5 * 2**30
 
 KEEP_SUFFIXES = (
@@ -168,6 +170,7 @@ class ShardWriter:
         self.idx += 1
         fname = f"model-{self.idx:05d}.safetensors"
         mx.save_safetensors(str(self.out_dir / fname), self.buf)
+        rewrite_aligned_safetensors(self.out_dir / fname)
         for k in self.buf:
             self.weight_map[k] = fname
         self.buf = {}

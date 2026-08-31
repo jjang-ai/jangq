@@ -40,6 +40,8 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from .format.aligned_safetensors import rewrite_aligned_safetensors
+
 # Substrings that force fp passthrough regardless of shape.
 PROTECTED = (
     "rvq_embs",              # RVQ codebook — lookup table, not a projection
@@ -161,6 +163,7 @@ def main() -> int:
         name = f"model-{i:05d}-of-{len(shards):05d}.safetensors"
         payload = {k: out_tensors[k] for k in group}
         mx.save_safetensors(str(a.out / name), payload, metadata={"format": "pt"})
+        rewrite_aligned_safetensors(a.out / name)
         for k in group:
             weight_map[k] = name
             total += out_tensors[k].nbytes

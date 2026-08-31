@@ -30,6 +30,7 @@ from safetensors.numpy import save_file as sf_save_np
 
 from jang_tools.dsv4.chat_template import DSV4_CHAT_TEMPLATE_JINJA
 from jang_tools.dsv4.weight_loader import ShardIndex
+from jang_tools.format.aligned_safetensors import rewrite_aligned_safetensors
 
 
 CRITICAL_F32_RE = re.compile(
@@ -493,6 +494,7 @@ def convert(src: Path, dst: Path, profile_bits: int,
             return
         shard_name = f"model-{shard_idx:05d}-of-XXXXX.safetensors"
         sf_save_np(shard_buf, str(dst / shard_name))
+        rewrite_aligned_safetensors(dst / shard_name)
         for k in shard_buf:
             shard_map[k] = shard_name
         print(f"    shard {shard_idx}: {len(shard_buf)} tensors, "
