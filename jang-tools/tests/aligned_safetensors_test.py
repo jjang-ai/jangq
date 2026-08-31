@@ -1,6 +1,9 @@
 import json
 import struct
 
+import pytest
+
+from jang_tools.format import aligned_safetensors
 from jang_tools.format.aligned_safetensors import (
     rewrite_aligned_safetensors,
     verify_safetensors_alignment,
@@ -39,3 +42,25 @@ def test_streaming_rewrite_preserves_payloads_and_aligns_all_dtypes(tmp_path):
     assert header["__metadata__"] == {"format": "mlx"}
     assert payload[0:4] == b"WXYZ"
     assert payload[4:6] == b"ab"
+
+
+def test_rewrite_fails_closed_before_installing_unverified_output(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source.safetensors"
+    output = tmp_path / "output.safetensors"
+    _write_deliberately_unaligned(source)
+    original = source.read_bytes()
+
+    monkeypatch.setattr(
+        aligned_safetensors,
+        "verify_safetensors_alignment",
+        lambda _path: (2, 1),
+    )
+
+    with pytest.raises(RuntimeError, match="1/2 tensors remain unaligned"):
+        rewrite_aligned_safetensors(source, output, chunk_bytes=2)
+
+    assert source.read_bytes() == original
+    assert not output.exists()
+    assert not list(tmp_path.glob(".*.aligned-*.tmp"))

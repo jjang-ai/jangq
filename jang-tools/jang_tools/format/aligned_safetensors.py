@@ -166,6 +166,12 @@ def rewrite_aligned_safetensors(
                 )
             output.flush()
             os.fsync(output.fileno())
+        tensor_count, unaligned_count = verify_safetensors_alignment(temporary)
+        if unaligned_count:
+            raise RuntimeError(
+                "aligned safetensors verification failed for "
+                f"{source}: {unaligned_count}/{tensor_count} tensors remain unaligned"
+            )
         shutil.copymode(source, temporary)
         os.replace(temporary, destination)
     except BaseException:
