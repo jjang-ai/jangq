@@ -60,4 +60,69 @@ def validate_conversion(gptq_dir, plan, src):
                       ("source_index_sha256", "model.safetensors.index.json")):
         if manifest.get(key) != file_sha256(Path(src) / name):
             raise ValueError(f"GPTQ source metadata changed: {name}")
+    sequential_path = Path(gptq_dir) / "sequential_run.json"
+    if sequential_path.exists():
+        sequential = json.loads(sequential_path.read_text())
+        if sequential.get("schema") != "mimo-v26-sequential-gptq-v1" or sequential.get("max_layers") != 0:
+            raise ValueError("Unknown or incomplete sequential GPTQ run")
+        if sequential.get("tokens_sha256") != manifest.get("tokens_sha256"):
+            raise ValueError("Sequential GPTQ token provenance disagrees")
+        expected_files = {"v26_sequential_gptq.py", "v26_gptq.py", "v26_quant.py",
+                          "v26_model.py", "v26_source.py", "v26_sweep.py"}
+        hashes = sequential.get("source_files_sha256", {})
+        if set(hashes) != expected_files:
+            raise ValueError("Incomplete sequential source provenance")
+        for name, digest in hashes.items():
+            if digest != file_sha256(Path(__file__).with_name(name)):
+                raise ValueError(f"Sequential GPTQ implementation changed: {name}")
+        cfg = json.loads((Path(src) / "config.json").read_text())
+        capture = json.loads((Path(gptq_dir) / "hessian_capture_report.json").read_text())
+        if set(capture) != {str(i) for i in range(cfg["num_hidden_layers"])} or not all(
+                row.get("completed") for row in capture.values()):
+            raise ValueError("Sequential GPTQ layer capture is incomplete")
+        expected = {}
+        for layer, moe in enumerate(cfg["moe_layer_freq"]):
+            if not moe:
+                continue
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                spec = plan.get("experts", {}).get(str(layer), {}).get(projection, plan["expert_default"])
+                if spec["mode"] == "affine":
+                    expected[f"L{layer}.{projection}"] = spec
+        report = json.loads((Path(gptq_dir) / "gptq_report.json").read_text())
+        if set(report) != set(expected):
+            raise ValueError("Sequential GPTQ projection census mismatch")
+        for name, spec in expected.items():
+            row = report[name]
+            if row.get("spec") != spec or row.get("experts") != cfg["n_routed_experts"]:
+                raise ValueError(f"Sequential GPTQ projection recipe mismatch: {name}")
+            if row.get("sha256") != file_sha256(Path(gptq_dir) / (name + ".safetensors")):
+                raise ValueError(f"Sequential GPTQ projection checksum mismatch: {name}")
     return manifest
+
+
+def describe_run(gptq_dir):
+    """Public-safe method metadata; call validate_conversion before converting."""
+    result = {
+        "applied": bool(gptq_dir),
+        "hessian": "per-expert E[x x^T] of routed tokens, shrunk to the layer pool (tau = d tokens), 1% damping",
+        "grid": "fixed = imatrix fit (bytes identical to non-GPTQ build)",
+        "guard": "per-expert keep GPTQ only if Hessian-weighted error beats the fitted RTN codes",
+        "propagation": "source activations between layers",
+        "report": "gptq_report.json alongside the codes",
+    }
+    if not gptq_dir:
+        return result
+    directory = Path(gptq_dir)
+    sequential_path = directory / "sequential_run.json"
+    if sequential_path.exists():
+        sequential = json.loads(sequential_path.read_text())
+        if sequential.get("schema") != "mimo-v26-sequential-gptq-v1":
+            raise ValueError("Unknown sequential GPTQ schema")
+        result.update(
+            propagation=sequential["propagation"], grid=sequential["grid"],
+            guard=sequential["selection"],
+            incumbent_manifest_sha256=sequential["incumbent_manifest_sha256"],
+            sequential_run_sha256=file_sha256(sequential_path),
+            report="quantization/gptq_report.json",
+        )
+    return result

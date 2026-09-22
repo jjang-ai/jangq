@@ -41,6 +41,7 @@ import torch
 from ..format.aligned_safetensors import rewrite_aligned_safetensors, verify_safetensors_alignment
 from .mxfp4_codec import mxfp4_raw_to_mlx
 from .v26_quant import quantize_affine
+from .v26_gptq_provenance import describe_run
 from .weight_loader import MiMoShardIndex
 
 PLAN_SCHEMA = "mimo-v26-jang-plan-v1"
@@ -288,11 +289,7 @@ def write_metadata(src: Path, dst: Path, plan: dict, overrides: dict, size: int,
                     "statistic": "max|x| of post_attention_layernorm output, ^alpha, geomean-normalized, clip [0.5, 2]",
                     "fold_sites": ["post_attention_layernorm -> router (fp32) + expert gate/up"],
                     "alpha_per_layer": plan.get("awq_alpha") or {}},
-            "gptq": {"applied": bool(plan.get("gptq_dir")),
-                     "hessian": "per-expert E[x x^T] of routed tokens, shrunk to the layer pool (tau = d tokens), 1% damping",
-                     "grid": "fixed = imatrix fit (bytes identical to non-GPTQ build)",
-                     "guard": "per-expert keep GPTQ only if Hessian-weighted error beats the fitted RTN codes",
-                     "report": "gptq_report.json alongside the codes"},
+            "gptq": describe_run(plan.get("gptq_dir")),
             "imatrix": {"applied": bool(plan.get("stats")),
                         "statistic": "E[x_c^2] per input channel; per expert for routed units (router-selected tokens)",
                         "fit": "alternating least squares affine grid, bf16 scale/bias storage"},
@@ -313,6 +310,11 @@ def write_metadata(src: Path, dst: Path, plan: dict, overrides: dict, size: int,
         },
     }
     (dst / "jang_config.json").write_text(json.dumps(jc, indent=2))
+    if plan.get("gptq_dir") and (Path(plan["gptq_dir"]) / "sequential_run.json").exists():
+        provenance = dst / "quantization"
+        provenance.mkdir(exist_ok=True)
+        for name in ("gptq_run.json", "sequential_run.json", "gptq_report.json", "hessian_capture_report.json"):
+            shutil.copyfile(Path(plan["gptq_dir"]) / name, provenance / name)
 
 
 def copy_aux(src: Path, dst: Path):
