@@ -104,6 +104,16 @@ class MiMoShardIndex:
             self._handles[shard_name] = handle
         return handle
 
+    def release_cached_handles(self) -> None:
+        """Drop source mappings after a consumer has materialized its outputs.
+
+        Keeping handles for the whole checkpoint also retains touched mmap
+        pages outside MLX's allocator limits. Streaming consumers should call
+        this at evaluated layer/projection boundaries. Future reads reopen the
+        same shards; already returned torch tensors retain their own storage.
+        """
+        self._handles.clear()
+
     # ------------------------------------------------------------------
     # Tensor reads
     # ------------------------------------------------------------------

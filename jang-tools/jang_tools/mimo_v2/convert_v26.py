@@ -395,6 +395,9 @@ def convert(src: Path, dst: Path, plan_path: Path, max_shard_gib: float = 4.0):
 
     if len(expert_seen) != len(moe_layers) * n_exp * 3:
         raise RuntimeError(f"expert tensors {len(expert_seen)} != {len(moe_layers)}*{n_exp}*3")
+    # ShardWriter.add evaluates each output. Source mmap pages are no longer
+    # needed after this phase, and are not bounded by MLX's cache limit.
+    idx.release_cached_handles()
     for L in moe_layers:
         a = calib.awq_for(L)
         natives = [p for p in ("gate_proj", "up_proj") if plan["_units"][(L, p)]["mode"] == "mxfp4"]
@@ -424,6 +427,9 @@ def convert(src: Path, dst: Path, plan_path: Path, max_shard_gib: float = 4.0):
             else:
                 overrides[base] = {"group_size": spec["group_size"], "bits": spec["bits"], "mode": "affine"}
             counts["expert_units"] += 1
+            # Each stacked projection is now evaluated and owned by the writer.
+            # Keep source residency bounded to a projection, not the checkpoint.
+            idx.release_cached_handles()
         print(f"[L{L}] units done ({time.time()-t0:.0f}s)", flush=True)
     size = wr.finalize()
     src_sha = plan.get("source_revision", "unknown")
