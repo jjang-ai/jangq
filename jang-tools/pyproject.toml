@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang"
-version = "2.5.46"
+version = "2.5.47"
 description = "JANG — Adaptive Mixed-Precision Quantization for Apple Silicon. v2.5.41 bounds DSV4 long-prefill pool attention: multi-token forwards past the dense-row cap get a tiled pool view (fixes Metal OOM past ~180K tokens) while decode keeps the dense BF16 fused-SDPA fast path."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
