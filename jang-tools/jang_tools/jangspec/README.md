@@ -2,7 +2,7 @@
 
 Bundle format and builder for jang-spec — SSD-streamed MoE speculative decoding.
 
-See `docs/superpowers/specs/2026-04-13-jang-spec-design.md` for the full design.
+Refer to the package interfaces below for the bundle contract.
 
 ## CLI
 

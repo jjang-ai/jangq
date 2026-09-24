@@ -45,7 +45,7 @@ Add `skip: "reason"` to the model entry:
 ## Ralph Loop integration
 
 This runner is designed for the Ralph Loop pattern — each `--next` invocation is one iteration.
-Feed `PROMPT.md` as the Ralph Loop prompt to run autonomously until `ALL GREEN`.
+Inspect each result before starting the next conversion.
 
 ```bash
 # Reset and re-activate (after fixing a bug)
@@ -63,7 +63,3 @@ python3 -m ralph_runner.runner --next
 - `test_video_frames.npy` — 16×32×32×3 numpy array for A12 (video preprocessor functional)
 
 Both are deterministic and copyright-free; regenerate with the snippets in `audit.py` docstrings if ever lost.
-
-## See the full design
-
-`docs/superpowers/specs/2026-04-19-ralph-loop-production-readiness-design.md`
