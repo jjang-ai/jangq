@@ -10,9 +10,8 @@ serving stacks that the model card points to:
          ``python/sglang/srt/multimodal/processors/mimo_v2.py``
 
 Nothing here is derived from the older MiMo-V2.5 code in this package.
-See ``docs/runtime/mimo-v26-flash-2026-09-22/VISION.md`` for the measured
-parity against the torch reference and the list of reference/serving
-disagreements (merger norm, sink semantics, preprocessing constants).
+Merger normalization, attention sinks, and preprocessing constants follow
+the Xiaomi reference implementation.
 
 Tower summary (config.json ``vision_config``)::
 

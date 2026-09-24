@@ -7,8 +7,7 @@ loader mirrors exactly — it reads the same per-module dict back out of
 
 Why affine and not mxfp4 for the 4-bit tier: measured on real weights, mxfp4@gs32
 and affine4@gs128 are both 4.25 bpw but mxfp4's relative error is ~15 % higher,
-with no decode speed advantage. See docs/internal/qwen36-27b-prep/
-02-CALIBRATION-RESULTS.md. `class_predicate` *can* return a per-module `mode`,
+with no decode speed advantage in that comparison. `class_predicate` can return a per-module `mode`,
 so switching later is a one-line change if a future kernel makes MX win.
 
     python -m jang_tools.qwen36_build <src> <bitmap.json> <out_dir>

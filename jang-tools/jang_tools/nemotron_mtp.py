@@ -14,8 +14,7 @@ makes recursive re-application (D3) structurally possible from a single head.
 `mlx_lm.models.nemotron_h.sanitize()` drops every `mtp.*` key at load, so this
 module loads them separately from the bundle and attaches them to a loaded model.
 
-Cache correctness is the hard part — see
-docs/internal/nemotron35-lightning-30b/05-MTP-D2-D3-AND-CACHING.md:
+Cache restoration requirements:
   * KV cache (6 attention layers) is position-addressable -> rewind `offset`.
   * Mamba `ArraysCache` (23 layers) is overwritten IN PLACE and CANNOT be
     trimmed -> must be snapshotted before the verify forward and restored on

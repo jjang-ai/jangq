@@ -4,10 +4,7 @@ MiMo-V2.6 ships routed experts as OCP MXFP4: ``weight`` is uint8 with two
 e2m1 codes per byte, ``weight_scale`` is uint8 e8m0 with one exponent per
 32-element block along the input dimension.
 
-Conventions below were MEASURED against the parent MiMo-V2.5 FP8 weights
-(docs/runtime/mimo-v26-flash-2026-09-22/scripts/probe_v26_vs_v25.py):
-low nibble = even element (cos 0.988 vs 0.006 swapped), e8m0 bias 127
-(norm ratio 1.02).
+The low nibble stores the even element; E8M0 uses exponent bias 127.
 
 The same bytes, viewed as little-endian uint32, are bit-exact MLX
 ``mode="mxfp4"`` packed weights with ``group_size=32``. Re-quantizing the

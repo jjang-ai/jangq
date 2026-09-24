@@ -95,8 +95,7 @@ try:
             return "drop"
         if n.startswith("language_model.mtp.") or n.startswith("mtp."):
             # Nemotron-Omni ships no usable MTP; Nemotron 3.5 Lightning ships a
-            # real 1.335 B head worth retaining (see docs/internal/
-            # nemotron35-lightning-30b/05-MTP-D2-D3-AND-CACHING.md).
+            # real 1.335 B head worth retaining.
             return "drop" if IS_WRAPPED else "affine"
         if EXPERT_KEY_RE.match(n):
             return "expert"  # buffered for stacked quantization

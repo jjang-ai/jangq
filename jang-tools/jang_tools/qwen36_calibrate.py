@@ -6,7 +6,6 @@ the model. That single statistic serves simultaneously as:
   * **AWQ** salient-channel scales
   * **imatrix** activation weighting
   * the **Hessian diagonal**, since `tr(H) = sum_c E[x_c^2]`
-    (see docs/internal/_method/hessian-trace-allocation.md)
   * a per-module **sensitivity score** `tr(H) * ||W||_F^2` for bit allocation
 
 Implementation note: MLX resolves `module(x)` through `type(module).__call__`,

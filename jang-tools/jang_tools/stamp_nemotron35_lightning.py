@@ -1,7 +1,6 @@
 """Stamp the Nemotron 3.5 Lightning bundle contract onto a converted bundle.
 
-Applies the contract from
-`docs/internal/nemotron35-lightning-30b/01-BUNDLE-CONTRACT.md`:
+Applies the following bundle contract:
 
   1. Sampling defaults in BOTH files (jang_config.chat.sampling_defaults AND
      generation_config.json) — the two-file contract. Vendor card states
