@@ -1,7 +1,7 @@
 # Ralph test-matrix registry.
 # For first smoke: only Qwen3-0.6B-Base active. Others marked skip.
 #
-# Usage per docs/superpowers/specs/2026-04-19-ralph-loop-production-readiness-design.md:
+# Usage:
 #   tier: 1 = fast (<5 min), 2 = medium, 3 = real (slow)
 
 tiers:

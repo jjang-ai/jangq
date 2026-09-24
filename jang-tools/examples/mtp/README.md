@@ -16,7 +16,7 @@ For the active Qwen3.6 27B MTP lane:
 
 ```sh
 python3 jang-tools/examples/mtp/inspect_mtp_bundle.py \
-  /Volumes/EricsLLMDrive/Sources/Qwen/Qwen3.6-27B
+  /path/to/models/Sources/Qwen/Qwen3.6-27B
 ```
 
 Expected source-side signal before building `Qwen3.6-27B-JANG_4M-MTP`:
@@ -39,7 +39,7 @@ the wrong source tree is being inspected.
 
 ```sh
 python3 jang-tools/examples/mtp/qwen36_mtp_runtime_probe.py \
-  /Users/eric/models/Sources/Qwen/Qwen3.6-27B \
+  /path/to/models/Sources/Qwen/Qwen3.6-27B \
   --strict
 ```
 
@@ -52,7 +52,7 @@ For the built local `Qwen3.6-27B-JANG_4M-MTP` artifact:
 
 ```sh
 python3 jang-tools/examples/mtp/qwen36_mtp_runtime_probe.py \
-  /Users/eric/models/dealign.ai/Qwen3.6-27B-JANG_4M-MTP \
+  /path/to/models/dealign.ai/Qwen3.6-27B-JANG_4M-MTP \
   --strict
 ```
 
@@ -71,18 +71,18 @@ Expected converted-bundle signal:
 For the local MXFP4 sibling artifact:
 
 ```sh
-cd /Users/eric/jang/jang-tools
+cd /path/to/jang/jang-tools
 uv run python examples/mtp/patch_qwen36_mxfp4_mtp.py --replace
 ```
 
 This copies the known-good `Qwen3.6-27B-MXFP4-CRACK` bundle, appends native
-MTP tensors from `/Users/eric/models/Sources/Qwen/Qwen3.6-27B`, quantizes 2D
+MTP tensors from `/path/to/models/Sources/Qwen/Qwen3.6-27B`, quantizes 2D
 MTP matmuls with MLX `mode="mxfp4"`, and stamps
 `runtime.mtp_mode=preserved_enabled`.
 
 Expected local output:
 
-- `/Users/eric/models/dealign.ai/Qwen3.6-27B-MXFP4-MTP`;
+- `/path/to/models/dealign.ai/Qwen3.6-27B-MXFP4-MTP`;
 - `runtime.total_weight_gb=14.38`;
 - `mtp_tensor_count=23`;
 - `visual_tensor_count=333`;
@@ -99,15 +99,15 @@ The Qwen3.6 35B A3B source has real MoE MTP tensors and vision tensors:
 
 ```sh
 python3 jang-tools/examples/mtp/inspect_mtp_bundle.py \
-  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B
+  /path/to/models/JANGQ/Qwen3.6-35B-A3B
 ```
 
 The two local build targets are deliberately JANG/MXFP, not JANGTQ:
 
 ```sh
 python3 -m jang_tools --progress json convert \
-  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B \
-  -o /Users/eric/models/JANGQ/Qwen3.6-35B-A3B-JANG_2K-MTP \
+  /path/to/models/JANGQ/Qwen3.6-35B-A3B \
+  -o /path/to/models/JANGQ/Qwen3.6-35B-A3B-JANG_2K-MTP \
   -p JANG_2K \
   -b 128 \
   --force-dtype bf16
@@ -121,8 +121,8 @@ so vMLX should route it through MLX affine quantized matmul.
 
 ```sh
 jang-convert-qwen35-mxfp4 \
-  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B \
-  /Users/eric/models/JANGQ/Qwen3.6-35B-A3B-MXFP4-MTP \
+  /path/to/models/JANGQ/Qwen3.6-35B-A3B \
+  /path/to/models/JANGQ/Qwen3.6-35B-A3B-MXFP4-MTP \
   --progress json
 ```
 
@@ -133,7 +133,7 @@ as 4-bit affine tensors, and keeps the vision tower in fp16 passthrough form.
 
 ```sh
 python3 jang-tools/examples/mtp/estimate_jangtq_fit.py \
-  /Users/eric/models/Tencent/Hy3-preview \
+  /path/to/models/Tencent/Hy3-preview \
   --profile JANGTQ_K \
   --device-gb 128
 ```

@@ -51,8 +51,8 @@ choice on a 128 GB Mac. Drop to 50–70 if you have 256 GB+.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `VMLXCTL` | `/Users/eric/vmlx/swift/.build/arm64-apple-macosx/release/vmlxctl` | Path to the JangPress-aware vmlxctl. Build from `osaurus-ai/vmlx-swift-lm` if not installed. |
-| `PY` / `KIMI_PY` | `/Users/eric/jang/.venv/bin/python` | Interpreter with `huggingface_hub`, `httpx`, `pandas`. `KIMI_PY` overrides stale placeholder `PY` values. |
+| `VMLXCTL` | `/path/to/vmlx/swift/.build/arm64-apple-macosx/release/vmlxctl` | Path to the JangPress-aware vmlxctl. Build from `osaurus-ai/vmlx-swift-lm` if not installed. |
+| `PY` / `KIMI_PY` | `/path/to/jang/.venv/bin/python` | Interpreter with `huggingface_hub`, `httpx`, `pandas`. `KIMI_PY` overrides stale placeholder `PY` values. |
 | `SHADOW_ROOT` | `/tmp/kimi-shadow` | Where shadow dirs live. Internal SSD recommended. |
 | `VMLX_MEMORY_BUDGET_OVERRIDE` | `274877906944` (256 GB) | Bypass the load-gate's "model requires ≈X GB peak" check. |
 | `JANGPRESS_PRESTACK` | `1` | Force prestack regen (default-on; set `0` to disable). |

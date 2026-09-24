@@ -8,7 +8,7 @@ This folder tracks the JANGTQ workflow for `tencent/Hy3-preview`
 Expected local source directory:
 
 ```sh
-/Users/eric/models/Tencent/Hy3-preview
+/path/to/models/Tencent/Hy3-preview
 ```
 
 Download is large. Use one downloader only:
@@ -16,7 +16,7 @@ Download is large. Use one downloader only:
 ```sh
 uvx --from huggingface-hub hf download tencent/Hy3-preview \
   --repo-type model \
-  --local-dir /Users/eric/models/Tencent/Hy3-preview \
+  --local-dir /path/to/models/Tencent/Hy3-preview \
   --max-workers 4
 ```
 
