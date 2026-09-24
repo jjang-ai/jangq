@@ -114,6 +114,9 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "lfm2_moe":         ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
     "lfm2_5":           ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
     "lfm25":            ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    # Inkling combines KV attention and persistent short-convolution state.
+    "inkling":          ("inkling",   "inkling",     "inkling",  False, "hybrid"),
+    "inkling_mm_model": ("inkling",   "inkling",     "inkling",  False, "hybrid"),
     # StepFun Step 3.7 Flash is a Step3p7 VLM wrapper around Step3p5 text
     # weights. The chat template opens <think> on assistant prefill and the
     # official serving recipes use the Step3p5 XML tool parser. Attention is
@@ -260,7 +263,7 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     candidates: list[str] = []
 
     src_dict = jang.get("source_model") or {}
-    if isinstance(src_dict.get("architecture"), str):
+    if isinstance(src_dict, dict) and isinstance(src_dict.get("architecture"), str):
         candidates.append(src_dict["architecture"])
 
     arch_dict = jang.get("architecture")
@@ -268,7 +271,7 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
         candidates.append(arch_dict["type"])
 
     text_cfg = config.get("text_config") or {}
-    if isinstance(text_cfg.get("model_type"), str):
+    if isinstance(text_cfg, dict) and isinstance(text_cfg.get("model_type"), str):
         candidates.append(text_cfg["model_type"])
 
     if isinstance(config.get("model_type"), str):

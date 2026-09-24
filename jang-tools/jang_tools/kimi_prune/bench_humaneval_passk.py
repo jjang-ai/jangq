@@ -45,7 +45,7 @@ def _read_gen_config(model_path: Path) -> dict:
         return {}
     try:
         return json.loads(p.read_text())
-    except Exception:
+    except (OSError, ValueError, UnicodeError):
         return {}
 
 

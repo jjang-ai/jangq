@@ -82,8 +82,8 @@ def main(argv: list[str]) -> int:
         if p is not None:
             try:
                 _accum(p, x)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"Cannot collect calibration statistics for {p}") from exc
         return orig(self, x, *a, **k)
 
     SwitchLinear.__call__ = patched

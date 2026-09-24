@@ -225,7 +225,7 @@ def test_laguna_chat_block_defaults_thinking_off_without_template_kwargs():
     chat = build_chat_block({"temperature": 0.7})
 
     assert chat["reasoning"]["default_enabled"] is False
-    assert chat["sampling_defaults"] == {"temperature": 0.7}
+    assert chat["sampling_defaults"] == {"temperature": 0.7, "top_k": 20}
     assert chat["template_kwargs_defaults"] == {}
 
 

@@ -31,7 +31,7 @@ def register() -> None:
         if hasattr(mlx_lm_models, "_MODEL_MAPPING"):
             for name in _MODEL_TYPES:
                 mlx_lm_models._MODEL_MAPPING[name] = mlx_model  # type: ignore[attr-defined]
-    except Exception as exc:  # pragma: no cover - registration is best-effort
+    except ImportError as exc:  # pragma: no cover - registration is best-effort
         setattr(mlx_model, "_jang_register_warning", repr(exc))
 
 

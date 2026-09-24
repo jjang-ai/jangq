@@ -93,7 +93,7 @@ def _shape_of(value: Any) -> tuple[int, ...]:
     shape = getattr(value, "shape", ())
     try:
         return tuple(int(x) for x in shape)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return ()
 
 

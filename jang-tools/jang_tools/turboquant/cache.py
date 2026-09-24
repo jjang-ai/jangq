@@ -306,7 +306,7 @@ class TurboQuantKVCache:
             keep = batch_indices
             try:
                 keep_len = int(batch_indices.shape[0])
-            except Exception:
+            except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
                 keep_len = len(batch_indices)
 
         if keep_len == 0:

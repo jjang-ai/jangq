@@ -61,7 +61,7 @@ def decode_video(
         try:
             duration_s = float(meta.get("duration", 0.0))
             total_frames = int(round(fps * duration_s))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             duration_s = 0.0
             total_frames = 0
         # Decode all frames first (small videos < 1 min are cheap)

@@ -100,6 +100,7 @@ for b in BITS:
     print(f"{b:>5} {cells}   {best:.2f}  ({row[0]/min(row):.3f}x vs none)")
 
 out = '/Users/eric/models/Logs/q38v2/awq-alpha-sweep.json'
-json.dump(table, open(out, 'w'), indent=1)
+with open(out, 'w') as stream:
+    json.dump(table, stream, indent=1)
 print(f"\n-> {out}")
 print("\nbest alpha by width: " + ", ".join(f"{b}:{table[b]['best_alpha']}" for b in BITS))

@@ -240,7 +240,7 @@ def qa_pass(corpus_path: Path, sample_per_domain: int = 2000) -> dict:
         for line in f:
             try:
                 r = json.loads(line)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             d = r.get("domain")
             t = r.get("text") or ""

@@ -21,10 +21,22 @@ def test_dsv4_long_prefill_materializes_each_decoder_layer(monkeypatch):
 
     monkeypatch.delenv("DSV4_LAYERWISE_PREFILL", raising=False)
     monkeypatch.delenv("DSV4_LAYERWISE_PREFILL_MIN_TOKENS", raising=False)
+    monkeypatch.setenv("DSV4_LAYERWISE_PREFILL_AUTO_TOKENS", "24576")
+    monkeypatch.setenv("DSV4_ATTN_SUBCHUNK", "512")
 
     assert not mlx_model._layerwise_prefill_materialization_enabled(
         SimpleNamespace(shape=(1, 255))
     )
+    assert not mlx_model._layerwise_prefill_materialization_enabled(
+        SimpleNamespace(shape=(1, 256))
+    )
+    assert not mlx_model._layerwise_prefill_materialization_enabled(
+        SimpleNamespace(shape=(1, 256)), final_context_tokens=24576
+    )
+    assert mlx_model._layerwise_prefill_materialization_enabled(
+        SimpleNamespace(shape=(1, 256)), final_context_tokens=24577
+    )
+    monkeypatch.setenv("DSV4_LAYERWISE_PREFILL", "1")
     assert mlx_model._layerwise_prefill_materialization_enabled(
         SimpleNamespace(shape=(1, 256))
     )
@@ -35,7 +47,7 @@ def test_dsv4_long_prefill_materializes_each_decoder_layer(monkeypatch):
     )
 
     source = inspect.getsource(mlx_model.DeepseekV4Model.__call__)
-    loop = source[source.index("for layer, c in zip"):source.index("h = self._hc_head_reduce")]
+    loop = source[source.index("for _li, (layer, c) in enumerate"):source.index("h = self._hc_head_reduce")]
     assert "if layerwise_prefill:" in loop
     assert "mx.eval(h)" in loop
 
@@ -106,6 +118,7 @@ def test_dsv4_compressor_decode_appends_overlap_pool_row():
 
     class IdentityRope:
         dims = 2
+        inv_freq = mx.zeros((1,), dtype=mx.float32)
 
         def __call__(self, x, offset=0, inverse=False, positions=None):
             return x

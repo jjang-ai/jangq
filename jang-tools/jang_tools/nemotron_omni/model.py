@@ -126,7 +126,7 @@ class NemotronHOmni:
             with open(self.bundle_path / "jang_config.json") as f:
                 jc = json.load(f)
             wf = jc.get("weight_format", "mlx")
-        except Exception:
+        except (OSError, ValueError, TypeError, AttributeError):
             wf = "mlx"
         if wf == "mxtq":
             from jang_tools.load_jangtq import load_jangtq_model

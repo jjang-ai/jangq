@@ -61,7 +61,7 @@ def _load_json(path: Path) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(path.read_text())
-    except Exception:
+    except (OSError, ValueError, UnicodeError):
         return {}
     return data if isinstance(data, dict) else {}
 

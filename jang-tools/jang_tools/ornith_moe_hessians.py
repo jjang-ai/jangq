@@ -80,7 +80,7 @@ def _switch_glu_classes():
             c = getattr(importlib.import_module(m), "SwitchGLU", None)
             if c is not None and c not in out:
                 out.append(c)
-        except Exception:
+        except ImportError:
             pass
     return out
 

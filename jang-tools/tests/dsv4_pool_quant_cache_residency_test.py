@@ -36,7 +36,10 @@ def test_materialized_pool_is_not_retained_and_segments_are_bounded():
     state.append_pooled(raw[:, :-1])
     state.append_pooled(raw[:, -1:])
 
-    assert len(state._pooled_q_segments) == math.ceil(rows / _POOL_SEGMENT_ROWS)
+    segment_rows = [pool_quant_cache._qpool_rows(s) for s in state._pooled_q_segments]
+    assert sum(segment_rows) == rows
+    assert max(segment_rows) <= pool_quant_cache._POOL_SLAB_MAX_ROWS
+    assert len(segment_rows) <= math.ceil(rows / pool_quant_cache._POOL_SLAB_MAX_ROWS) + 8
     assert {segment[5] for segment in state._pooled_q_segments} == {8}
     assert state._pooled_bf16 is None
     retained_before = state.quant_nbytes()
@@ -115,17 +118,22 @@ def test_adaptive_threshold_is_bytes_not_rows():
     assert wide_state._pooled_q_segments
 
 
-def test_ratio4_ordinary_prompt_stays_hot_and_12k_promotes():
-    """4K-token ratio-4 pools stay BF16 while 12K-token pools promote."""
+def test_ratio4_ordinary_prompt_stays_hot_and_configured_limit_promotes():
+    """The configured byte limit controls promotion, independently of context labels."""
     prompt_4k_pool = mx.zeros((1, 4096 // 4, 512), dtype=mx.bfloat16)
-    prompt_12k_pool = mx.zeros((1, 12000 // 4, 512), dtype=mx.bfloat16)
+    limit_rows = _POOL_BF16_MAX_BYTES // (512 * 2)
+    threshold_pool = mx.zeros((1, limit_rows, 512), dtype=mx.bfloat16)
+    promoted_pool = mx.zeros((1, limit_rows + 1, 512), dtype=mx.bfloat16)
     short_state = _StateProxy({"pooled": prompt_4k_pool})
-    long_state = _StateProxy({"pooled": prompt_12k_pool})
+    threshold_state = _StateProxy({"pooled": threshold_pool})
+    long_state = _StateProxy({"pooled": promoted_pool})
 
     assert prompt_4k_pool.nbytes == 1024 * 1024
     assert short_state._pooled_bf16 is not None
     assert not short_state._pooled_q_segments
-    assert prompt_12k_pool.nbytes > _POOL_BF16_MAX_BYTES
+    assert threshold_state._pooled_bf16 is not None
+    assert not threshold_state._pooled_q_segments
+    assert promoted_pool.nbytes > _POOL_BF16_MAX_BYTES
     assert long_state._pooled_bf16 is None
     assert long_state._pooled_q_segments
 

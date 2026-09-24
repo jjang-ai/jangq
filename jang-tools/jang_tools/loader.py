@@ -65,7 +65,7 @@ def _module_can_quantize_with_group_size(module, group_size: int) -> bool:
         return True
     try:
         return int(input_dims) % int(group_size) == 0
-    except Exception:
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
         return True
 
 
@@ -1928,7 +1928,7 @@ def _fix_quantized_bits(model, weights):
             if logical_input_dims is not None:
                 try:
                     logical_input_dims = int(logical_input_dims)
-                except Exception:
+                except (TypeError, ValueError, OverflowError):
                     logical_input_dims = None
             # Try group sizes in preference order.
             # Router/gate tensors prefer gs=64 (precision-critical).

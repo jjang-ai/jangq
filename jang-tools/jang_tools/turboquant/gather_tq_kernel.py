@@ -28,7 +28,7 @@ def _env_int(name: str, default: int) -> int:
         if value <= 0 or value > 64:
             return default
         return value
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

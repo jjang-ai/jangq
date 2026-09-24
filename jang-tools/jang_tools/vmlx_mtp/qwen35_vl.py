@@ -245,7 +245,7 @@ def _patch_attention_text_rope(qlang: Any) -> None:
         try:
             first = position_ids[0, 0]
             return int(first.item() if hasattr(first, "item") else first)
-        except Exception:
+        except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
             return 0
 
     def __call__(

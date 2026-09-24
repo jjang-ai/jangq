@@ -50,7 +50,7 @@ def run(*, model_path: Path, source_report: Path, seeds: list[int],
     import numpy as _np
     try:
         import mlx.core as mx_
-    except Exception:
+    except ImportError:
         mx_ = None
 
     retry_results: dict[str, list[dict]] = {t: [] for t in failed_ids}

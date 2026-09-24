@@ -8,7 +8,7 @@ combines them with the MEASURED acceptance curve to produce tok/s.
     cycle_time(d) = d * t_head + t_target(d+1 tokens)
     tok/s(d)      = tokens_per_cycle(d) / cycle_time(d)
 
-Timing rules (docs/internal/_method): warmup discarded, >=5 repeats, median
+Timing rules: warmup discarded, >=5 repeats, median
 reported, and the target is timed WITH a KV cache so it is a real decode step
 rather than a prefill.
 

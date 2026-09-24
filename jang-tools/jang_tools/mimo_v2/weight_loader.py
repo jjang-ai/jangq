@@ -14,10 +14,13 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
-from .fp8_block_codec import dequant_fp8_e4m3_scale_inv
+from .fp8_block_codec import dequant_fp8_e4m3_scale_inv, dequant_fp8_rank_blocked
+from .mxfp4_codec import dequant_mxfp4
 
 
-_QKV_WEIGHT_RE = re.compile(r"^model\.layers\.(?P<layer>\d+)\.self_attn\.qkv_proj\.weight$")
+_QKV_WEIGHT_RE = re.compile(
+    r"^model\.(?P<mtp>mtp\.)?layers\.(?P<layer>\d+)\.self_attn\.qkv_proj\.weight$"
+)
 _MIMO_V25_QKV_TP_SIZE = 4
 
 
@@ -79,10 +82,20 @@ class MiMoShardIndex:
             for k in self.keys
             if k.endswith(".weight_scale_inv")
         }
+        # MiMo-V2.6 routed experts: MXFP4 uint8 codes + uint8 e8m0 ``weight_scale``.
+        self.mxfp4_weight_names: set[str] = {
+            k[: -len(".weight_scale")] + ".weight"
+            for k in self.keys
+            if k.endswith(".weight_scale")
+        }
         # Names yielded to callers — drop bare scale tensors, they are read
         # internally when their companion weight is requested.
-        self.weight_keys: list[str] = [k for k in self.keys if not k.endswith(".weight_scale_inv")]
+        self.weight_keys: list[str] = [
+            k for k in self.keys
+            if not (k.endswith(".weight_scale_inv") or k.endswith(".weight_scale"))
+        ]
         self._handles = {}
+        self.qkv_tp = self._detect_qkv_tp()
 
     def _open(self, shard_name: str):
         handle = self._handles.get(shard_name)
@@ -91,6 +104,16 @@ class MiMoShardIndex:
             self._handles[shard_name] = handle
         return handle
 
+    def release_cached_handles(self) -> None:
+        """Drop source mappings after a consumer has materialized its outputs.
+
+        Keeping handles for the whole checkpoint also retains touched mmap
+        pages outside MLX's allocator limits. Streaming consumers should call
+        this at evaluated layer/projection boundaries. Future reads reopen the
+        same shards; already returned torch tensors retain their own storage.
+        """
+        self._handles.clear()
+
     # ------------------------------------------------------------------
     # Tensor reads
     # ------------------------------------------------------------------
@@ -98,9 +121,58 @@ class MiMoShardIndex:
     def is_fp8_weight(self, name: str) -> bool:
         return name in self.fp8_weight_names
 
-    def qkv_sizes_for_layer(self, layer: int) -> tuple[int, int, int]:
+    def is_mxfp4_weight(self, name: str) -> bool:
+        return name in self.mxfp4_weight_names
+
+    def read_mxfp4_raw(self, name: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the untouched (uint8 codes, uint8 e8m0 scales) for an MXFP4 weight."""
+        if name not in self.mxfp4_weight_names:
+            raise KeyError(f"{name} is not an MXFP4 source weight")
+        scale_name = name[: -len(".weight")] + ".weight_scale"
+        w = self._open(self.weight_map[name]).get_tensor(name)
+        s = self._open(self.weight_map[scale_name]).get_tensor(scale_name)
+        return w, s
+
+    def _shape(self, name: str):
+        if name not in self.weight_map:
+            return None
+        return tuple(self._open(self.weight_map[name]).get_slice(name).get_shape())
+
+    def _detect_qkv_tp(self) -> int:
+        """Derive the TP degree the fused qkv was stored/quantized for.
+
+        Only full-attention layers disambiguate it: each rank block is padded
+        to a 128-row FP8 block on its own, so scale_rows*128 == tp*pad128(rows/tp)
+        holds for exactly one tp (4 on Flash). SWA geometry is block-aligned and
+        ambiguous. Same derivation as oMLX patches/mimo_v2/fused_qkv_layout.py.
+        """
         hybrid = self.config.get("hybrid_layer_pattern") or []
-        is_swa = bool(hybrid[int(layer)]) if int(layer) < len(hybrid) else False
+        for layer, is_swa in enumerate(hybrid):
+            if is_swa:
+                continue
+            w = self._shape(f"model.layers.{layer}.self_attn.qkv_proj.weight")
+            s = self._shape(f"model.layers.{layer}.self_attn.qkv_proj.weight_scale_inv")
+            if w is None or s is None:
+                continue
+            q, k, v = self.qkv_sizes_for_layer(layer)
+            heads = int(self.config["num_attention_heads"])
+            kv = int(self.config["num_key_value_heads"])
+            hits = []
+            for tp in (1, 2, 4, 8, 16, 32):
+                if heads % tp or kv % tp or (q + k + v) % tp:
+                    continue
+                rank = (q + k + v) // tp
+                if rank * tp == w[0] and tp * (-(-rank // 128)) == s[0]:
+                    hits.append(tp)
+            if len(hits) != 1:
+                raise ValueError(f"cannot determine qkv TP degree from layer {layer}: w={w} s={s} hits={hits}")
+            return hits[0]
+        return 1
+
+    def qkv_sizes_for_layer(self, layer: int, *, mtp: bool = False) -> tuple[int, int, int]:
+        hybrid = self.config.get("hybrid_layer_pattern") or []
+        # MTP blocks use SWA attention geometry (README: SWA MTP); verified by row count at read time.
+        is_swa = True if mtp else (bool(hybrid[int(layer)]) if int(layer) < len(hybrid) else False)
         num_heads = int(
             self.config.get("swa_num_attention_heads" if is_swa else "num_attention_heads")
             or self.config["num_attention_heads"]
@@ -124,8 +196,12 @@ class MiMoShardIndex:
         match = _QKV_WEIGHT_RE.match(name)
         if not match:
             return tensor
-        q_size, k_size, v_size = self.qkv_sizes_for_layer(int(match.group("layer")))
-        return deinterleave_tp_qkv_rows(tensor, q_size=q_size, k_size=k_size, v_size=v_size)
+        q_size, k_size, v_size = self.qkv_sizes_for_layer(
+            int(match.group("layer")), mtp=bool(match.group("mtp"))
+        )
+        return deinterleave_tp_qkv_rows(
+            tensor, q_size=q_size, k_size=k_size, v_size=v_size, tp_size=self.qkv_tp
+        )
 
     def read_passthrough(self, name: str, *, out_dtype: torch.dtype | None = None) -> torch.Tensor:
         """Read a tensor as-is from its shard. No dequantization."""
@@ -139,6 +215,9 @@ class MiMoShardIndex:
 
         Plain bf16/fp32 tensors are cast to ``out_dtype`` if needed.
         """
+        if name in self.mxfp4_weight_names:
+            w, s = self.read_mxfp4_raw(name)
+            return dequant_mxfp4(w, s, out_dtype=out_dtype)
         if name not in self.fp8_weight_names:
             return self.read_passthrough(name, out_dtype=out_dtype)
 
@@ -147,7 +226,10 @@ class MiMoShardIndex:
         scale_shard = self.weight_map[scale_name]
         w = self._open(weight_shard).get_tensor(name)
         s = self._open(scale_shard).get_tensor(scale_name)
-        return self._maybe_deinterleave_qkv(
-            name,
-            dequant_fp8_e4m3_scale_inv(w, s, out_dtype=out_dtype),
-        )
+        if _QKV_WEIGHT_RE.match(name):
+            # Fused qkv is stored AND FP8-quantized per TP rank: dequantize each
+            # rank block with its own scale rows, then de-interleave.
+            deq = dequant_fp8_rank_blocked(w, s, tp_size=self.qkv_tp, out_dtype=out_dtype)
+        else:
+            deq = dequant_fp8_e4m3_scale_inv(w, s, out_dtype=out_dtype)
+        return self._maybe_deinterleave_qkv(name, deq)

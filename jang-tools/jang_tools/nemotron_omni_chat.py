@@ -289,7 +289,7 @@ class OmniChat:
             with open(self.llm_path / "jang_config.json") as f:
                 jc = json.load(f)
             wf = jc.get("weight_format", "mlx")
-        except Exception:
+        except (OSError, ValueError, TypeError, AttributeError):
             wf = "mlx"
 
         if wf == "mxtq":
