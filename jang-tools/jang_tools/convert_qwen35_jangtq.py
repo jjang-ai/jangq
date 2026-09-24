@@ -488,7 +488,7 @@ try:
     if eos_fix_map and gen_cfg_src.exists():
         try:
             gen_cfg = json.loads(gen_cfg_src.read_text(encoding="utf-8"))
-        except Exception as _e:
+        except (OSError, ValueError, UnicodeError) as _e:
             print(f"  WARNING: couldn't parse generation_config.json for eos-fix: {_e}", flush=True)
             gen_cfg = None
         if isinstance(gen_cfg, dict):

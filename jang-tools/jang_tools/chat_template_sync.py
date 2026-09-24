@@ -94,8 +94,8 @@ def audit_bundle_chat_template(bundle: Path) -> dict[str, Any]:
             result["status"] = TEMPLATE_CONSISTENT
         else:
             result["status"] = TEMPLATE_DIVERGENT
-    except Exception:
-        pass
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        result["error"] = str(exc)
     return result
 
 

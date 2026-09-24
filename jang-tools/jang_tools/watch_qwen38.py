@@ -26,7 +26,8 @@ CANDIDATES = [
 def _arch_report(rid: str, api: HfApi) -> None:
     """Everything needed to decide the conversion plan, from config alone."""
     p = hf_hub_download(rid, "config.json")
-    c = json.load(open(p))
+    with open(p) as stream:
+        c = json.load(stream)
     tc = c.get("text_config", c)
     print(f"  model_type      : {c.get('model_type')}  arch={c.get('architectures')}")
     print(f"  layers/hidden   : {tc.get('num_hidden_layers')} / {tc.get('hidden_size')}")

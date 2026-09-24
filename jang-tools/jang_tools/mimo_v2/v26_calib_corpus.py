@@ -126,7 +126,7 @@ def _loads_loose(s: str):
     s = s.strip()
     try:
         return json.loads(s)
-    except Exception:
+    except ValueError:
         return ast.literal_eval(s)
 
 
@@ -137,7 +137,7 @@ def _norm_call(obj) -> dict | None:
     if isinstance(args, str):
         try:
             args = _loads_loose(args) if args.strip() else {}
-        except Exception:
+        except (ValueError, SyntaxError, TypeError):
             return None
     if not isinstance(args, dict):
         return None
@@ -197,8 +197,9 @@ def conv_code_file(r, rng):
     try:
         if float(r.get("alpha_frac") or 0) < 0.3 or float(r.get("line_max") or 0) > 200:
             return None
-    except Exception:
-        pass
+    except (TypeError, ValueError, OverflowError):
+        # Malformed quality metadata cannot establish corpus eligibility.
+        return None
     if len(c) < 400:
         return None
     return Doc(raw=c)
@@ -217,7 +218,7 @@ def _hermes_conv(r, rng):
     try:
         tools_raw = r.get("tools")
         tools = _loads_loose(tools_raw) if isinstance(tools_raw, str) else tools_raw
-    except Exception:
+    except (ValueError, SyntaxError, TypeError, AttributeError):
         return None
     if not isinstance(tools, list) or not tools:
         return None
@@ -241,7 +242,7 @@ def _hermes_conv(r, rng):
             for blob in _TC_RE.findall(val):
                 try:
                     c = _norm_call(_loads_loose(blob))
-                except Exception:
+                except (ValueError, SyntaxError, TypeError):
                     return None
                 if c is None:
                     return None
@@ -278,7 +279,7 @@ def conv_glaive(r, rng):
         body = body.strip()
         try:
             obj, end = dec.raw_decode(body)
-        except Exception:
+        except ValueError:
             return None
         t = _norm_tool_schema(obj)
         if t is None:
@@ -302,7 +303,7 @@ def conv_glaive(r, rng):
                         c = _norm_call({"name": m.group(1), "arguments": m.group(2)})
                     else:
                         c = _norm_call(_loads_loose(blob))
-                except Exception:
+                except (ValueError, SyntaxError, TypeError):
                     return None
                 if c is None:
                     return None

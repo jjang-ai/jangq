@@ -260,7 +260,7 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
     candidates: list[str] = []
 
     src_dict = jang.get("source_model") or {}
-    if isinstance(src_dict.get("architecture"), str):
+    if isinstance(src_dict, dict) and isinstance(src_dict.get("architecture"), str):
         candidates.append(src_dict["architecture"])
 
     arch_dict = jang.get("architecture")
@@ -268,7 +268,7 @@ def _resolve_family_str(jang: dict, config: dict) -> tuple[str | None, list[str]
         candidates.append(arch_dict["type"])
 
     text_cfg = config.get("text_config") or {}
-    if isinstance(text_cfg.get("model_type"), str):
+    if isinstance(text_cfg, dict) and isinstance(text_cfg.get("model_type"), str):
         candidates.append(text_cfg["model_type"])
 
     if isinstance(config.get("model_type"), str):

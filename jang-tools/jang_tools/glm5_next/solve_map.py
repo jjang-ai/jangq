@@ -120,7 +120,8 @@ def main():
         bit_map[f"model.layers.{layer}.mlp.switch_mlp.{proj}"] = {
             "bits": bits, "group_size": gs}
 
-    json.dump(bit_map, open(a.out_map, "w"), indent=1)
+    with open(a.out_map, "w") as stream:
+        json.dump(bit_map, stream, indent=1)
     total = (floors + spent) / 2**30
     print(f"routed: {spent/2**30:.2f} GiB → TOTAL est {total:.2f} GiB "
           f"(target {a.total_gib})")

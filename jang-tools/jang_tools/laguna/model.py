@@ -153,7 +153,7 @@ class LagunaAttention(nn.Module):
         if cache is not None and hasattr(cache, "offset"):
             try:
                 offset = int(cache.offset)
-            except Exception:
+            except (AttributeError, TypeError, ValueError, OverflowError):
                 offset = 0
 
         q = self._rope(q, offset)

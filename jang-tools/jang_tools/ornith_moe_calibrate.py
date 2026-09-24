@@ -87,7 +87,7 @@ def _tap_switch_glu(model) -> int:
             cls = getattr(importlib.import_module(modname), "SwitchLinear", None)
             if cls is not None and cls not in classes:
                 classes.append(cls)
-        except Exception:
+        except ImportError:
             pass
     if not classes:
         return 0

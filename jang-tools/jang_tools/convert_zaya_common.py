@@ -143,7 +143,7 @@ def _scan_source_from_headers(src: Path) -> tuple[list[tuple[str, list[int], Pat
 def scan_source(src: Path) -> tuple[list[tuple[str, list[int], Path]], dict[tuple[int, int], dict[str, tuple[list[int], Path]]]]:
     try:
         from safetensors import safe_open
-    except Exception:
+    except ImportError:
         return _scan_source_from_headers(src)
 
     regular: list[tuple[str, list[int], Path]] = []

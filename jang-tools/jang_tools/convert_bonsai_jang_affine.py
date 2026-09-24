@@ -688,8 +688,8 @@ def convert_bonsai_jang_affine(
         )
         if capabilities is not None:
             jang_config["capabilities"] = capabilities
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError("Cannot build Bonsai bundle capabilities") from exc
 
     tokenizer_files = _load_tokenizer_files(model_path)
     write_jang_v2_model(

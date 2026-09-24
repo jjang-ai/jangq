@@ -112,22 +112,22 @@ def test_dsv4_capability_builder_stamps_dsml_tool_parser():
     assert caps["reasoning_parser"] == "deepseek_r1"
 
 
-def test_validate_capabilities_accepts_dsml_and_zaya_xml():
-    """verify_directory's valid_tool must include both DSML and Zaya XML.
+def test_validate_capabilities_accepts_dsml_and_zaya_xml(tmp_path):
+    """Exercise persisted bundles through the public validator and reject unknown parsers."""
+    import json
+    from jang_tools.capabilities import verify_directory
 
-    Inspect the function source since valid_tool is a function-local set
-    with no public accessor.
-    """
-    import inspect
-
-    from jang_tools import capabilities as cap_module
-
-    source = inspect.getsource(cap_module.verify_directory)
-    assert '"dsml"' in source, (
-        "verify_directory must accept dsml in valid_tool — DSV4 bundles "
-        "stamp tool_parser='dsml' and the validator was rejecting them"
-    )
-    assert '"zaya_xml"' in source, (
-        "verify_directory must accept zaya_xml in valid_tool — Zaya bundles "
-        "stamp tool_parser='zaya_xml' and the validator was rejecting them"
-    )
+    for family, parser in (("deepseek_v4", "dsml"), ("zaya", "zaya_xml")):
+        config = {"model_type": family}
+        jang = {"source_model": {"architecture": family}}
+        caps = build_capabilities(jang, config)
+        assert caps["tool_parser"] == parser
+        jang["capabilities"] = caps
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        (tmp_path / "jang_config.json").write_text(json.dumps(jang))
+        assert verify_directory(tmp_path)[0]
+        caps["tool_parser"] = "unregistered_parser"
+        (tmp_path / "jang_config.json").write_text(json.dumps(jang))
+        ok, message = verify_directory(tmp_path)
+        assert not ok
+        assert "not registered" in message

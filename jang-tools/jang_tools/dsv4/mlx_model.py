@@ -2437,8 +2437,9 @@ def _dsv4_indexer_scores(
         fused = _fused(q, pool_tile, head_weights, float(scale))
         if fused is not None:
             return fused
-    except Exception:
-        pass
+    except Exception as exc:
+        import warnings
+        warnings.warn(f"DSV4 fused indexer unavailable; using reference scoring: {exc}", RuntimeWarning)
     q32 = q.astype(mx.float32)
     tile32 = pool_tile.astype(mx.float32)
     weights = head_weights.swapaxes(-1, -2)[..., None].astype(mx.float32)

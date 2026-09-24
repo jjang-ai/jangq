@@ -19,7 +19,7 @@ def register() -> None:
         mlx_lm_models = importlib.import_module("mlx_lm.models")
         if hasattr(mlx_lm_models, "_MODEL_MAPPING"):
             mlx_lm_models._MODEL_MAPPING["mimo_v2"] = mlx_model  # type: ignore[attr-defined]
-    except Exception as exc:  # pragma: no cover
+    except ImportError as exc:  # pragma: no cover
         setattr(mlx_model, "_jang_register_warning", repr(exc))
 
 

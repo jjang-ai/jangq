@@ -411,7 +411,7 @@ def _sidecar_reports_mixed_affine_bits(bundle_path: Path) -> bool:
     """
     try:
         data = json.loads((bundle_path / "jang_config.json").read_text())
-    except Exception:
+    except (OSError, ValueError, UnicodeError):
         return False
     quant = data.get("quantization")
     if not isinstance(quant, dict):
@@ -423,7 +423,7 @@ def _sidecar_reports_mixed_affine_bits(bundle_path: Path) -> bool:
     for value in values:
         try:
             bits.add(int(value))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             continue
     return len(bits) > 1 and 8 in bits
 

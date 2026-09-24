@@ -245,7 +245,7 @@ def test_dsv4_qat_is_wired_after_rope_and_before_cache_or_scoring():
     cache_update = attention_source.index("local_cache.update_and_fetch")
     assert kv_rope < kv_qat < cache_update
 
-    compressor_source = inspect.getsource(Compressor.__call__)
+    compressor_source = inspect.getsource(Compressor._advance)
     pooled_rope = compressor_source.index("new_pooled = _apply_partial_rope")
     indexer_qat = compressor_source.index("_indexer_activation_roundtrip")
     main_fp8 = compressor_source.index("_fp8_qat_non_rope")
@@ -257,7 +257,7 @@ def test_dsv4_qat_is_wired_after_rope_and_before_cache_or_scoring():
     indexer_source = inspect.getsource(Indexer.select)
     q_rope = indexer_source.index("q = _apply_partial_rope")
     q_qat = indexer_source.index("_indexer_activation_roundtrip")
-    scoring = indexer_source.index("scores = q.astype")
+    scoring = indexer_source.index("scores = _dsv4_indexer_scores")
     assert "_indexer_activation_roundtrip(q)" in indexer_source
     assert q_rope < q_qat < scoring
 
@@ -426,6 +426,7 @@ def test_dsv4_compressor_stages_q8_projection_and_pooling_in_fp32():
 
     class IdentityRope:
         dims = 64
+        inv_freq = mx.zeros((32,), dtype=mx.float32)
 
         def __call__(self, value, offset=0, inverse=False, positions=None):
             return value

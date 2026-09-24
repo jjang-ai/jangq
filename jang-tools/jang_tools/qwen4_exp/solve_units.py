@@ -66,14 +66,16 @@ def main():
             g = (hull[i][2] - hull[i + 1][2]) / max(hull[i + 1][1] - hull[i][1], 1)
             heapq.heappush(heap, (-g, unit, i + 1))
 
-    base = json.loads(open(a.base_map).read())
+    with open(a.base_map) as stream:
+        base = json.load(stream)
     cnt = Counter(state.values())
     for unit, opt in state.items():
         layer, proj = unit.split(":")
         bits, gs = SPEC[opt]
         base[f"language_model.layers.{layer}.mlp.switch_mlp.{proj}"] = {
             "bits": bits, "group_size": gs}
-    json.dump(base, open(a.out_map, "w"), indent=1)
+    with open(a.out_map, "w") as stream:
+        json.dump(base, stream, indent=1)
     print(f"routed bytes: {spent/1e9:.1f} GB / budget {a.budget_bytes/1e9:.1f} GB")
     print("choices:", dict(cnt))
     print(f"wrote {a.out_map}")

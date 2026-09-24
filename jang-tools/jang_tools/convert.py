@@ -2073,7 +2073,7 @@ def convert_model(
         if gen_cfg_src.exists():
             try:
                 gc = json.loads(gen_cfg_src.read_text(encoding="utf-8"))
-            except Exception as _e:
+            except (OSError, ValueError, UnicodeError) as _e:
                 print(f"  WARNING: couldn't parse generation_config.json "
                       f"for eos-fix ({type(_e).__name__}: {_e}); copying "
                       f"verbatim may leave stale eos_token_id.")
