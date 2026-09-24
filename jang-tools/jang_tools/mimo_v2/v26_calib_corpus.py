@@ -38,7 +38,7 @@ datasets (GSM8K / MATH / AMC-AIME / APPS rows) are filtered out.
 Usage (on the machine with the tokenizer):
   cd ~/jang/jang-tools && HF_HUB_DISABLE_XET=1 uv run python -m \\
       jang_tools.mimo_v2.v26_calib_corpus \\
-      --src /Volumes/EricsLLMDrive/jangq-ai/sources/MiMo-V2.6-Flash-RL \\
+      --src /path/to/MiMo-V2.6-Flash-RL \\
       --out ~/models/mimo26-build/calib
 """
 
@@ -800,8 +800,8 @@ def _sha256(p: Path) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--src", type=Path,
-                    default=Path("/Volumes/EricsLLMDrive/jangq-ai/sources/MiMo-V2.6-Flash-RL"))
+    ap.add_argument("--src", type=Path, required=True,
+                    help="Local source model directory containing the tokenizer")
     ap.add_argument("--out", type=Path, default=Path.home() / "models/mimo26-build/calib")
     ap.add_argument("--calib-seqs", type=int, default=128)
     ap.add_argument("--klref-seqs", type=int, default=16)
