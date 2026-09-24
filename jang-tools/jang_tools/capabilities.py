@@ -114,6 +114,9 @@ FAMILY_MAP: dict[str, tuple[str, str, str, bool, str]] = {
     "lfm2_moe":         ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
     "lfm2_5":           ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
     "lfm25":            ("lfm2_moe",   "qwen3",       "lfm2",     False, "hybrid"),
+    # Inkling combines KV attention and persistent short-convolution state.
+    "inkling":          ("inkling",   "inkling",     "inkling",  False, "hybrid"),
+    "inkling_mm_model": ("inkling",   "inkling",     "inkling",  False, "hybrid"),
     # StepFun Step 3.7 Flash is a Step3p7 VLM wrapper around Step3p5 text
     # weights. The chat template opens <think> on assistant prefill and the
     # official serving recipes use the Step3p5 XML tool parser. Attention is

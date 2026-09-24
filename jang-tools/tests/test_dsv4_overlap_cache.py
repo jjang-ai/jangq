@@ -47,7 +47,7 @@ def test_dsv4_long_prefill_materializes_each_decoder_layer(monkeypatch):
     )
 
     source = inspect.getsource(mlx_model.DeepseekV4Model.__call__)
-    loop = source[source.index("for layer, c in zip"):source.index("h = self._hc_head_reduce")]
+    loop = source[source.index("for _li, (layer, c) in enumerate"):source.index("h = self._hc_head_reduce")]
     assert "if layerwise_prefill:" in loop
     assert "mx.eval(h)" in loop
 

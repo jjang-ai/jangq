@@ -462,3 +462,31 @@ def test_dsv4_compressor_stages_q8_projection_and_pooling_in_fp32():
     assert ("wgate", "output", mx.float32) in events
     assert ("norm", "input", mx.float16) in events
     assert output.dtype == mx.float16
+
+
+def test_ue8m0_scale_preserves_exact_normal_boundaries():
+    from jang_tools.dsv4.mlx_model import _ceil_power_of_two_scale
+
+    values = np.array([2.0**-126, 0.5, 1.0, 1.0001, 8.0, 8.0001], dtype=np.float32)
+    expected = np.array([2.0**-126, 0.5, 1.0, 2.0, 8.0, 16.0], dtype=np.float32)
+    scale, inverse = _ceil_power_of_two_scale(mx.array(values))
+    mx.eval(scale, inverse)
+    np.testing.assert_array_equal(_np(scale), expected)
+    np.testing.assert_array_equal(_np(inverse), 1.0 / expected)
+
+
+def test_e4m3_midpoint_rounding_uses_even_lattice_values():
+    from jang_tools.dsv4.mlx_model import _round_e4m3fn
+
+    values = mx.array([136.0, 152.0, -136.0, -152.0, 116.0, 124.0])
+    actual = _round_e4m3fn(values)
+    mx.eval(actual)
+    np.testing.assert_array_equal(_np(actual), [128.0, 160.0, -128.0, -160.0, 112.0, 128.0])
+
+
+def test_fp4_zero_block_remains_finite():
+    from jang_tools.dsv4.mlx_model import fp4_act_quant_sim
+
+    actual = fp4_act_quant_sim(mx.zeros((1, 32), dtype=mx.float32))
+    mx.eval(actual)
+    np.testing.assert_array_equal(_np(actual), np.zeros((1, 32)))

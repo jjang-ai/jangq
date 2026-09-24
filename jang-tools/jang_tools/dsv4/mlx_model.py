@@ -396,6 +396,19 @@ def _activation_blocks(x: mx.array, block_size: int):
     return x32.reshape(*shape[:-1], -1, block_size), shape, width
 
 
+def _ceil_power_of_two_scale(x: mx.array) -> tuple[mx.array, mx.array]:
+    """Positive normal FP32 power-of-two scale and its exact reciprocal.
+
+    Construct UE8M0 exponents directly. Transcendental log2/power paths can
+    perturb lattice ties or flush the smallest normal scale on older Metal
+    runtimes; neither is acceptable in quantization reference arithmetic.
+    """
+    positive = mx.maximum(x.astype(mx.float32), 2.0**-126)
+    bits = (positive.view(mx.uint32) + 0x7FFFFF) & 0xFF800000
+    inverse_bits = (254 - (bits >> 23)) << 23
+    return bits.view(mx.float32), inverse_bits.view(mx.float32)
+
+
 def _round_e4m3fn(x: mx.array) -> mx.array:
     """Round FP32 values to the finite-only E4M3 grid, returning FP32.
 
@@ -410,10 +423,7 @@ def _round_e4m3fn(x: mx.array) -> mx.array:
     min_normal = 2.0**-6
     subnormal_step = 2.0**-9
     safe_magnitude = mx.maximum(magnitude, min_normal)
-    normal_step = mx.power(
-        mx.array(2.0, dtype=mx.float32),
-        mx.floor(mx.log2(safe_magnitude)) - 3.0,
-    )
+    normal_step = (((safe_magnitude.view(mx.uint32) >> 23) - 3) << 23).view(mx.float32)
     step = mx.where(magnitude < min_normal, subnormal_step, normal_step)
     rounded = mx.minimum(mx.round(magnitude / step) * step, 448.0)
     rounded = mx.where(clipped < 0, -rounded, rounded)
@@ -436,11 +446,8 @@ def act_quant_sim(x: mx.array, block_size: int = 64) -> mx.array:
         mx.max(mx.abs(blocks), axis=-1, keepdims=True),
         1e-4,
     )
-    scale = mx.power(
-        mx.array(2.0, dtype=mx.float32),
-        mx.ceil(mx.log2(amax / 448.0)),
-    )
-    result = (_round_e4m3fn(blocks / scale) * scale).reshape(
+    scale, inverse_scale = _ceil_power_of_two_scale(amax / 448.0)
+    result = (_round_e4m3fn(blocks * inverse_scale) * scale).reshape(
         *shape[:-1], -1
     )[..., :width]
     return result.astype(x.dtype)
@@ -492,11 +499,8 @@ def fp4_act_quant_sim(x: mx.array, block_size: int = 32) -> mx.array:
         mx.max(mx.abs(blocks), axis=-1, keepdims=True),
         6.0 * (2.0**-126),
     )
-    scale = mx.power(
-        mx.array(2.0, dtype=mx.float32),
-        mx.ceil(mx.log2(amax / 6.0)),
-    )
-    result = (_round_e2m1fn(blocks / scale) * scale).reshape(
+    scale, inverse_scale = _ceil_power_of_two_scale(amax / 6.0)
+    result = (_round_e2m1fn(blocks * inverse_scale) * scale).reshape(
         *shape[:-1], -1
     )[..., :width]
     return result.astype(x.dtype)
@@ -587,7 +591,7 @@ def _make_e4m3_kv_activation_roundtrip_kernel():
                 const float candidate = exponent == 0
                     ? float(mantissa) * 0.001953125f
                     : (1.0f + float(mantissa) * 0.125f)
-                        * metal::fast::exp2(float(exponent - 7));
+                        * as_type<float>(uint(exponent - 7 + 127) << 23);
                 if (candidate <= absolute) low = middle;
                 else high = middle - 1;
             }
@@ -598,7 +602,7 @@ def _make_e4m3_kv_activation_roundtrip_kernel():
             float best_value = best_exponent == 0
                 ? float(best_mantissa) * 0.001953125f
                 : (1.0f + float(best_mantissa) * 0.125f)
-                    * metal::fast::exp2(float(best_exponent - 7));
+                    * as_type<float>(uint(best_exponent - 7 + 127) << 23);
             if (best < 126) {
                 const int next = best + 1;
                 const int next_exponent = (next >> 3) & 0x0f;
@@ -606,7 +610,7 @@ def _make_e4m3_kv_activation_roundtrip_kernel():
                 const float next_value = next_exponent == 0
                     ? float(next_mantissa) * 0.001953125f
                     : (1.0f + float(next_mantissa) * 0.125f)
-                        * metal::fast::exp2(float(next_exponent - 7));
+                        * as_type<float>(uint(next_exponent - 7 + 127) << 23);
                 const float best_diff = metal::abs(absolute - best_value);
                 const float next_diff = metal::abs(absolute - next_value);
                 if (next_diff < best_diff ||
