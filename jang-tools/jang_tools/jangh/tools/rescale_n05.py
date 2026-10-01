@@ -48,5 +48,6 @@ for n, f in enumerate(shards, 1):
 (D / "model.safetensors.index.json").write_text(json.dumps(idx, indent=1))
 for f in B.iterdir():
     if f.is_file() and not f.name.startswith("model-") and f.name != "model.safetensors.index.json" and not f.name.startswith("."): shutil.copy2(f, D / f.name)
-json.dump(rep, open(D / "scale_correction_report.json", "w"), indent=1)
+with open(D / "scale_correction_report.json", "w") as fh:
+    json.dump(rep, fh, indent=1)
 print(f"DONE modules {len(rep)} clipped rows {sum(v['clipped_rows'] for v in rep.values())} of {sum(v['rows'] for v in rep.values())}, {(time.time()-t0)/60:.1f} min", flush=True)

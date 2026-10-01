@@ -5,7 +5,9 @@ import os
 import json, sys, time, numpy as np, mlx.core as mx
 from jang_tools.jangh.encode import encode, dequant
 from jang_tools.jangh.gptq import gptq_encode
-SRC=os.environ["JANGH_SOURCE"]; wm=json.load(open(f"{SRC}/model.safetensors.index.json"))["weight_map"]
+SRC=os.environ["JANGH_SOURCE"]
+with open(f"{SRC}/model.safetensors.index.json") as fh:
+    wm=json.load(fh)["weight_map"]
 d=mx.load(os.environ["JANGH_DIAG"])
 LIMIT=10.0; SPLIT=3072
 cache={}

@@ -23,12 +23,19 @@ for rel in sorted(local):
         if h.hexdigest() != s.lfs.sha256: bad.append(("sha256", rel))
 extra = sorted(set(hub) - set(local) - {".gitattributes"})
 for n in ("config.json", "jang_config.json", "generation_config.json", "model.safetensors.index.json", "tokenizer_config.json"):
-    remote = json.load(open(hf_hub_download(REPO, n, force_download=True)))
-    if remote != json.load(open(os.path.join(LOCAL, n))): bad.append(("json content", n))
+    with open(hf_hub_download(REPO, n, force_download=True)) as fh:
+        remote = json.load(fh)
+    with open(os.path.join(LOCAL, n)) as fh:
+        if remote != json.load(fh): bad.append(("json content", n))
 for n in ("README.md", "chat_template.jinja"):
-    if open(hf_hub_download(REPO, n, force_download=True)).read() != open(os.path.join(LOCAL, n)).read(): bad.append(("text content", n))
-cfg = json.load(open(hf_hub_download(REPO, "config.json"))); jc = json.load(open(hf_hub_download(REPO, "jang_config.json")))
-idx = json.load(open(hf_hub_download(REPO, "model.safetensors.index.json")))["weight_map"]
+    with open(hf_hub_download(REPO, n, force_download=True)) as remote_fh, open(os.path.join(LOCAL, n)) as local_fh:
+        if remote_fh.read() != local_fh.read(): bad.append(("text content", n))
+with open(hf_hub_download(REPO, "config.json")) as fh:
+    cfg = json.load(fh)
+with open(hf_hub_download(REPO, "jang_config.json")) as fh:
+    jc = json.load(fh)
+with open(hf_hub_download(REPO, "model.safetensors.index.json")) as fh:
+    idx = json.load(fh)["weight_map"]
 shards = sorted(set(idx.values())); hub_shards = sorted(f for f in hub if f.endswith(".safetensors"))
 if shards != hub_shards: bad.append(("hub tensor files != indexed shards", str(set(hub_shards) ^ set(shards))))
 if sum(f.endswith("index.json") for f in hub if "/" not in f) != 1: bad.append(("index count", ""))
