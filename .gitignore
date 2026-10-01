@@ -155,3 +155,17 @@ verify_quant_*.py
 
 # Internal issue/audit reports
 jangtq_*_report.md
+
+# Private working documents and proof receipts
+/docs/plans/
+/docs/runtime/
+/docs/superpowers/
+/reports/
+**/HANDOFF.md
+**/PLAN.md
+**/AUDIT_CHECKLIST.md
+**/INVESTIGATION_LOG.md
+/ralph_runner/PROMPT.md
+
+# Public repository-boundary regression tests
+!.github/tests/test_public_hygiene.py

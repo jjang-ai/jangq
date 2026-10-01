@@ -34,7 +34,7 @@
   `g4_coherence.py` (text-decoder coherence via a `gemma4_text` shim),
   `verify_bundle_integrity.py` (multimodal/tokenizer/audio faithfulness + fp16
   range safety), `validate_dequant.py` (dequant round-trip vs source). Runtime
-  contract: `docs/runtime/2026-06-03-gemma4-12b-unified-runtime-spec.md`.
+  contract for text and multimodal runtime integration.
 
 ## 2.5.33 — 2026-07-22
 
@@ -74,10 +74,7 @@
   loaders, including processor config, Kimi processor code, media utilities,
   tokenizer files, tiktoken model, chat template, and generation config.
 - Added the `jang-convert-kimi-jangtq` console script for PyPI installs.
-- Verified the full Kimi K2.6 JANGTQ_K artifact on `erics-m5-max.local`:
-  `/Users/eric/models/Kimi-K2.6-JANGTQ_K` is the SSH-visible bundle, with a
-  matching external-drive copy visible from this Mac at
-  `/Volumes/EricsLLMDrive 1/JANGQ/Kimi-K2.6-JANGTQ_K`. The artifact has 193
+- Verified the Kimi K2.6 JANGTQ_K artifact with 193
   final shards, `switch_mlp` TQ tensors, zero per-expert TQ keys in the index,
   and routed bits `gate=2`, `up=2`, `down=4`.
 
@@ -336,7 +333,7 @@ the AttributeError.
   - `convert_dsv4_jangtq.py` — convert FP4+FP8 (or BF16-dequant) source to JANG/JANGTQ bundles. Profiles: 2L (2-bit affine), 4 (4-bit affine), JANGTQ2 (2-bit MXTQ codebook + 8-bit attn), JANGTQ4 (4-bit affine routed + 8-bit attn).
   - `mlx_model.py` — full DSV4 runtime with MLA head_dim=512 + mHC + Compressor/Indexer + per-layer RoPE.
   - `mlx_register.py` — registers `deepseek_v4` model_type with mlx_lm.
-  - 13 architecture-specific bug fixes vs naïve port (see `research/DSV-EXHAUSTIVE-VARIABLES-GUIDE.md`).
+  - 13 architecture-specific bug fixes vs naïve port.
 - Native fused Metal kernel for `hc_split_sinkhorn` (mHC Sinkhorn doubly-stochastic normalization). Replaces ~40 MLX ops per call with single GPU dispatch.
 - Coherent generation verified on JANG_2L (107 GB), JANG4 (173 GB), JANGTQ2 (74 GB), JANGTQ4 (173 GB) bundle formats.
 

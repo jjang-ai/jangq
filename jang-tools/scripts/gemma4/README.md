@@ -39,5 +39,4 @@ the 8 full-attention layers), and confirms the norm convention is stored as-is
 .venv/bin/python scripts/gemma4/validate_dequant.py <source_dir> <bundle_dir> <bits>
 ```
 
-See `docs/runtime/2026-06-03-gemma4-12b-unified-runtime-spec.md` for the full
-runtime contract.
+Validate generation in the target runtime after conversion.

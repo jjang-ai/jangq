@@ -1,5 +1,0 @@
-[ralph] sync jang-tools -> macstudio
-COMBO Qwen__Qwen3-0.6B-Base__JANG_4K STARTED
-[ralph] sync ralph_runner -> macstudio (for audit)
-[ralph] audit: cd ~/jang-ralph-workspace/jang && PYTHONPATH=jang-tools:ralph_runner python3 -m ralph_runner.audit --model ~/jang-ralph-workspace/out/Qwen__Qwen3-0.6B-Base__JANG_4K --convert-wall-s 3.109 --json
-COMBO Qwen__Qwen3-0.6B-Base__JANG_4K GREEN wall=3.1s audit=pass
