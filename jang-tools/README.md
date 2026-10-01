@@ -415,3 +415,13 @@ pip install "jang[mlx]>=2.5.18"
 ---
 
 <p align="center">장진호 제작 · Created by Jinho Jang — <a href="https://jangq.ai">jangq.ai</a></p>
+
+## JANGH pipelines
+
+GLM-5.3-Flash and Naive-N0.5 JANGH conversion, evaluation, and kernel modules
+are available through `python -m jang_tools.jangh.<family>.<module>`. Install
+`jang[jangh]` on Apple Silicon for their dependencies. See the
+[JANGH guide](jang_tools/jangh/README.md) for input artifacts, native module
+commands, and model-validation requirements. These commands are separate
+from `jang convert`; packaging the scripts is not a claim of newly validated
+quantization quality or downstream serving support.

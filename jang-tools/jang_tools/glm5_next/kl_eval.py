@@ -1,6 +1,6 @@
 """KL evaluation for glm5_next bundles against the pod FP8 reference.
 
-Reference: klref.safetensors from the RunPod capture — per prompt i:
+Reference: klref.safetensors from the reference capture — per prompt i:
   p{i}.input_ids [S], p{i}.top_ids [S,128], p{i}.top_logprobs [S,128]
 (teacher-forced, positions predict token t+1, reference_precision=FP8).
 
