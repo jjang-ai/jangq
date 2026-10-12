@@ -254,7 +254,7 @@ tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
 auto ct_a = op.template get_left_input_cooperative_tensor<half, half, float>();
 auto ct_b = op.template get_right_input_cooperative_tensor<half, half, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+    decltype(op.template get_left_input_cooperative_tensor<half, half, float>()), decltype(op.template get_right_input_cooperative_tensor<half, half, float>()), float>();
 
 JangTQFrag16::vec8<half> fa;
 JangTQFrag16::vec8<half> fb;
@@ -365,7 +365,7 @@ tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
 auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_b = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+    decltype(op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), decltype(op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), float>();
 
 for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
 
@@ -495,7 +495,7 @@ tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
 auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_b = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+    decltype(op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), decltype(op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), float>();
 
 for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
 
@@ -612,7 +612,7 @@ tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
 auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_b = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_c = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_b), float>();
+    decltype(op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), decltype(op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), float>();
 
 for (short i = 0; i < ct_c.get_capacity(); i++) ct_c[i] = 0.0f;
 
@@ -823,9 +823,9 @@ auto ct_a = op.template get_left_input_cooperative_tensor<{activation_type}, {we
 auto ct_bg = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_bu = op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>();
 auto ct_cg = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_bg), float>();
+    decltype(op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), decltype(op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), float>();
 auto ct_cu = op.template get_destination_cooperative_tensor<
-    decltype(ct_a), decltype(ct_bu), float>();
+    decltype(op.template get_left_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), decltype(op.template get_right_input_cooperative_tensor<{activation_type}, {weight_type}, float>()), float>();
 
 for (short i = 0; i < ct_cg.get_capacity(); i++) {{
   ct_cg[i] = 0.0f;
