@@ -425,3 +425,16 @@ are available through `python -m jang_tools.jangh.<family>.<module>`. Install
 commands, and model-validation requirements. These commands are separate
 from `jang convert`; packaging the scripts is not a claim of newly validated
 quantization quality or downstream serving support.
+
+## JANGT pipeline
+
+Trellis-coded (JANGT) expert encoding, error curves, byte-budget allocation, streamed evaluation and mixed
+JANGT/JANGH bundle assembly for Naive-N0.5-Flash are available through `python -m jang_tools.jangt.<module>`
+(same `jang[jangh]` dependencies). See the [JANGT guide](jang_tools/jangt/README.md). No released runtime loads
+JANGT bundles yet.
+
+## mflux image quantization
+
+Qwen-Image-2.1, Qwen-Image-2.1-Turbo and Ideogram 4 mflux bundle builders live in `jang_tools.mflux_image`; they
+need `mflux` installed. See the [image guide](jang_tools/mflux_image/README.md), including the mflux scheduler patch
+Turbo generation needs.

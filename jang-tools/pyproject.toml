@@ -68,6 +68,8 @@ include = ["jang_tools*"]
 [tool.setuptools.package-data]
 jang_tools = ["templates/*.jinja"]
 "jang_tools.jangh" = ["README.md"]
+"jang_tools.jangt" = ["README.md"]
+"jang_tools.mflux_image" = ["README.md", "patches/*.patch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "jang_tools/dsv4/tests"]
