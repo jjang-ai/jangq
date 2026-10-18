@@ -1,3 +1,7 @@
+## 2.5.50 — 2026-10-18
+
+- Include the Nemotron-3.5 Bolt and Super-VL vision runtime in published packages. This provides the C-RADIO tower, mixed-affine projector loading, and Super-VL final vision normalization required by compatible vMLX releases.
+
 ## 2.5.44 — 2026-08-07
 
 - Documentation-only: rewrote kernel/cache docstrings and comments to be
