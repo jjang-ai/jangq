@@ -17,10 +17,18 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-mx.set_default_device(mx.cpu)
 
 from jang_tools.dsv4_1.mlx_model import DeepseekV41Cache, _SeqState, clone_cache_list  # noqa: E402
 
+
+
+@pytest.fixture(autouse=True)
+def _cpu_only():
+    """CPU only (another process owns the GPU); restore the previous default afterwards."""
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    yield
+    mx.set_default_device(prev)
 
 def _bits(a):
     a = mx.array(a)
