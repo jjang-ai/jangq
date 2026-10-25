@@ -211,3 +211,24 @@ def test_prefix_hit_reseeds_draft_window_from_snapshot_tail(tail_end_offset, exp
     sess.dspark_tail = (mx.zeros((1, 8, 4)), 42 + tail_end_offset)
     r.prefill([7, 8, 9], session=sess)
     assert (ds.reseeded == [list(range(42, 50))]) is expect
+
+
+class LookaheadBackbone(FakeBackbone):
+    def __init__(self, clock):
+        super().__init__(clock)
+        self.calls = []
+
+    def forward(self, ids, sess, all_logits=False, return_hidden=False, engram_lookahead=None):
+        self.calls.append((list(ids), engram_lookahead))
+        return super().forward(ids, sess, all_logits=all_logits, return_hidden=return_hidden)
+
+
+def test_chunked_prefill_passes_next_chunk_as_engram_lookahead():
+    clock = Clock()
+    m = LookaheadBackbone(clock)
+    r = DSparkRunner(m, FakeDraft(clock, lambda pos: 1.0), adaptive=True, clock=clock)
+    prompt = list(range(1, 12))  # body = 10 tokens in chunks of 4, then the last token
+    r.prefill(prompt, chunk_size=4)
+    fed = [c[0] for c in m.calls]
+    assert fed == [prompt[0:4], prompt[4:8], prompt[8:10], prompt[10:11]]
+    assert [c[1] for c in m.calls] == [fed[1], fed[2], fed[3], None]

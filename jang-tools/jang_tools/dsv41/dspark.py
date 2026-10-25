@@ -463,6 +463,17 @@ def load_dspark(source_dir, args, embed, head):
 
 
 # --------------------------------------------------------------------------- accept/reject loop
+def _accepts_lookahead(m) -> bool:
+    """True if the backbone's forward takes ``engram_lookahead`` (DSV41 does; test fakes may not)."""
+    import inspect
+
+    try:
+        params = inspect.signature(m.forward).parameters
+    except (TypeError, ValueError):
+        return False
+    return "engram_lookahead" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 def _session_arrays(sess):
     """Every live cache array of a runtime Session / engine _SeqState (for a per-chunk eval)."""
     out = []
@@ -631,13 +642,17 @@ class DSparkRunner:
         p = start
         for i in range(0, len(body), step):
             piece = body[i:i + step]
+            # The next forward's tokens (the next chunk, or the final prompt token): its Engram rows
+            # are read from SSD while this chunk computes (DSV41.forward engram_lookahead).
+            nxt = body[i + step:i + 2 * step] or ids[-1:]
+            kw = {"engram_lookahead": nxt} if _accepts_lookahead(m) else {}
             if p + len(piece) > seed_from:
-                logits, mh = m.forward(piece, sess, all_logits=False, return_hidden=True)
+                logits, mh = m.forward(piece, sess, all_logits=False, return_hidden=True, **kw)
                 lo = max(0, seed_from - p)
                 ds.seed_windows(mh[None, lo:], range(p + lo, p + len(piece)))
                 mx.eval(logits, _session_arrays(sess), [st.attn.window.buf for st in ds.stages])
             else:
-                logits = m.forward(piece, sess, all_logits=False)
+                logits = m.forward(piece, sess, all_logits=False, **kw)
                 mx.eval(logits, _session_arrays(sess))
             p += len(piece)
             if clear_cache and hasattr(mx, "clear_cache"):
