@@ -8,8 +8,13 @@ engine's V4.1 SingleBatchGenerator spec-decode path and (b) vmlx-swift
 
 ## M1 — DSpark speculative decode loop (`dspark.py::DSparkRunner.generate`)
 
-Output is **token-identical to plain greedy**: `emit` is composed only of backbone verify-forward
-argmaxes, so the draft changes the *acceptance rate* (the speedup), never the tokens.
+Output is **greedy by construction**: `emit` is composed only of backbone verify-forward argmaxes,
+so the draft changes the *acceptance rate* (the speedup), not the decision rule. It is identical to
+single-token AR **except at near-ties**: a W+1-row verify forward (and a chunked prefill) computes
+bf16 hidden states that differ in the last bits from a 1-row decode, which can flip a top-2 whose
+margin is below ~0.05. Measured (256 tokens, fp32 logits): structured identical; code / code2 /
+prose first diverge at AR margins 0.0056 / 0.0045 / 0.040. With bf16 logits the top-2 tied exactly
+every ~50-100 tokens, so the head now produces fp32 logits as the reference does.
 
 State: `c` = frontier (last position whose hidden is committed to the draft windows); `pending` =
 backbone logits predicting position `c+1`. Per step:
@@ -39,7 +44,7 @@ scales with rows — so eliminating the second (commit) forward on fully-accepte
 
 **Measured (n=80, adaptive, WITH fast path):** code **1.88× / 55.7 t/s**, structured **2.00× / 57.1**,
 low_accept **1.93× / 50.1**, prose 1.04× / 31.5. MIN 1.04× (never-below-AR PASS). Output
-token-identical to greedy on code (59/59) and structured (29/29). = parity with antirez `ds4.c`
+identical to greedy on code (59/59) and structured (29/29) over those short runs (see the near-tie note in M1). = parity with antirez `ds4.c`
 56.8 t/s serial.
 
 ## M2 — Adaptive never-below-AR (`DSparkRunner(adaptive=True)`)
@@ -57,7 +62,7 @@ token-identical to greedy on code (59/59) and structured (29/29). = parity with 
   grows with context). Neither mode is terminal. Synthetic-timing test:
   `jang-tools/tests/dsv41_dspark_governor_test.py` (low acceptance stays within a few % of AR,
   high acceptance beats it, acceptance returning mid-stream recovers within one probe period).
-- **Verified (`scratchpad/verify_dspark_adaptive.py`):** output is **token-identical** to plain greedy
+- **Verified (`tests/verify_dspark_adaptive.py`):** output matches plain greedy (up to near-ties, M1)
   AR, and on a low-accept→easy prompt drafting re-engages (accepted > 0), proving recovery.
 - Swift parity: the vmlx-swift port should mirror this recoverable mode (no permanent latch).
 
@@ -103,7 +108,7 @@ V4.1 DSpark speculative decode is wired into the engine serving path and verifie
   `DSV41DSparkGenerator` iff `model._dspark` is attached — so the default AR path is never affected.
 - **Verified live** (`vmlx serve`, warmed, thinking-off code request): coherent output, `finish=stop`,
   **decode-only ~65.9 tok/s vs AR ~31** (2x+); generator selection confirmed in logs; output
-  token-identical to greedy by construction.
+  greedy by construction (identical except at near-ties, M1).
 - Note: the engine's older `vmlx_engine/dspark/` (drafter/generate/session) is Qwen3/MiniCPM DSpark,
   unrelated to V4.1. Future: the engine's `DeepseekV41Cache` exposes `trim`, so a later version can do
   M1-step-7 no-refeed for *partial* accept too (the standalone runtime skips it).

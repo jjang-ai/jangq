@@ -931,7 +931,10 @@ class Model(nn.Module):
             last = mx.array([sg.lo + sg.n - 1 for sg in segs])
             h, pre_mix = h[:, last], pre_mix[:, last]
         h = Block.hc_pre(h, pre_mix)
-        logits = self.head(self.norm(h)).astype(mx.float32)[0]
+        # fp32 head input -> fp32 logits, as the reference (F.linear(x.float(), weight)). In bf16 the
+        # top-2 logits tie exactly every ~50-100 tokens, and a batched verify forward breaks those
+        # ties differently from single-token decode, so DSpark drifted from greedy AR.
+        logits = self.head(self.norm(h).astype(mx.float32))[0]
         if return_hidden:
             main_hidden = mx.concatenate(main_hiddens, axis=-1) if main_hiddens else None
             return logits, main_hidden
