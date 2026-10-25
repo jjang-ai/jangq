@@ -376,11 +376,18 @@ class DSparkRunner:
     plus a re-feed of exactly the accepted tokens -- correct regardless of the backbone cache's
     internal compression."""
 
-    def __init__(self, dsv41, dspark, width=None, conf_gate=None):
+    def __init__(self, dsv41, dspark, width=None, conf_gate=None,
+                 adaptive=False, min_accept=0.4, probe_every=8):
         self.m = dsv41
         self.ds = dspark
         self.width = width or dspark.bs
         self.conf_gate = conf_gate  # if set, truncate the proposed block where confidence drops below it
+        # Adaptive width floors throughput at plain AR: track an acceptance EMA, shrink the draft
+        # width as it falls, and fall back to pure-AR steps (no draft/verify overhead) when accept
+        # stays below ``min_accept``, re-probing every ``probe_every`` AR steps. Guarantees spec >= AR.
+        self.adaptive = adaptive
+        self.min_accept = min_accept
+        self.probe_every = probe_every
 
     def _greedy(self, logits):
         return int(mx.argmax(logits))
@@ -397,11 +404,24 @@ class DSparkRunner:
         pending = logits             # backbone logits predicting position c+1
         out, n_steps, n_drafted, n_accepted = [], 0, 0, 0
         eos_ids = set(int(e) for e in eos_ids)
+        accept_ema, ar_streak = 1.0, 0            # adaptive state (EMA starts high so drafting begins)
         while len(out) < max_new:
             n_steps += 1
             p0 = self._greedy(pending)                 # backbone truth for c+1 (free)
+            # Adaptive: skip speculation (pure-AR step) when acceptance has stayed low, re-probing
+            # periodically. A pure-AR step forwards only the known p0 -> AR speed, no wasted draft.
+            if self.adaptive and accept_ema < self.min_accept and ar_streak < self.probe_every:
+                flog, fmh = m.forward([p0], sess, all_logits=True, return_hidden=True)
+                ds.seed_windows(fmh[None], range(c + 1, c + 2))
+                c += 1; pending = flog[-1]; out.append(p0); ar_streak += 1
+                if eos_ids and p0 in eos_ids:
+                    break
+                continue
+            ar_streak = 0
             draft_ids, conf = self.ds.draft(p0, c)     # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
             W = self.width                             # number of draft tokens to verify (1..bs)
+            if self.adaptive:                          # shrink width as acceptance falls
+                W = max(1, min(self.width, round(self.width * accept_ema)))
             if self.conf_gate is not None:
                 cg = (conf >= self.conf_gate).tolist()
                 W = 1
@@ -419,6 +439,7 @@ class DSparkRunner:
                 else:
                     break
             n_accepted += k
+            accept_ema = 0.7 * accept_ema + 0.3 * (k / max(1, W))  # update rolling acceptance
             emit = [p0] + draft_ids[1 : 1 + k] + [truth[k]]  # all backbone-greedy truth, c+1..c+k+2
             sess.restore(ck)                            # undo the W+1-token verify
             flog, fmh = m.forward(emit, sess, all_logits=True, return_hidden=True)  # commit exactly `emit`
