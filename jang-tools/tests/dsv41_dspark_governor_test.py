@@ -189,3 +189,25 @@ def test_markov_chain_matches_reference_loop():
     got, me = markov_chain(logits, emb, head.astype(mx.float32).T, 11)
     assert [11] + got.tolist() == out
     assert np.array_equal(np.array(me), np.array(mx.stack(mes)))
+
+
+class SeedRecordingDraft(FakeDraft):
+    def __init__(self, clock):
+        super().__init__(clock, lambda pos: 1.0)
+        self.reseeded = []
+
+    def seed_from_main_x(self, main_x, positions):
+        self.reseeded.append(list(positions))
+
+
+@pytest.mark.parametrize("tail_end_offset,expect", [(0, True), (-1, False)])
+def test_prefix_hit_reseeds_draft_window_from_snapshot_tail(tail_end_offset, expect):
+    clock = Clock()
+    m = FakeBackbone(clock)
+    ds = SeedRecordingDraft(clock)
+    r = DSparkRunner(m, ds, adaptive=True, clock=clock)
+    sess = Sess()
+    sess.pos = 50  # restored prefix
+    sess.dspark_tail = (mx.zeros((1, 8, 4)), 42 + tail_end_offset)
+    r.prefill([7, 8, 9], session=sess)
+    assert (ds.reseeded == [list(range(42, 50))]) is expect

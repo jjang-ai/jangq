@@ -284,16 +284,37 @@ class DSpark(nn.Module):
             main_hidden = main_hidden[:, -win:]
             positions = positions[-win:]
         main_x = self.stages[0].main_norm(self.stages[0].main_proj(main_hidden))  # [1,S,d]
+        self.seed_from_main_x(main_x, positions)
+
+    def seed_from_main_x(self, main_x, positions):
+        """Seed every stage window from already-projected main hidden rows main_x [1,S,d] (bf16) at
+        ``positions`` (consecutive). Also keeps the last ``win`` rows (``main_tail``) so a prompt-
+        boundary snapshot can carry them and a prefix hit resumes with full draft windows."""
+        positions = [int(p) for p in positions]
         pos = mx.array(np.asarray(positions, np.int64))
         for st in self.stages:
             st.attn.seed(main_x, pos)
+        tail = getattr(self, "_main_tail", None)
+        if tail is None or not positions or tail[1] != positions[0]:
+            tail = (BoundedWindow(self.stages[0].attn.win), positions[0] if positions else 0)
+            object.__setattr__(self, "_main_tail", tail)
+        tail[0].append(main_x.astype(mx.bfloat16))
+        object.__setattr__(self, "_main_tail", (tail[0], positions[-1] + 1 if positions else tail[1]))
         # Submit without a host sync: the windows are next read by draft(), which evaluates them; a
         # blocking eval here cost one GPU round-trip per committed step (AR mode most of all).
-        mx.async_eval([st.attn.window.buf for st in self.stages])
+        mx.async_eval([st.attn.window.buf for st in self.stages] + [self._main_tail[0].buf])
+
+    def main_tail(self):
+        """(main_x [1,<=win,d] bf16, first_position) of the last committed positions, or None."""
+        tail = getattr(self, "_main_tail", None)
+        if tail is None or tail[0].buf is None:
+            return None
+        return tail[0].buf, int(tail[1]) - int(tail[0].n)
 
     def reset_windows(self):
         for st in self.stages:
             st.attn.window = BoundedWindow(st.attn.win)
+        object.__setattr__(self, "_main_tail", None)
 
     def window_checkpoint(self):
         return [(st.attn.window.buf, st.attn.window.n) for st in self.stages]
@@ -591,6 +612,14 @@ class DSparkRunner:
         sess = session if session is not None else m.new_session()
         ds.reset_windows()
         start = int(getattr(sess, "pos", 0) or 0)  # absolute position of the (possibly restored) cache
+        # Prefix hit: a DSpark-produced boundary snapshot carries the projected main hidden of its last
+        # `win` positions; reseed the draft windows from it so drafting after a hit sees a full window
+        # instead of only the uncached tail. Used only when it ends exactly at the restored position.
+        dtail = getattr(sess, "dspark_tail", None)
+        if dtail is not None and start > 0:
+            tail_x, tail_p0 = dtail
+            if tail_x is not None and int(tail_p0) + int(tail_x.shape[1]) == start:
+                ds.seed_from_main_x(tail_x, range(int(tail_p0), start))
         ids = [int(t) for t in prompt_ids]
         if not ids:
             raise ValueError("DSparkRunner.prefill needs at least one prompt token")

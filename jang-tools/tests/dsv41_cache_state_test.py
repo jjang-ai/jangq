@@ -166,3 +166,16 @@ def test_trim_is_refused():
     assert c.is_trimmable() is False
     assert c.trim(10) == 0
     assert _state_bytes(c) == before and int(c.offset) == 512
+
+
+def test_dspark_tail_round_trips_and_clone_keeps_it_only_at_the_boundary():
+    src = _make(700)
+    tail_x = mx.array(np.random.default_rng(5).standard_normal((1, 128, 64)).astype(np.float32)).astype(mx.bfloat16)
+    src[0]._seq.dspark_tail = (tail_x, 700 - 128)
+    rest = [DeepseekV41Cache.from_state(c.state, c.meta_state) for c in src]
+    got = rest[0]._seq.dspark_tail
+    assert got is not None and got[1] == 572 and np.array_equal(_bits(got[0]), _bits(tail_x))
+    assert rest[1]._seq.dspark_tail is None  # layer 0 only
+    assert clone_cache_list(src)[0]._seq.dspark_tail is not None
+    src[0]._seq.pos = 701  # tail no longer ends at the boundary -> stale, dropped by the clone
+    assert clone_cache_list(src)[0]._seq.dspark_tail is None

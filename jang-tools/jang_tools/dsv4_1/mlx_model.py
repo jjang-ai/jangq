@@ -71,6 +71,10 @@ class _SeqState:
         self.caches: list = []
         self.history = np.zeros(0, np.int64)
         self.pos = 0
+        # (main_x [1, <=win, d] bf16, first_position): the dSpark draft-window seed of the last
+        # committed positions, recorded on DSpark prompt-boundary snapshots so a prefix hit can
+        # resume drafting with a full window (jang_tools.dsv41.dspark.DSparkRunner.prefill).
+        self.dspark_tail = None
 
     def checkpoint(self):
         """O(1) ref snapshot for DSpark speculative verification (mirrors runtime Session.checkpoint,
@@ -106,6 +110,8 @@ def _relink(cache: list) -> "_SeqState":
                 canon.pos = s.pos
             if s.history.size:
                 canon.history = s.history
+            if getattr(s, "dspark_tail", None) is not None:
+                canon.dspark_tail = s.dspark_tail
             c._seq = canon
     canon.caches = list(cache)
     return canon
@@ -215,6 +221,8 @@ class DeepseekV41Cache:
             out.append(("pend_score", self.pend_score))
         if self._idx == 0 and self._seq.history.size:
             out.append(("hist", mx.array(self._seq.history.astype(np.int32))))
+        if self._idx == 0 and getattr(self._seq, "dspark_tail", None) is not None:
+            out.append(("dsp_x", self._seq.dspark_tail[0]))
         return out
 
     @property
@@ -241,6 +249,8 @@ class DeepseekV41Cache:
             "ck_n": int(self.compress_kv.n), "ik_n": int(self.index_k.n),
             "ck_D": self.compress_kv.D, "ik_D": self.index_k.D,
             "pos": int(self._seq.pos),
+            "dsp_p0": (int(self._seq.dspark_tail[1])
+                       if self._idx == 0 and getattr(self._seq, "dspark_tail", None) is not None else None),
         })
 
     @meta_state.setter
@@ -290,6 +300,8 @@ class DeepseekV41Cache:
             hist = arrs.get("hist")
             self._seq.history = (np.asarray(hist).astype(np.int64) if hist is not None
                                  else np.zeros(0, np.int64))
+            dsp = arrs.get("dsp_x")
+            self._seq.dspark_tail = (dsp, int(meta["dsp_p0"])) if dsp is not None else None
 
     @classmethod
     def from_state(cls, state, meta_state):
@@ -333,6 +345,10 @@ def clone_cache_list(cache: list) -> list:
     seq = _SeqState()
     seq.pos = int(src_seq.pos)
     seq.history = src_seq.history.copy()
+    tail = getattr(src_seq, "dspark_tail", None)
+    # only a tail that ends exactly at this boundary is meaningful (a restored one goes stale)
+    if tail is not None and tail[0] is not None and int(tail[1]) + int(tail[0].shape[1]) == seq.pos:
+        seq.dspark_tail = (mx.array(tail[0]), int(tail[1]))
     out = []
     for c in cache:
         cl = DeepseekV41Cache(seq, c._idx, c._ratio)
