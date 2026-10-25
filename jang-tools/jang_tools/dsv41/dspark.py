@@ -392,31 +392,40 @@ class DSparkRunner:
     def _greedy(self, logits):
         return int(mx.argmax(logits))
 
-    def generate(self, prompt_ids, max_new, eos_ids=(), verbose=False):
+    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None):
+        """Greedy speculative decode as a GENERATOR: yields committed backbone-greedy tokens one at a
+        time (so a server can stream and check stops between/within accepted blocks). The yielded
+        sequence is identical to ``generate()['tokens']``. Owns its own runtime ``Session`` +
+        checkpoint/restore, so it is independent of any engine cache. If ``stats`` (dict) is passed it
+        is filled with steps/drafted/accepted/emitted. This is the method the engine's V4.1 spec-decode
+        generator drives (see DECODE_DSPARK_METHODS.md M1)."""
         m, ds = self.m, self.ds
         sess = m.new_session()
         ds.reset_windows()
-        t0 = time.time()
         logits, mh = m.forward(list(prompt_ids), sess, all_logits=False, return_hidden=True)
         P = len(prompt_ids)
         ds.seed_windows(mh[None], range(P))  # windows hold [0..c], c = P-1
         c = P - 1                    # frontier: last position whose hidden is in the windows
         pending = logits             # backbone logits predicting position c+1
-        out, n_steps, n_drafted, n_accepted = [], 0, 0, 0
+        n_emitted = n_steps = n_drafted = n_accepted = 0
         eos_ids = set(int(e) for e in eos_ids)
         accept_ema, zero_streak, ar_latched = 1.0, 0, False   # adaptive state
-        while len(out) < max_new:
+
+        def _rec():
+            if stats is not None:
+                stats.update(steps=n_steps, drafted=n_drafted, accepted=n_accepted, emitted=n_emitted)
+
+        while n_emitted < max_new:
             n_steps += 1
             p0 = self._greedy(pending)                 # backbone truth for c+1 (free)
-            # Latched pure-AR: once acceptance has collapsed (>=latch_after zero-accept drafts),
-            # run BARE greedy (no draft, no hidden, no window upkeep) for the rest -> byte-for-byte
-            # AR cost. Guarantees spec throughput cannot fall below AR on sustained low-accept
-            # content; the short detection transient amortizes to ~0 on realistic generations.
             if self.adaptive and ar_latched:
+                # Latched pure-AR: after >=latch_after zero-accept drafts, run BARE greedy for the
+                # rest -> byte-for-byte AR cost, so spec throughput cannot fall below AR.
                 pending = m.forward([p0], sess, all_logits=False)
-                c += 1; out.append(p0)
-                if eos_ids and p0 in eos_ids:
-                    break
+                c += 1
+                yield p0; n_emitted += 1
+                if (eos_ids and p0 in eos_ids) or n_emitted >= max_new:
+                    _rec(); return
                 continue
             draft_ids, conf = self.ds.draft(p0, c)     # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
             W = self.width                             # number of draft tokens to verify (1..bs)
@@ -445,37 +454,39 @@ class DSparkRunner:
                 if zero_streak >= self.latch_after:
                     ar_latched = True
             if k == W:
-                # whole block accepted: the verify forward already wrote exactly-correct causal KV
-                # for every position (no rejected tail to undo), so skip the restore+refeed commit
-                # forward entirely -> 1 backbone forward this step instead of 2. truth[W] (the free
-                # bonus token) becomes the next step's p0 via pending=vlog[W].
+                # whole block accepted: the verify forward already wrote exactly-correct causal KV for
+                # every position (no rejected tail to undo), so skip the restore+refeed commit forward
+                # -> 1 backbone forward this step. truth[W] (the free bonus) becomes the next p0.
                 emit = [p0] + draft_ids[1 : 1 + W]      # W+1 accepted tokens; bonus deferred to next p0
                 ds.seed_windows(vmh[None], range(c + 1, c + 1 + len(emit)))
                 c += len(emit)
                 pending = vlog[W]                       # predicts c+1 (== truth[W], next step's p0)
-                out.extend(emit)
-                if eos_ids and any(t in eos_ids for t in emit):
-                    out = out[: next(i for i, t in enumerate(out) if t in eos_ids) + 1]
-                    break
-                continue
-            emit = [p0] + draft_ids[1 : 1 + k] + [truth[k]]  # all backbone-greedy truth, c+1..c+k+2
-            sess.restore(ck)                            # undo the W+1-token verify (rejected tail present)
-            flog, fmh = m.forward(emit, sess, all_logits=True, return_hidden=True)  # commit exactly `emit`
-            ds.seed_windows(fmh[None], range(c + 1, c + 1 + len(emit)))  # windows now hold [0..c+len(emit)]
-            c += len(emit)
-            pending = flog[-1]                          # predicts c+1 again
-            out.extend(emit)
-            if eos_ids and any(t in eos_ids for t in emit):
-                out = out[: next(i for i, t in enumerate(out) if t in eos_ids) + 1]
-                break
+            else:
+                emit = [p0] + draft_ids[1 : 1 + k] + [truth[k]]  # all backbone-greedy truth, c+1..c+k+2
+                sess.restore(ck)                        # undo the W+1-token verify (rejected tail present)
+                flog, fmh = m.forward(emit, sess, all_logits=True, return_hidden=True)  # commit exactly emit
+                ds.seed_windows(fmh[None], range(c + 1, c + 1 + len(emit)))
+                c += len(emit)
+                pending = flog[-1]                      # predicts c+1 again
+            for t in emit:
+                yield t; n_emitted += 1
+                if (eos_ids and t in eos_ids) or n_emitted >= max_new:
+                    _rec(); return
+        _rec()
+
+    def generate(self, prompt_ids, max_new, eos_ids=(), verbose=False):
+        """Batch convenience wrapper over stream(): collect all tokens + report acceptance/speedup."""
+        stats = {}
+        t0 = time.time()
+        out = list(self.stream(prompt_ids, max_new, eos_ids, stats))
         dt = time.time() - t0
         return {
-            "tokens": out[:max_new],
-            "steps": n_steps,
-            "drafted": n_drafted,
-            "accepted": n_accepted,
-            "accept_rate": n_accepted / max(1, n_drafted),
-            "mean_emit": len(out) / max(1, n_steps),
+            "tokens": out,
+            "steps": stats.get("steps", 0),
+            "drafted": stats.get("drafted", 0),
+            "accepted": stats.get("accepted", 0),
+            "accept_rate": stats.get("accepted", 0) / max(1, stats.get("drafted", 0)),
+            "mean_emit": len(out) / max(1, stats.get("steps", 1)),
             "seconds": dt,
             "tok_per_s": len(out) / dt if dt else 0.0,
         }
