@@ -33,14 +33,21 @@ backbone logits predicting position `c+1`. Per step:
    exactly-correct *causal* KV for every accepted position (no rejected tail to undo), so **do not
    restore+refeed**. Keep the verify cache: `seed_windows(vmh, c+1..c+1+W)`; `c += W+1`;
    `pending = vlog[W]`; `emit = [p0,d1..dW]`. `truth[W]` becomes the next step's `p0`. → **1 forward/step.**
-7. **PARTIAL ACCEPT — `k < W`:** `emit = [p0, d1..dk, truth[k]]`; `restore(ck)`;
-   `flog, fmh = forward(emit)`; `seed_windows(fmh, …)`; `c += len(emit)`; `pending = flog[-1]`.
-   → 2 forwards/step. (Removing this second forward needs exact cross-layer cache trim of the rejected
-   tail; the engine's `DeepseekV41Cache` supports `trim`/rollback, so the engine *can* do no-refeed
-   here too. Low marginal value in the standalone runtime since high-accept content hits the fast path.)
+7. **PARTIAL ACCEPT — `0 < k < W` (in-place commit, 1 forward/step):** the verify forward ran with
+   `capture_verify=True`, so every layer holds references to its per-token cache inputs (post-RoPE
+   window KV; the compressor's `(kv, score)` projections, or the normed latent at ratio 1).
+   `emit = [p0, d1..dk]`; `DSV41.commit_prefix(sess, ck, k+1)` restores the checkpoint and replays only
+   those k+1 tokens' cache updates (window append; compressor pooling → pending tail + completed
+   groups → compressed / index pool rows with the same RoPE positions; history + position);
+   `seed_windows(vmh[:k+1], …)`; `c += k+1`; `pending = vlog[k]`, so `truth[k]` is the next p0.
+   **`k == 0`** keeps the old path: `emit = [p0, truth[0]]`, `restore(ck)`, `forward(emit)` (2 forwards,
+   but cheaper per token than a 1-token step). `VMLX_DSV41_DSPARK_REFEED=1` forces the refeed path for
+   every partial accept (A/B). Measured (256 tokens, chat prompts): code 44.9 → 57.5 tok/s, code2
+   41.3 → 48.7, Rust 50.9 → 59.1, prose unchanged. `tests/test_commit_prefix.py` proves the replay exact
+   (`commit_prefix(W+1)` == the capture forward's own state, bit for bit).
 
 Why it works: a 6-row verify forward ≈ 62 ms ≈ 2× a 1-row decode (32 ms) — the backbone forward
-scales with rows — so eliminating the second (commit) forward on fully-accepted blocks ≈ 2×.
+scales with rows — so eliminating the second (commit) forward ≈ 2× per step, on full and partial accepts alike.
 
 **Measured (n=80, adaptive, WITH fast path):** code **1.88× / 55.7 t/s**, structured **2.00× / 57.1**,
 low_accept **1.93× / 50.1**, prose 1.04× / 31.5. MIN 1.04× (never-below-AR PASS). Output
@@ -98,12 +105,14 @@ building block: the same in-place-indexed fp32-accumulate structure is what a he
 V4.1 DSpark speculative decode is wired into the engine serving path and verified live:
 - **Draft load** (`loaders/load_jangtq_dsv41.py`): `_maybe_load_dsv41_dspark` calls
   `jang_tools.dsv41.dspark.load_dspark(runtime.args, runtime.model.embed, runtime.model.head)` and
-  attaches `model._dspark`. Gated by `VMLX_DSV41_DSPARK` (default OFF).
+  attaches `model._dspark`. Default ON for bundles that ship `dspark/`; `VMLX_DSV41_DSPARK=0` disables.
 - **Generator** (`utils/dsv41_dspark_generator.py::DSV41DSparkGenerator`): subclasses
   `SingleBatchGenerator`; overrides `_start_request`/`_yield_current_and_schedule_next` to drive
   `DSparkRunner.stream()` on `model.runtime` (its own runtime `Session` + checkpoint/restore + the
   no-refeed fast path), yielding one committed token per scheduler step and reusing the inherited
-  finish-reason/Response/stop machinery. Text-only; VL requests fall back to the inherited AR path.
+  finish-reason/Response/stop machinery. Greedy text only: requests with images still to prefill, a
+  non-greedy sampler, logits processors or logprobs take the inherited AR path. A VL prefix-cache hit
+  that covers every image leaves a text-only tail, which DSpark serves.
 - **Selection** (`scheduler.py::_create_batch_generator`): a branch before the SBG fallback returns
   `DSV41DSparkGenerator` iff `model._dspark` is attached — so the default AR path is never affected.
 - **Verified live** (`vmlx serve`, warmed, thinking-off code request): coherent output, `finish=stop`,
