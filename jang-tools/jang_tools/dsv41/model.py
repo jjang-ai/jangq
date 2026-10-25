@@ -180,12 +180,72 @@ class GrowBuffer:
             return None
         return self.buf[:, :n]
 
+    def snapshot(self):
+        return (self.buf, self.n)
+
+    def load(self, s):
+        self.buf, self.n = s
+
+
+class QuantGrowBuffer:
+    """Append-only [1, T, D] buffer whose rows are stored 4-bit (affine, group_size GROUP_SIZE) so the
+    DSA compressed/index pools match the release's FP4 cache footprint (~4x smaller than bf16; a 1M-ctx
+    cache is ~890 MB, not ~3.2 GB). append() quantizes the incoming bf16 rows; view() dequantizes the
+    first n back to bf16 for the attention/indexer read path (the release dequantizes on read too). The
+    transient dequantized view is freed each step; only the 4-bit store is resident."""
+
+    STEP = 2048
+    BITS = 4
+
+    def __init__(self):
+        self.wq = None       # [1, T, D*BITS/32] uint32 packed
+        self.scales = None   # [1, T, D/GROUP_SIZE]
+        self.biases = None
+        self.n = 0
+        self.D = None
+
+    def append(self, x: mx.array):
+        k = x.shape[1]
+        if k == 0:
+            return
+        self.D = x.shape[2]
+        wq, s, b = mx.quantize(x[0].astype(mx.bfloat16), group_size=GROUP_SIZE, bits=self.BITS)
+        wq, s, b = wq[None], s[None], b[None]
+        if self.wq is None or self.n + k > self.wq.shape[1]:
+            cap = ((self.n + k + self.STEP - 1) // self.STEP) * self.STEP
+            nwq = mx.zeros((1, cap, wq.shape[2]), dtype=mx.uint32)
+            ns = mx.zeros((1, cap, s.shape[2]), dtype=s.dtype)
+            nb = mx.zeros((1, cap, b.shape[2]), dtype=b.dtype)
+            if self.wq is not None:
+                nwq[:, : self.n] = self.wq[:, : self.n]
+                ns[:, : self.n] = self.scales[:, : self.n]
+                nb[:, : self.n] = self.biases[:, : self.n]
+            self.wq, self.scales, self.biases = nwq, ns, nb
+        self.wq[:, self.n : self.n + k] = wq
+        self.scales[:, self.n : self.n + k] = s
+        self.biases[:, self.n : self.n + k] = b
+        self.n += k
+
+    def view(self, n=None):
+        n = self.n if n is None else n
+        if self.wq is None or n == 0:
+            return None
+        deq = mx.dequantize(self.wq[0, :n], self.scales[0, :n], self.biases[0, :n],
+                            group_size=GROUP_SIZE, bits=self.BITS)
+        return deq[None]
+
+    def snapshot(self):
+        return (self.wq, self.scales, self.biases, self.n, self.D)
+
+    def load(self, s):
+        self.wq, self.scales, self.biases, self.n, self.D = s
+
 
 class LayerCache:
     def __init__(self):
         self.window = None  # [1, <=win, D] raw post-RoPE KV, oldest first
-        self.compress_kv = GrowBuffer()
-        self.index_k = GrowBuffer()
+        self.compress_kv = QuantGrowBuffer()   # 4-bit resident (FP4-parity footprint)
+        self.index_k = QuantGrowBuffer()       # 4-bit resident
         self.pend_kv = None  # compressor: tokens of the not yet complete group (ratio > 1), fp32
         self.pend_score = None
 
@@ -955,15 +1015,15 @@ class Session:
         self.pos = 0
 
     def checkpoint(self):
-        """O(1) snapshot (refs only) for speculative verification. GrowBuffer.append either grows a
-        fresh buffer or writes past `.n` in place, so saving (buf, n) and restoring both is enough:
-        the bytes below `.n` are never mutated, and the view only ever reads [:n]."""
+        """O(1) snapshot (refs only) for speculative verification. (Quant)GrowBuffer.append either
+        grows a fresh buffer or writes past `.n` in place, so saving each buffer's snapshot() and the
+        window/pend refs is enough: bytes below `.n` are never mutated and view only reads [:n]."""
         caches = []
         for c in self.caches:
             caches.append((
                 c.window,
-                c.compress_kv.buf, c.compress_kv.n,
-                c.index_k.buf, c.index_k.n,
+                c.compress_kv.snapshot(),
+                c.index_k.snapshot(),
                 c.pend_kv, c.pend_score,
             ))
         return (caches, self.history, self.pos)
@@ -972,8 +1032,8 @@ class Session:
         caches, history, pos = ck
         for c, s in zip(self.caches, caches):
             c.window = s[0]
-            c.compress_kv.buf, c.compress_kv.n = s[1], s[2]
-            c.index_k.buf, c.index_k.n = s[3], s[4]
-            c.pend_kv, c.pend_score = s[5], s[6]
+            c.compress_kv.load(s[1])
+            c.index_k.load(s[2])
+            c.pend_kv, c.pend_score = s[3], s[4]
         self.history = history
         self.pos = pos
