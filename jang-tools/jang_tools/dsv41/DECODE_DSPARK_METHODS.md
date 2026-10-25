@@ -47,13 +47,16 @@ token-identical to greedy on code (59/59) and structured (29/29). = parity with 
 - `accept_ema = 0.7*ema + 0.3*(k/W)` each step; draft width `W = clamp(round(self.width * ema), 1,
   self.width)` — depth is **acceptance-governed**, shrinking as acceptance falls AND growing back as
   it recovers, always within the draft head's physical size `bs` (a capacity bound, not a policy depth).
-- **RECOVERABLE low-overhead mode (NOT a permanent latch):** after `latch_after = 2` consecutive
-  zero-accept drafts it ENTERS a bare-greedy mode (one forward/token, but it still keeps the draft
-  windows current via `return_hidden`+`seed_windows`) to avoid paying draft/verify overhead for
-  nothing — then issues one speculative **probe** every `probe_every = 16` emitted tokens and LEAVES
-  the mode the instant a probe accepts (`k ≥ 1`). So a mixed reasoning→code generation recovers
-  speculation automatically instead of losing it after one lull. No hard/fixed MTP depth is ever
-  enforced. (Per Eric 2026-10-25: "never enforce a hard MTP depth"; replaces the old permanent latch.)
+- **Wall-clock governor (replaces the zero-accept streak trigger, 2026-10-25 audit).** Acceptance
+  alone cannot keep speculation at or above AR speed: a step that accepts 1 of 5 drafts resets any
+  zero-accept streak yet still pays draft + verify + commit forwards. `_Governor` keeps an EMA of
+  seconds per emitted token for speculative steps and for AR steps (step start to next step start,
+  every sync included) and speculates only while that is cheaper than AR. AR mode issues a
+  speculative probe every `probe_every = 16` AR tokens (a probe replaces the stale estimate, so one
+  good probe switches back); spec mode re-measures AR every `ar_probe_every = 64` steps (AR cost
+  grows with context). Neither mode is terminal. Synthetic-timing test:
+  `jang-tools/tests/dsv41_dspark_governor_test.py` (low acceptance stays within a few % of AR,
+  high acceptance beats it, acceptance returning mid-stream recovers within one probe period).
 - **Verified (`scratchpad/verify_dspark_adaptive.py`):** output is **token-identical** to plain greedy
   AR, and on a low-accept→easy prompt drafting re-engages (accepted > 0), proving recovery.
 - Swift parity: the vmlx-swift port should mirror this recoverable mode (no permanent latch).

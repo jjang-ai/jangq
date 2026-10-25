@@ -18,8 +18,11 @@ turns drafts into a speedup is built here (`DSparkRunner`).
 
 The draft is loaded at bf16 from the SOURCE model shards (the JANG bundle drops mtp.*), with the
 routed experts quantized to 4-bit in memory so the whole draft is ~8 GB on top of the backbone.
-Verification is exact, so draft precision only moves the acceptance rate (the speedup), never the
-output: speculative decoding here is provably token-identical to plain greedy decode.
+Verification is greedy-exact (a draft is kept only if it equals the backbone's argmax), so draft
+precision only moves the acceptance rate (the speedup). The committed tokens are the backbone's own
+greedy tokens; the one caveat is floating point: the backbone scores a multi-token verify block in a
+differently shaped forward than a one-token decode step, so a near-tie argmax can in principle flip
+relative to plain AR decode.
 """
 
 from __future__ import annotations
@@ -237,6 +240,21 @@ class DSparkStage(nn.Module):
 
 
 # --------------------------------------------------------------------------- dSpark head
+def markov_chain(logits, markov_embed, head_t, seed_tok):
+    """Greedy Markov-biased decode of a drafted block, kept on the device (no per-step host sync).
+    logits [bs, vocab] f32; markov_embed [vocab, rank]; head_t [rank, vocab] f32 (the markov head,
+    cast + transposed once). Returns (drafted ids [bs] int32, markov embeddings [bs, rank] f32), where
+    step i uses the embedding of the previous token (seed_tok for i = 0)."""
+    tok = mx.array([int(seed_tok)], dtype=mx.int32)
+    toks, membeds = [], []
+    for i in range(logits.shape[0]):
+        me = mx.take(markov_embed, tok, axis=0)[0].astype(mx.float32)  # [rank]
+        tok = mx.argmax(logits[i] + me @ head_t, keepdims=True).astype(mx.int32)  # [1]
+        toks.append(tok)
+        membeds.append(me)
+    return mx.concatenate(toks), mx.stack(membeds, axis=0)
+
+
 class DSpark(nn.Module):
     """The 3-stage dSpark draft head. embed/head are the backbone's (shared)."""
 
@@ -302,16 +320,25 @@ class DSpark(nn.Module):
         last = self.stages[-1]
         xc = _hc_pre(x, pre_mix)  # [1,bs,d] (pre-norm; confidence reads this)
         logits = self.head(last.norm(xc)).astype(mx.float32)[0]  # [bs, vocab]
-        out = [int(seed_tok)]
-        membeds = []
-        for i in range(bs):
-            me = last.markov_embed[out[i]].astype(mx.float32)  # [rank]
-            bias = me @ last.markov_head.astype(mx.float32).T  # [vocab]
-            out.append(int(mx.argmax(logits[i] + bias)))
-            membeds.append(me)
-        me = mx.stack(membeds, axis=0)  # [bs, rank]
+        # Markov head, autoregressive over the block. The f32 head is cast ONCE (it was re-cast from
+        # bf16 -- vocab x rank, ~130 MB -- on every one of the bs steps), and the chain stays on the
+        # device: each step's argmax indexes the next embedding without a host round-trip, so the
+        # whole block costs one sync instead of bs.
+        drafted, me = markov_chain(logits, last.markov_embed, self._markov_head_t(), seed_tok)
         conf = (mx.concatenate([xc[0], me], axis=-1) @ last.conf_proj.T)[:, 0]  # [bs]
-        return out, conf
+        mx.eval(drafted, conf)
+        return [int(seed_tok)] + [int(t) for t in drafted.tolist()], conf
+
+    def _markov_head_t(self):
+        last = self.stages[-1]
+        cached = getattr(self, "_markov_head_t_cache", None)
+        if cached is None or cached[0] is not last.markov_head:
+            t = last.markov_head.astype(mx.float32).T
+            mx.eval(t)
+            cached = (last.markov_head, t)
+            # plain attribute, not a Module child (keeps it out of parameters())
+            object.__setattr__(self, "_markov_head_t_cache", cached)
+        return cached[1]
 
 
 # --------------------------------------------------------------------------- loading
@@ -431,32 +458,96 @@ def _session_arrays(sess):
                     out.append(a)
     return out
 
+class _Governor:
+    """Wall-clock AR/speculation governor for DSparkRunner (adaptive mode).
+
+    Tracks an EMA of seconds per EMITTED token for speculative steps and for AR steps, each measured
+    from step start to the next step start (i.e. including every sync, draft, verify and commit
+    forward, and the consumer's time between yields, which is the same per token for both modes).
+
+      - speculate while spec s/token < AR s/token; otherwise take AR steps;
+      - in AR mode, one speculative PROBE every ``probe_every`` AR tokens re-measures speculation
+        (a probe after an AR stretch replaces the stale spec estimate instead of being averaged into
+        it, so one good probe is enough to switch back);
+      - in spec mode, one AR step every ``ar_probe_every`` spec steps re-measures AR (AR cost grows
+        with context length);
+      - an unmeasured AR cost is measured after the first two spec steps.
+    There is no terminal state: both estimates keep being refreshed, so neither mode can latch."""
+
+    def __init__(self, probe_every=16, ar_probe_every=64, alpha=0.3, warmup_spec=2):
+        self.probe_every, self.ar_probe_every = int(probe_every), int(ar_probe_every)
+        self.alpha, self.warmup_spec = float(alpha), int(warmup_spec)
+        self.spec = None          # EMA seconds / emitted token, speculative steps
+        self.ar = None            # EMA seconds / emitted token, AR steps
+        self.ar_mode = False      # currently preferring AR
+        self.since_probe = 0      # AR tokens since the last speculative probe (AR mode)
+        self.since_ar = 0         # spec steps since the last AR measurement (spec mode)
+        self.spec_stale = False   # next spec measurement replaces the estimate
+        self.n_spec = 0
+
+    def _ema(self, old, x, replace=False):
+        return x if (old is None or replace) else (1 - self.alpha) * old + self.alpha * x
+
+    def record(self, mode, seconds, emitted):
+        per = float(seconds) / max(1, int(emitted))
+        if mode == "spec":
+            self.spec = self._ema(self.spec, per, self.spec_stale)
+            self.spec_stale = False
+            self.n_spec += 1
+            self.since_ar += 1
+        else:
+            self.ar = self._ema(self.ar, per)
+            self.since_ar = 0
+            if self.ar_mode:
+                self.since_probe += 1
+        if self.spec is not None and self.ar is not None:
+            slower = self.spec >= self.ar
+            if slower and not self.ar_mode:
+                self.ar_mode, self.since_probe = True, 0
+            elif not slower and self.ar_mode:
+                self.ar_mode = False
+
+    def choose(self) -> str:
+        if self.ar_mode:
+            if self.since_probe >= self.probe_every:
+                self.since_probe = 0
+                self.spec_stale = True
+                return "spec"       # probe
+            return "ar"
+        if self.ar is None and self.n_spec >= self.warmup_spec:
+            return "ar"             # first AR measurement
+        if self.ar is not None and self.since_ar >= self.ar_probe_every:
+            return "ar"             # refresh the AR estimate
+        return "spec"
+
 
 class DSparkRunner:
-    """Speculative greedy decode: output is token-identical to plain greedy, accepting a block of
+    """Speculative greedy decode: output is the backbone's greedy tokens, accepting a block of
     dSpark drafts per backbone verify step. Rollback is checkpoint/restore of the (ref-based) caches
     plus a re-feed of exactly the accepted tokens -- correct regardless of the backbone cache's
     internal compression."""
 
     def __init__(self, dsv41, dspark, width=None, conf_gate=None,
-                 adaptive=False, latch_after=2, probe_every=16):
+                 adaptive=False, latch_after=2, probe_every=16, ar_probe_every=64,
+                 ema_alpha=0.3, clock=time.perf_counter):
         self.m = dsv41
         self.ds = dspark
         self.width = width or dspark.bs
         self.conf_gate = conf_gate  # if set, truncate the proposed block where confidence drops below it
-        # Adaptive drafting is acceptance-governed and RECOVERABLE -- it never enforces a fixed/hard
-        # MTP depth. The draft width each step tracks a rolling acceptance EMA, W = clamp(round(bs *
-        # ema), 1, bs): it shrinks as acceptance falls AND grows back as it recovers, always inside
-        # the draft head's physical size ``bs`` (a model-capacity bound, not a policy depth). On
-        # sustained zero-accept content it drops into a low-overhead AR mode (bare greedy, one
-        # forward) to avoid paying draft/verify overhead for nothing -- but that mode is NOT a
-        # permanent latch: it keeps the draft windows current and issues one speculative PROBE every
-        # ``probe_every`` emitted tokens, leaving AR mode the instant a probe accepts, so throughput
-        # recovers automatically the moment the content becomes predictable again. ``latch_after``
-        # consecutive zero-accept drafts is the trigger to ENTER (not lock) AR mode.
+        # Adaptive mode = a WALL-CLOCK governor plus acceptance-tracked width; never a fixed depth and
+        # never a permanent latch (see _Governor). Width W = clamp(round(bs * accept_ema), 1, bs)
+        # shrinks AND grows with acceptance inside the draft head's physical size ``bs``. Whether a
+        # step speculates at all is decided by measured seconds per emitted token: speculation runs
+        # only while it is faster than the measured AR step; otherwise AR steps, with a speculative
+        # probe every ``probe_every`` AR tokens and an AR re-measure every ``ar_probe_every`` spec
+        # steps (AR cost grows with context, so it is never measured once and trusted forever).
+        # ``latch_after`` is kept for API compatibility and no longer used.
         self.adaptive = adaptive
         self.latch_after = latch_after
         self.probe_every = max(1, int(probe_every))
+        self.ar_probe_every = max(1, int(ar_probe_every))
+        self.ema_alpha = float(ema_alpha)
+        self.clock = clock
 
     def _greedy(self, logits):
         return int(mx.argmax(logits))
@@ -530,40 +621,45 @@ class DSparkRunner:
 
     def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None):
         """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
-        backbone-greedy tokens one at a time (identical to greedy output); no-refeed fast path +
-        RECOVERABLE acceptance-governed drafting (DECODE_DSPARK_METHODS.md M1/M2). Depth is never
-        hard-enforced: width = clamp(round(bs*ema), 1, bs) shrinks AND grows with acceptance, and the
-        low-overhead AR mode self-probes out of itself (see __init__)."""
+        backbone-greedy tokens one at a time (the same tokens as plain greedy decode, up to the usual
+        floating-point caveat that a multi-token verify forward and a one-token decode forward are
+        not bitwise identical, so a near-tie argmax can in principle differ); no-refeed fast path.
+        In adaptive mode a wall-clock governor picks AR or speculative steps (see _Governor)."""
         m, ds = self.m, self.ds
-        n_emitted = n_steps = n_drafted = n_accepted = 0
+        n_emitted = n_steps = n_drafted = n_accepted = n_spec = n_ar = 0
         eos_ids = set(int(e) for e in eos_ids)
-        accept_ema, zero_streak = 1.0, 0            # adaptive state
-        ar_mode, since_probe = False, 0             # recoverable low-overhead mode (NOT a latch)
+        accept_ema = 1.0
+        gov = _Governor(self.probe_every, self.ar_probe_every, self.ema_alpha) if self.adaptive else None
+        last = None  # (mode, emitted, t_start) of the previous step, closed at the next step start
 
         def _rec():
             if stats is not None:
-                stats.update(steps=n_steps, drafted=n_drafted, accepted=n_accepted, emitted=n_emitted)
+                stats.update(steps=n_steps, drafted=n_drafted, accepted=n_accepted, emitted=n_emitted,
+                             spec_steps=n_spec, ar_steps=n_ar)
+                if gov is not None:
+                    stats.update(spec_s_per_tok=gov.spec, ar_s_per_tok=gov.ar)
 
         while n_emitted < max_new:
             n_steps += 1
-            p0 = self._greedy(pending)                 # backbone truth for c+1 (free)
-            if self.adaptive and ar_mode and since_probe < self.probe_every:
-                # Low-overhead AR step: one backbone forward (bare greedy), but keep the draft windows
-                # current (return_hidden + seed) so a later probe can resume drafting from correct
-                # state. This is a transient mode, re-tested by the probe below -- never a permanent
-                # hard depth.
+            p0 = self._greedy(pending)                 # backbone truth for c+1 (syncs the previous step)
+            now = self.clock()
+            if gov is not None and last is not None:   # previous step's work is complete only now
+                gov.record(last[0], now - last[2], last[1])
+            mode = gov.choose() if gov is not None else "spec"
+            if mode == "ar":
+                # One backbone forward (bare greedy). return_hidden + an async seed keep the draft
+                # windows current so a later speculative step resumes from correct state.
+                n_ar += 1
                 plog, pmh = m.forward([p0], sess, all_logits=False, return_hidden=True)
                 ds.seed_windows(pmh[None], range(c + 1, c + 2))
                 c += 1
                 pending = plog
-                since_probe += 1
+                last = ("ar", 1, now)
                 yield p0; n_emitted += 1
                 if (eos_ids and p0 in eos_ids) or n_emitted >= max_new:
                     _rec(); return
                 continue
-            probing = self.adaptive and ar_mode        # fell through while in AR mode -> recovery probe
-            if probing:
-                since_probe = 0
+            n_spec += 1
             draft_ids, conf = self.ds.draft(p0, c)     # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
             W = self.width                             # number of draft tokens to verify (1..bs)
             if self.adaptive:                          # depth tracks acceptance (shrinks AND grows)
@@ -586,15 +682,6 @@ class DSparkRunner:
                     break
             n_accepted += k
             accept_ema = 0.7 * accept_ema + 0.3 * (k / max(1, W))  # update rolling acceptance
-            if self.adaptive:
-                zero_streak = zero_streak + 1 if k == 0 else 0
-                if ar_mode:
-                    if k >= 1:                         # a probe accepted -> content predictable again
-                        ar_mode, zero_streak = False, 0
-                    else:
-                        since_probe = 0                # stay in AR mode; wait probe_every before next probe
-                elif zero_streak >= self.latch_after:  # ENTER (not lock) low-overhead AR mode
-                    ar_mode, since_probe = True, 0
             if k == W:
                 # whole block accepted: the verify forward already wrote exactly-correct causal KV for
                 # every position (no rejected tail to undo), so skip the restore+refeed commit forward
@@ -610,6 +697,7 @@ class DSparkRunner:
                 ds.seed_windows(fmh[None], range(c + 1, c + 1 + len(emit)))
                 c += len(emit)
                 pending = flog[-1]                      # predicts c+1 again
+            last = ("spec", len(emit), now)
             for t in emit:
                 yield t; n_emitted += 1
                 if (eos_ids and t in eos_ids) or n_emitted >= max_new:
