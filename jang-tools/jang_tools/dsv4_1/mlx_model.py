@@ -103,17 +103,21 @@ class DeepseekV41Cache:
 
     def __init__(self, seq: "_SeqState | None" = None, idx: int = 0, ratio: int = 0,
                  sliding_window=None, compress_ratio=None):
-        from jang_tools.dsv41.model import GrowBuffer
+        from jang_tools.dsv41.model import QuantGrowBuffer
 
         # sliding_window/compress_ratio accepted so the engine's DSV4 reconstruct ctor
         # (`cache_cls(sliding_window=.., compress_ratio=..)`) can build us unchanged.
         self._seq = seq if seq is not None else _SeqState()
         self._idx = int(idx)
         self._ratio = int(ratio or compress_ratio or 0)
-        # LayerCache fields (names match jang_tools.dsv41.model.LayerCache exactly).
+        # LayerCache fields (names match jang_tools.dsv41.model.LayerCache exactly). compress_kv /
+        # index_k are 4-bit RESIDENT (FP4-parity) so the live 1M-ctx cache is ~890 MB, not ~3.2 GB
+        # bf16 (the release stores these FP4 too). state() still emits the DEQUANTIZED bf16 (one array
+        # per pool), so the prefix/disk-cache serialization + reconstruction format is UNCHANGED;
+        # restore re-quantizes via load_dense. See jang_tools.dsv41.model.QuantGrowBuffer.
         self.window = None
-        self.compress_kv = GrowBuffer()
-        self.index_k = GrowBuffer()
+        self.compress_kv = QuantGrowBuffer()
+        self.index_k = QuantGrowBuffer()
         self.pend_kv = None
         self.pend_score = None
         self._meta = None            # pending meta_state (restore)
@@ -131,9 +135,13 @@ class DeepseekV41Cache:
         """Resident bytes of this layer's KV (window + compressed pools + pend). The memory-aware
         prefix cache sizes/evicts entries by this."""
         total = 0
-        for a in (self.window, self.compress_kv.view(), self.index_k.view(), self.pend_kv, self.pend_score):
+        for a in (self.window, self.pend_kv, self.pend_score):
             if a is not None:
                 total += a.nbytes
+        for q in (self.compress_kv, self.index_k):  # 4-bit resident bytes (wq + scales + biases)
+            for a in (q.wq, q.scales, q.biases):
+                if a is not None and a.shape[1]:
+                    total += int(int(a.size) * a.dtype.size * q.n / a.shape[1])
         return int(total)
 
     # --- serialization (prefix cache in RAM; disk cache on SSD) ---
@@ -202,14 +210,16 @@ class DeepseekV41Cache:
         order = meta["order"]
         it = iter(value)
         self.window = next(it) if "window" in order else None
+        # state stores the DEQUANTIZED bf16 (one array per pool); re-quantize into the 4-bit resident
+        # buffer. meta ck_n/ik_n matches the dense row count, so load_dense restores the same n.
         if "ck" in order:
-            self.compress_kv.buf, self.compress_kv.n = next(it), int(meta["ck_n"])
+            self.compress_kv.load_dense(next(it))
         else:
-            self.compress_kv.buf, self.compress_kv.n = None, 0
+            self.compress_kv.load_dense(None)
         if "ik" in order:
-            self.index_k.buf, self.index_k.n = next(it), int(meta["ik_n"])
+            self.index_k.load_dense(next(it))
         else:
-            self.index_k.buf, self.index_k.n = None, 0
+            self.index_k.load_dense(None)
         self.pend_kv = next(it) if "pend_kv" in order else None
         self.pend_score = next(it) if "pend_score" in order else None
         self._seq.pos = int(meta.get("pos", 0))
@@ -236,11 +246,12 @@ class DeepseekV41Cache:
             for gb in (self.compress_kv, self.index_k):
                 gb.n = max(0, gb.n - rows)
                 if gb.n == 0:
-                    gb.buf = None
+                    gb.wq = gb.scales = gb.biases = None
         else:
             # ratio 0 layers keep no compressed pool
-            self.compress_kv.buf, self.compress_kv.n = None, 0
-            self.index_k.buf, self.index_k.n = None, 0
+            for gb in (self.compress_kv, self.index_k):
+                gb.wq = gb.scales = gb.biases = None
+                gb.n = 0
         if self._idx == 0:
             self._seq.pos = max(0, self._seq.pos - n)
             self._seq.history = self._seq.history[: self._seq.pos]

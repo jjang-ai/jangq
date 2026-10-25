@@ -240,6 +240,15 @@ class QuantGrowBuffer:
     def load(self, s):
         self.wq, self.scales, self.biases, self.n, self.D = s
 
+    def load_dense(self, x):
+        """Replace the buffer with the 4-bit quantization of a dense [1,T,D] bf16 array (used to
+        restore from a bf16 prefix-cache state without changing the stored serialization format)."""
+        self.wq = self.scales = self.biases = None
+        self.n = 0
+        self.D = None
+        if x is not None and x.shape[1] > 0:
+            self.append(x)
+
 
 class LayerCache:
     def __init__(self):
