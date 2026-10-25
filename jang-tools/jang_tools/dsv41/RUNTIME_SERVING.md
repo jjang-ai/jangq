@@ -119,31 +119,40 @@ reuse, multiturn recall, multimodal answers, reasoning-parser leaks, and the ser
 phys_footprint. Run with `VMLX_DSV41_DSPARK=0` for the AR baseline. Load only one copy of the
 model at a time: a second ~200 GB load on a 256 GB machine will be killed.
 
-Serving results (all fixes merged; DSpark default on; unique-text cold prompts):
+Serving results (all fixes merged incl. fp32 head and in-place partial-accept commit; DSpark default
+on; unique-text cold prompts; M5 Ultra 256 GB):
 
 | metric | DSpark (default) | AR (`VMLX_DSV41_DSPARK=0`) |
 |---|---|---|
-| cold prefill 21k tokens | 690 pp/s (was 475) | 769 pp/s |
-| cold prefill 1.5–6.5k (before the memory settings) | 298–443 pp/s | 306–481 pp/s |
-| decode code / code2 / structured / prose | 48.0 / 41.1 / 91.9 / 29.1 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
-| TTFT, short prompt | 0.26–0.50 s | 0.19–0.59 s |
-| RAM prefix hit, 3.4k tokens | 6.1 s → 0.48 s | 6.45 s → 0.33 s |
-| SSD hit after restart, 3.4k tokens | 3394 cached, 2.3 s | |
-| tool turn 2 | 280/354 cached, 0.89 s | 280/354, 0.87 s |
+| cold prefill 6.5k / 26.5k tokens | 710 / 676 pp/s | 21k: 769 pp/s |
+| cold prefill 1.6k (first request after load) | 341 pp/s | |
+| decode code / code2 / structured / prose | 60.8 / 51.1 / 82.4 / 29.5 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
+| TTFT, short prompt | 0.24–0.52 s | 0.19–0.59 s |
+| RAM prefix hit, 3.4k tokens | 5.18 s → 0.38 s | 6.45 s → 0.33 s |
+| SSD hit after restart, 3.4k tokens | 3394 cached, 3.15 s | |
+| tool turn 2 | 280/354 cached, 0.85 s | 280/354, 0.87 s |
 | per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
 | multimodal | Red / Apple / Red | same |
-| multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.46 s → 0.31 s; other image misses ("Blue") | |
+| multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.48 s → 0.26 s; other image misses ("Blue") | |
 | stored entry size | ~0.8–0.9 KB/token + ~5 MB fixed windows → ~0.9 GB at 1M | |
-| phys_footprint after load / peak | 206.6 / 213.2 GB | 198.1 / 205.8 GB |
+| phys_footprint after load / peak | 206.6 / 213.1 GB | 198.1 / 205.8 GB |
+
+Decode cost by verify width (2k context, warm): 1 row 33 ms, 2 rows 44, 4 rows 51, 6 rows 60,
+8 rows 67. The 1→2 step is MLX switching from its 1-row qmv kernel; beyond that each row adds ~4 ms of
+extra routed experts. vMLX's row-exact multi-row QMV (`vmlx_engine/metal/row_exact_qmv.py`, bit-equal
+to 1-row decode, weight fetched once) would flatten the dense part and make verify rows identical to
+decode, but it is disabled on the installed MLX ("qmv traversal changed") and needs its kernel
+template regenerated for that MLX.
 
 ## Known open items
 
-- DSpark decode on code2 (41 tok/s) and prose (≈ AR) is below the ~50 tok/s easy-code target;
-  acceptance-limited, not overhead-limited (the governor keeps it ≥ AR).
+- Prose decode ≈ AR (acceptance ~0.36; the governor keeps it at AR, not above).
+- Regenerate `row_exact_qmv` for the installed MLX and use it for DSpark verify rows (speed +
+  exact greedy identity).
 - `tests/test_chunking.py` assumes 32-dim index heads, which don't fit the 64-wide groups of the
   4-bit pools; it needs real-geometry heads.
 - Logits top-2 are often exactly tied (bf16 head output), so chunk boundaries flip first
   tokens; compare head precision with the reference.
-- SSD-restored hit after a restart takes 2.3 s for 3.4k tokens (the old format took 0.57 s);
+- SSD-restored hit after a restart takes 2.3–3.2 s for 3.4k tokens (the old format took 0.57 s);
   profile the format v2 restore.
 - `iogpu.wired_limit_mb` raise not tested.
