@@ -405,25 +405,22 @@ class DSparkRunner:
         yield from self.decode_stream(sess, pending, c, max_new, eos_ids=eos_ids, stats=stats)
 
     def prefill(self, prompt_ids, session=None, start_offset=0):
-        """Prefill the prompt (tail only when start_offset>0 = a restored prefix) into ``session`` (a
-        runtime Session or the engine's _SeqState duck type), seed the draft windows, and return
-        (session, pending_logits, c) AT THE CLEAN PROMPT BOUNDARY — no decode yet, so the engine
-        generator can snapshot the cache here for the prefix cache before speculation advances it."""
+        """Forward ``prompt_ids`` into ``session`` (a runtime Session or the engine's _SeqState duck
+        type) and seed the draft windows, returning (session, pending_logits, c) at the clean prompt
+        boundary (no decode yet, so the engine generator can snapshot the cache here). ``prompt_ids``
+        is forwarded AS GIVEN from the session's current absolute position ``sess.pos``: on a prefix
+        HIT the scheduler already restored the cache and passes only the UNCACHED TAIL, so the tail is
+        appended onto the restored prefix (no slicing/trimming). ``start_offset`` is accepted for
+        back-compat but ignored — the session position is authoritative."""
         m, ds = self.m, self.ds
         sess = session if session is not None else m.new_session()
         ds.reset_windows()
-        P = len(prompt_ids)
-        # Always leave >=1 token to forward (need its logits as `pending`); never forward an empty tail.
-        o = max(0, min(int(start_offset), P - 1))
-        cur = int(getattr(sess, "pos", 0) or 0)
-        if cur > o:  # restored cache is ahead of where we'll resume -> trim back so we don't duplicate
-            for cache in (getattr(sess, "caches", None) or []):
-                if hasattr(cache, "trim"):
-                    cache.trim(cur - o)
-        tail = list(prompt_ids[o:])
-        logits, mh = m.forward(tail, sess, all_logits=False, return_hidden=True)  # appends [o..P-1]
-        ds.seed_windows(mh[None], range(o, P))  # draft windows hold [o..c]; c = P-1
-        return sess, logits, P - 1
+        start = int(getattr(sess, "pos", 0) or 0)  # absolute position of the (possibly restored) cache
+        ids = list(prompt_ids)
+        logits, mh = m.forward(ids, sess, all_logits=False, return_hidden=True)  # appends [start..start+L-1]
+        end = start + len(ids)
+        ds.seed_windows(mh[None], range(start, end))  # draft windows hold [start..c]; c = end-1 (absolute)
+        return sess, logits, end - 1
 
     def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None):
         """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
