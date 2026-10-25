@@ -1,0 +1,227 @@
+"""Engram for DSV4.1: n-gram hashing (CPU) + disk-resident FP8 tables.
+
+Port of the release's inference/engram.py. The two tables are ~98 GB each
+(384M rows x 256 FP8 bytes + 8 E8M0 scale bytes per row). Each position needs
+only (max_ngram_size - 1) * n_heads = 24 rows per Engram layer, so the tables
+stay in their original safetensors shards and are read through a read-only
+memory map: the OS page cache holds whatever is hot, and none of it is wired
+GPU memory.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+
+import mlx.core as mx
+import numpy as np
+
+from jang_tools.dsv41.st_io import Shards, e8m0_to_float
+
+
+def _is_prime(n: int) -> bool:
+    if n < 2:
+        return False
+    if n % 2 == 0:
+        return n == 2
+    i = 3
+    while i * i <= n:
+        if n % i == 0:
+            return False
+        i += 2
+    return True
+
+
+def _next_prime(start: int, seen: set[int]) -> int:
+    c = start + 1
+    while not _is_prime(c) or c in seen:
+        c += 1
+    return c
+
+
+@dataclass(frozen=True)
+class EngramLayout:
+    max_ngram_size: int
+    layer_ids: tuple[int, ...]
+    num_embeddings: tuple[int, ...]
+    primes: np.ndarray  # [n_layers, max_ngram_size - 1, n_heads] int64
+    n_heads: int
+    head_dim: int
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "EngramLayout":
+        layer_ids = tuple(cfg["engram_layer_ids"])
+        n, heads = cfg["engram_max_ngram_size"], cfg["engram_n_heads"]
+        seen: set[int] = set()
+        primes = []
+        for _ in layer_ids:
+            per_ngram = []
+            for _ in range(n - 1):
+                cur, sizes = cfg["engram_vocab_size"] - 1, []
+                for _ in range(heads):
+                    cur = _next_prime(cur, seen)
+                    seen.add(cur)
+                    sizes.append(cur)
+                per_ngram.append(sizes)
+            primes.append(per_ngram)
+        layout = cls(n, layer_ids, tuple(cfg["engram_num_embeddings"]), np.array(primes, np.int64), heads, cfg["engram_head_dim"])
+        # bucket ranges tile each table exactly
+        assert tuple(int(p.sum()) for p in layout.primes) == layout.num_embeddings, "engram prime layout mismatch"
+        return layout
+
+
+def build_compressed_token_map(tokenizer_json: Path, cache_dir: Path | None = None) -> tuple[np.ndarray, int]:
+    """Same normalization as the release: NFKC/NFD/strip accents/lowercase/collapse whitespace."""
+    digest = hashlib.sha256(tokenizer_json.read_bytes()).hexdigest()[:16]
+    cache = (cache_dir or Path.home() / ".cache" / "jang_dsv41") / f"engram_token_map_{digest}.npy"
+    if cache.exists():
+        lookup = np.load(cache)
+        return lookup, int(lookup.max()) + 1
+
+    from tokenizers import Regex, Tokenizer, normalizers
+
+    sentinel = ""
+    normalizer = normalizers.Sequence([
+        normalizers.NFKC(),
+        normalizers.NFD(),
+        normalizers.StripAccents(),
+        normalizers.Lowercase(),
+        normalizers.Replace(Regex(r"[ \t\r\n]+"), " "),
+        normalizers.Replace(Regex(r"^ $"), sentinel),
+        normalizers.Strip(),
+        normalizers.Replace(sentinel, " "),
+    ])
+    tok = Tokenizer.from_file(str(tokenizer_json))
+    n = tok.get_vocab_size(with_added_tokens=True)
+    key_to_new: dict[str, int] = {}
+    lookup = np.zeros(n, np.int64)
+    for tid in range(n):
+        text = tok.decode([tid], skip_special_tokens=False)
+        if "�" in text:
+            key = tok.id_to_token(tid)
+        else:
+            norm = normalizer.normalize_str(text)
+            key = norm if norm else text
+        lookup[tid] = key_to_new.setdefault(key, len(key_to_new))
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.save(cache, lookup)
+    return lookup, len(key_to_new)
+
+
+def hash_multipliers(layer_ids, max_ngram_size: int, vocab: int) -> np.ndarray:
+    bound = max(1, (np.iinfo(np.int64).max // vocab) // 2)
+    rows = []
+    for lid in layer_ids:
+        g = np.random.default_rng(10007 * lid)
+        rows.append(g.integers(low=0, high=bound, size=(max_ngram_size,), dtype=np.int64) * 2 + 1)
+    return np.stack(rows)
+
+
+class NgramHasher:
+    """Per-sequence n-gram hash ids. Batch size 1; holds the compressed history across calls."""
+
+    DEAD = -1
+
+    def __init__(self, cfg: dict, layout: EngramLayout, tokenizer_json: Path):
+        self.layout = layout
+        self.token_map, vocab = build_compressed_token_map(tokenizer_json)
+        assert vocab == cfg["engram_compressed_vocab_size"], (vocab, cfg["engram_compressed_vocab_size"])
+        self.pad_id = int(self.token_map[cfg["engram_pad_token_id"]])
+        flat = layout.primes.reshape(len(layout.layer_ids), -1)
+        self.offsets = np.concatenate([np.zeros((flat.shape[0], 1), np.int64), np.cumsum(flat, 1)[:, :-1]], 1)
+        self.multipliers = hash_multipliers(layout.layer_ids, layout.max_ngram_size, vocab)
+        self.history = np.zeros(0, np.int64)
+
+    def reset(self):
+        self.history = np.zeros(0, np.int64)
+
+    def __call__(self, input_ids: np.ndarray, start_pos: int) -> np.ndarray:
+        """input_ids [L] -> hash ids [L, n_engram_layers, (max_ngram-1)*n_heads] (int64)."""
+        out, self.history = self.hash(input_ids, start_pos, self.history)
+        return out
+
+    def hash(self, input_ids: np.ndarray, start_pos: int, history: np.ndarray, keep: np.ndarray | None = None):
+        """Stateless form: returns (hash ids, updated compressed-token history) for one sequence.
+        keep [L] bool (True = real text): image tokens (keep=False) become DEAD so they take part in
+        no n-gram and block n-grams that would span them (matches the release engram_mask)."""
+        comp = self.token_map[input_ids]
+        if keep is not None:
+            comp = np.where(keep, comp, self.DEAD)
+        history = np.concatenate([history[:start_pos], comp])
+        L, n = len(input_ids), self.layout.max_ngram_size
+        pos = np.arange(start_pos, start_pos + L)
+        toks, blocked = [], np.zeros(L, bool)
+        for shift in range(n):
+            src = history[np.clip(pos - shift, 0, None)]
+            blocked = blocked | (pos < shift) | (src == self.DEAD)
+            toks.append(np.where(blocked, self.pad_id, src))
+        toks = np.stack(toks, -1)  # [L, n]
+        prod = toks[:, None, :] * self.multipliers[None]  # [L, layers, n]
+        rolling, out = prod[..., 0], []
+        for i in range(1, n):
+            rolling = np.bitwise_xor(rolling, prod[..., i])
+            out.append(rolling[..., None] % self.layout.primes[None, :, i - 1, :])
+        return np.concatenate(out, -1) + self.offsets[None], history
+
+
+_IO_POOL = ThreadPoolExecutor(32, thread_name_prefix="engram-io")
+_SMALL = 4096  # above this many rows (prefill), a memory-mapped gather is cheaper than per-row syscalls
+
+
+class DiskEngramTable:
+    """One layer's FP8 table, read from its safetensors shard in place.
+
+    Decode reads its few rows with concurrent pread calls (the SSD serves the random 256-byte
+    reads in parallel; sequential page faults would cost ~0.1 ms each). Large prefill batches use
+    a read-only memory map. Either way the OS page cache keeps hot n-grams; nothing is wired.
+    """
+
+    def __init__(self, shards: Shards, layer_id: int):
+        w = shards.meta[f"layers.{layer_id}.engram.embed.weight"]
+        s = shards.meta[f"layers.{layer_id}.engram.embed.scale"]
+        assert w.dtype == "F8_E4M3" and s.dtype == "F8_E8M0", (w.dtype, s.dtype)
+        assert w.path == s.path
+        self.rows = np.memmap(w.path, np.uint8, "r", offset=w.offset, shape=w.shape)
+        self.scales = np.memmap(s.path, np.uint8, "r", offset=s.offset, shape=s.shape)
+        self.fd = os.open(w.path, os.O_RDONLY)
+        self.w_off, self.s_off = w.offset, s.offset
+        self.dim = w.shape[1]
+        self.sdim = s.shape[1]
+        self.block = w.shape[1] // s.shape[1]
+
+    def _pread(self, uniq: np.ndarray):
+        def one(r):
+            r = int(r)
+            return os.pread(self.fd, self.dim, self.w_off + r * self.dim), os.pread(self.fd, self.sdim, self.s_off + r * self.sdim)
+
+        got = list(_IO_POOL.map(one, uniq))
+        rows = np.frombuffer(b"".join(g[0] for g in got), np.uint8).reshape(len(uniq), self.dim)
+        scales = np.frombuffer(b"".join(g[1] for g in got), np.uint8).reshape(len(uniq), self.sdim)
+        return rows, scales
+
+    def lookup(self, ids: np.ndarray) -> mx.array:
+        """ids [...] -> bf16 rows [..., dim]. Duplicate ids are read once."""
+        flat = ids.reshape(-1)
+        uniq, inv = np.unique(flat, return_inverse=True)
+        if len(uniq) <= _SMALL:
+            rr, ss = self._pread(uniq)
+        else:
+            rr, ss = np.asarray(self.rows[uniq]), np.asarray(self.scales[uniq])
+        r = mx.array(rr)
+        s = mx.array(ss)
+        vals = mx.from_fp8(r, dtype=mx.float32).reshape(len(uniq), -1, self.block) * e8m0_to_float(s)[..., None]
+        vals = vals.reshape(len(uniq), self.dim).astype(mx.bfloat16)
+        return vals[mx.array(inv.astype(np.int32))].reshape(*ids.shape, self.dim)
+
+
+def open_engram_tables(engram_dir: Path, layer_ids) -> dict[int, DiskEngramTable]:
+    engram_dir = Path(engram_dir)
+    index = "engram.safetensors.index.json" if (engram_dir / "engram.safetensors.index.json").exists() else "none"
+    shards = Shards(engram_dir, index_name=index)
+    missing = [l for l in layer_ids if f"layers.{l}.engram.embed.weight" not in shards]
+    if missing:
+        raise FileNotFoundError(f"engram tables for layers {missing} not found under {engram_dir}")
+    return {l: DiskEngramTable(shards, l) for l in layer_ids}
