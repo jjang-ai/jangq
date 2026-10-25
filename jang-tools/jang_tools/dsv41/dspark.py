@@ -62,6 +62,38 @@ def _hc_mixes(x, fn, scale, base, hc, iters, hc_eps, eps):
 
 
 # --------------------------------------------------------------------------- draft attention
+class BoundedWindow:
+    """The last ``cap`` rows of an append-only [1, T, D] sequence, oldest first.
+
+    Functional updates (a new array per append, never an in-place slot write), so a (buf, n) ref
+    snapshot stays valid across later appends -- the same rollback contract as GrowBuffer. Each append
+    copies at most ``cap`` rows (128 x head_dim bf16 = 128 KB), independent of context length."""
+
+    def __init__(self, cap: int):
+        self.cap = int(cap)
+        self.buf = None
+        self.n = 0  # rows held (<= cap)
+
+    def append(self, x: mx.array):
+        if x.shape[1] == 0:
+            return
+        if x.shape[1] > self.cap:
+            x = x[:, -self.cap:]
+        buf = x if self.buf is None else mx.concatenate([self.buf, x], axis=1)
+        if buf.shape[1] > self.cap:
+            buf = buf[:, -self.cap:]
+        self.buf, self.n = buf, int(buf.shape[1])
+
+    def view(self, n=None):
+        return self.buf
+
+    def snapshot(self):
+        return (self.buf, self.n)
+
+    def load(self, s):
+        self.buf, self.n = s
+
+
 class DSparkAttention(nn.Module):
     """Latent attention whose KV window is main-hidden-derived; bf16 (draft precision)."""
 
@@ -82,10 +114,17 @@ class DSparkAttention(nn.Module):
         self.wo_b = DenseLinear(self.n_groups * self.o_lora_rank, d)
         inv = yarn_inv_freq(self.rd, args.rope_theta, 0, 1, 0, 0)  # dspark attn is never compressed -> plain rope
         self._rope = Rope(self.rd, inv)
-        self.window = GrowBuffer()  # main-hidden-derived KV for committed positions (rope'd), oldest first
+        # main-hidden-derived KV for the last `win` committed positions (rope'd), oldest first. Bounded:
+        # attend only ever reads the last `win` rows, so keeping every position (the old GrowBuffer) cost
+        # ~3 KB/token (~3 GB at 1M ctx) for nothing.
+        self.window = BoundedWindow(self.win)
 
     def seed(self, main_x, positions):
-        """Append the committed positions' main-derived KV to the window (release prefill/decode seed)."""
+        """Append the committed positions' main-derived KV to the window (release prefill/decode seed).
+        Only the last `win` positions can ever be attended, so older rows are dropped before projecting."""
+        if main_x.shape[1] > self.win:
+            main_x = main_x[:, -self.win:]
+            positions = positions[-self.win:]
         kv = self._rope(self.kv_norm(self.wkv(main_x)), positions)  # [1, S, head_dim]
         self.window.append(kv.astype(mx.bfloat16))
 
@@ -96,7 +135,6 @@ class DSparkAttention(nn.Module):
         q = self._rope(self.wq_b(qr).reshape(B, bs, self.n_heads, self.head_dim), positions)
         kv = self._rope(self.kv_norm(self.wkv(x)), positions)  # [1, bs, head_dim]
         win = self.window.view()
-        win = win[:, -self.win:] if win is not None else None
         full = mx.concatenate([win, kv], axis=1) if win is not None else kv  # [1, L, head_dim]
         L = full.shape[1]
         idxs = mx.broadcast_to(mx.arange(L, dtype=mx.int32)[None, None], (1, bs, L))  # every query sees all
@@ -222,15 +260,22 @@ class DSpark(nn.Module):
     # --- window management (external, keeps forward_spec a pure draft) ---
     def seed_windows(self, main_hidden, positions):
         """Add committed positions' KV to every stage window. main_hidden [1,S,d*n_targets]."""
+        positions = list(positions)
+        win = self.stages[0].attn.win
+        if main_hidden.shape[1] > win:  # only the last `win` positions are ever attended
+            main_hidden = main_hidden[:, -win:]
+            positions = positions[-win:]
         main_x = self.stages[0].main_norm(self.stages[0].main_proj(main_hidden))  # [1,S,d]
         pos = mx.array(np.asarray(positions, np.int64))
         for st in self.stages:
             st.attn.seed(main_x, pos)
-        mx.eval([st.attn.window.buf for st in self.stages])
+        # Submit without a host sync: the windows are next read by draft(), which evaluates them; a
+        # blocking eval here cost one GPU round-trip per committed step (AR mode most of all).
+        mx.async_eval([st.attn.window.buf for st in self.stages])
 
     def reset_windows(self):
         for st in self.stages:
-            st.attn.window = GrowBuffer()
+            st.attn.window = BoundedWindow(st.attn.win)
 
     def window_checkpoint(self):
         return [(st.attn.window.buf, st.attn.window.n) for st in self.stages]
@@ -370,6 +415,23 @@ def load_dspark(source_dir, args, embed, head):
 
 
 # --------------------------------------------------------------------------- accept/reject loop
+def _session_arrays(sess):
+    """Every live cache array of a runtime Session / engine _SeqState (for a per-chunk eval)."""
+    out = []
+    for c in getattr(sess, "caches", ()) or ():
+        for a in (getattr(c, "window", None), getattr(c, "pend_kv", None), getattr(c, "pend_score", None)):
+            if a is not None:
+                out.append(a)
+        for q in (getattr(c, "compress_kv", None), getattr(c, "index_k", None)):
+            if q is None:
+                continue
+            for a in (getattr(q, "wq", None), getattr(q, "scales", None), getattr(q, "biases", None),
+                      getattr(q, "buf", None)):
+                if a is not None:
+                    out.append(a)
+    return out
+
+
 class DSparkRunner:
     """Speculative greedy decode: output is token-identical to plain greedy, accepting a block of
     dSpark drafts per backbone verify step. Rollback is checkpoint/restore of the (ref-based) caches
@@ -411,22 +473,59 @@ class DSparkRunner:
         sess, pending, c = self.prefill(prompt_ids, session=session, start_offset=start_offset)
         yield from self.decode_stream(sess, pending, c, max_new, eos_ids=eos_ids, stats=stats)
 
-    def prefill(self, prompt_ids, session=None, start_offset=0):
+    # Prefill chunk size (tokens per backbone forward). Matches the engine's default prefill_step_size;
+    # the engine passes its configured value explicitly.
+    PREFILL_CHUNK = 2048
+
+    def prefill(self, prompt_ids, session=None, start_offset=0, on_boundary=None, chunk_size=None,
+                clear_cache=True):
         """Forward ``prompt_ids`` into ``session`` (a runtime Session or the engine's _SeqState duck
-        type) and seed the draft windows, returning (session, pending_logits, c) at the clean prompt
-        boundary (no decode yet, so the engine generator can snapshot the cache here). ``prompt_ids``
-        is forwarded AS GIVEN from the session's current absolute position ``sess.pos``: on a prefix
-        HIT the scheduler already restored the cache and passes only the UNCACHED TAIL, so the tail is
-        appended onto the restored prefix (no slicing/trimming). ``start_offset`` is accepted for
-        back-compat but ignored — the session position is authoritative."""
+        type) and seed the draft windows, returning (session, pending_logits, c), c = last prompt pos.
+
+        ``prompt_ids`` is forwarded AS GIVEN from the session's current absolute position ``sess.pos``:
+        on a prefix HIT the scheduler already restored the cache and passes only the UNCACHED TAIL.
+        ``start_offset`` is accepted for back-compat but ignored -- the session position is authoritative.
+
+        Shape of the prefill (same as the engine's AR SingleBatchGenerator, so AR and DSpark produce the
+        same cache and a prefix hit continues either):
+          1. prompt[:-1] in ``chunk_size`` forwards, each materialized (+ ``mx.clear_cache``) so peak
+             memory is one chunk's activations, not the whole prompt's lazy graph;
+          2. ``on_boundary(sess)`` at exactly the N-1 prompt boundary -- the state the prefix cache keys
+             on (the scheduler stores it under prompt[:-1] and re-feeds the last token on a hit). The
+             old code snapshotted AFTER the last token, so every hit restored N tokens under an N-1
+             key and re-fed the last prompt token at position N;
+          3. the last prompt token in its own forward -> the pending logits for c+1.
+        Draft windows are seeded only from the last ``win`` positions (all attend can read)."""
         m, ds = self.m, self.ds
         sess = session if session is not None else m.new_session()
         ds.reset_windows()
         start = int(getattr(sess, "pos", 0) or 0)  # absolute position of the (possibly restored) cache
-        ids = list(prompt_ids)
-        logits, mh = m.forward(ids, sess, all_logits=False, return_hidden=True)  # appends [start..start+L-1]
+        ids = [int(t) for t in prompt_ids]
+        if not ids:
+            raise ValueError("DSparkRunner.prefill needs at least one prompt token")
         end = start + len(ids)
-        ds.seed_windows(mh[None], range(start, end))  # draft windows hold [start..c]; c = end-1 (absolute)
+        win = int(ds.stages[0].attn.win)
+        seed_from = max(start, end - win)  # first absolute position whose hidden seeds the windows
+        step = max(1, int(chunk_size or self.PREFILL_CHUNK))
+        body = ids[:-1]
+        p = start
+        for i in range(0, len(body), step):
+            piece = body[i:i + step]
+            if p + len(piece) > seed_from:
+                logits, mh = m.forward(piece, sess, all_logits=False, return_hidden=True)
+                lo = max(0, seed_from - p)
+                ds.seed_windows(mh[None, lo:], range(p + lo, p + len(piece)))
+                mx.eval(logits, _session_arrays(sess), [st.attn.window.buf for st in ds.stages])
+            else:
+                logits = m.forward(piece, sess, all_logits=False)
+                mx.eval(logits, _session_arrays(sess))
+            p += len(piece)
+            if clear_cache and hasattr(mx, "clear_cache"):
+                mx.clear_cache()
+        if on_boundary is not None:
+            on_boundary(sess)  # exact N-1 prompt boundary (pos == end - 1)
+        logits, mh = m.forward(ids[-1:], sess, all_logits=False, return_hidden=True)
+        ds.seed_windows(mh[None], range(end - 1, end))
         return sess, logits, end - 1
 
     def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None):
