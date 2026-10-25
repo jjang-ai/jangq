@@ -11,6 +11,7 @@ GPU memory.
 from __future__ import annotations
 
 import hashlib
+import mmap
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -169,7 +170,13 @@ class NgramHasher:
 
 # Cold rows are random 256-byte reads spread over ~98 GB per table, so throughput is set by how
 # many reads are in flight. Measured on cold rows: a single-thread memmap gather (one page fault
-# at a time) reads ~8-11k rows/s; 64 concurrent pread lanes in 256-row tasks read ~130k rows/s.
+# at a time) reads ~8-11k rows/s; 16 threads each gathering a slice of the memmap read ~110k
+# rows/s (more lanes contend on the VM map and slow down); 64 pread lanes read ~130k rows/s but
+# hold the GIL per row, which slows graph building on the main thread during a pipelined
+# prefill. The memmap gather is the default; DSV41_ENGRAM_IO=pread selects pread.
+_IO_MODE = os.environ.get("DSV41_ENGRAM_IO", "take")
+_TAKE_LANES = 16
+_TAKE_POOL = ThreadPoolExecutor(_TAKE_LANES, thread_name_prefix="engram-take")
 _IO_POOL = ThreadPoolExecutor(64, thread_name_prefix="engram-io")
 _IO_TASK = 256
 # Prefetch orchestration runs on its own pool so a waiting prefetch never holds an I/O lane.
@@ -179,9 +186,9 @@ _PREFETCH_POOL = ThreadPoolExecutor(4, thread_name_prefix="engram-prefetch")
 class DiskEngramTable:
     """One layer's FP8 table, read from its safetensors shard in place.
 
-    Rows are read with concurrent pread calls for every batch size: decode's few rows and
-    prefill's tens of thousands alike (the SSD serves random small reads in parallel; page faults
-    through a memory map are serviced one at a time). The OS page cache keeps hot n-grams;
+    Rows are read concurrently for every batch size, decode's few rows and prefill's tens of
+    thousands alike: the SSD serves random small reads in parallel, while a single gather through
+    the memory map takes its page faults one at a time. The OS page cache keeps hot n-grams;
     nothing is wired.
     """
 
@@ -192,6 +199,13 @@ class DiskEngramTable:
         assert w.path == s.path
         self.rows = np.memmap(w.path, np.uint8, "r", offset=w.offset, shape=w.shape)
         self.scales = np.memmap(s.path, np.uint8, "r", offset=s.offset, shape=s.shape)
+        # Random rows: read-ahead around each fault only wastes SSD bandwidth (~1.5x more cold
+        # rows/s with MADV_RANDOM).
+        for mm in (self.rows, self.scales):
+            try:
+                mm._mmap.madvise(mmap.MADV_RANDOM)
+            except (AttributeError, OSError, ValueError):
+                pass
         self.fd = os.open(w.path, os.O_RDONLY)
         self.w_off, self.s_off = w.offset, s.offset
         self.dim = w.shape[1]
@@ -199,8 +213,8 @@ class DiskEngramTable:
         self.block = w.shape[1] // s.shape[1]
 
     def _pread(self, uniq: np.ndarray):
-        """Rows and scales for sorted unique row ids, read by concurrent pread tasks into
-        preallocated buffers (each task covers _IO_TASK rows)."""
+        """Rows and scales for sorted unique row ids, read concurrently into preallocated
+        buffers: _TAKE_LANES slices gathered from the memmap, or pread tasks of _IO_TASK rows."""
         n = len(uniq)
         rows = np.empty((n, self.dim), np.uint8)
         scales = np.empty((n, self.sdim), np.uint8)
@@ -213,6 +227,16 @@ class DiskEngramTable:
                 rows[i] = np.frombuffer(os.pread(fd, dim, w_off + r * dim), np.uint8)
                 scales[i] = np.frombuffer(os.pread(fd, sdim, s_off + r * sdim), np.uint8)
 
+        if _IO_MODE == "take":
+            step = max(1, -(-n // _TAKE_LANES))
+
+            def take(lo):
+                u = uniq[lo : lo + step]
+                np.take(self.rows, u, axis=0, out=rows[lo : lo + step])
+                np.take(self.scales, u, axis=0, out=scales[lo : lo + step])
+
+            list(_TAKE_POOL.map(take, range(0, n, step)))
+            return rows, scales
         if n <= _IO_TASK:
             task(0)
         else:
@@ -225,9 +249,14 @@ class DiskEngramTable:
         rr, ss = self._pread(uniq)
         return inv, rr, ss
 
-    def prefetch(self, ids: np.ndarray):
-        """Start reading ids' rows in the background; pass the future's result to `finish`."""
-        return _PREFETCH_POOL.submit(self.read, ids)
+    def prefetch(self, ids: np.ndarray, after=None):
+        """Start reading ids' rows in the background (once the future `after`, if given, is done);
+        pass the returned future's result to `finish`."""
+        def run():
+            if after is not None:
+                after.result()
+            return self.read(ids)
+        return _PREFETCH_POOL.submit(run)
 
     def lookup(self, ids: np.ndarray) -> mx.array:
         """ids [...] -> bf16 rows [..., dim]. Duplicate ids are read once."""

@@ -26,11 +26,9 @@ import numpy as np
 
 from jang_tools.dsv41.engram import EngramLayout, NgramHasher, open_engram_tables
 
-# Text prefill longer than PIPELINE_MIN tokens runs in sub-chunks so cold Engram row reads overlap
-# the GPU (DSV41._forward_pipelined): a small first sub-chunk, then PIPELINE_CHUNK at a time.
-PIPELINE_MIN = 256
-PIPELINE_FIRST = 128
-PIPELINE_CHUNK = 512
+# Forwards of at least ENGRAM_LAZY_MIN tokens read the later Engram layers' rows while the GPU
+# runs the layers before them (DSV41._engram_rows(lazy=True)); shorter ones read inline.
+ENGRAM_LAZY_MIN = 64
 
 GROUP_SIZE = 64
 
@@ -872,7 +870,11 @@ class Model(nn.Module):
         main_hiddens = []
         for i, layer in enumerate(self.layers):
             if i in engram_rows:
-                h = layer.engram(h, engram_rows[i], text_mask)
+                rows = engram_rows[i]
+                if callable(rows):  # still being read: start the layers so far on the GPU meanwhile
+                    mx.async_eval(h, pre_mix)
+                    rows = rows()
+                h = layer.engram(h, rows, text_mask)
             if return_hidden and i in self.target_layer_ids:
                 main_hiddens.append(mx.mean(h, axis=2))  # [1,N,dim] at this layer's input
             h, pre_mix = layer(h, segs, pre_mix, image_mask)
@@ -980,75 +982,78 @@ class DSV41:
         return self.session.caches
 
     def _engram_rows(self, ids: np.ndarray, start_pos: int, sess: "Session | None" = None,
-                     keep: np.ndarray | None = None) -> dict:
+                     keep: np.ndarray | None = None, lazy: bool = False) -> dict:
+        """{layer_id: rows [1,S,cols,head_dim]}. With lazy, the reads run in the background (layer
+        by layer, first layer first) and only the first is waited for here; later layers get a
+        callable the forward resolves when it reaches them, after queueing the earlier layers on
+        the GPU, so their cold SSD reads overlap compute (one forward, no extra weight passes).
+        Rows already requested by a matching `engram_lookahead` are used instead of reading."""
         sess = sess or self.session
-        hashes, sess.history = self.hasher.hash(ids, start_pos, sess.history, keep)  # [S, n_layers, cols]
-        return {lid: self.tables[lid].lookup(hashes[:, j])[None] for j, lid in enumerate(self.layout.layer_ids)}
+        ahead = getattr(sess, "engram_ahead", None)
+        sess.engram_ahead = None
+        if ahead is not None and keep is None and ahead[0] == start_pos and np.array_equal(ahead[1], ids):
+            _, _, pending, sess.history = ahead
+        else:
+            hashes, sess.history = self.hasher.hash(ids, start_pos, sess.history, keep)  # [S, n_layers, cols]
+            if not lazy:
+                return {lid: self.tables[lid].lookup(hashes[:, j])[None] for j, lid in enumerate(self.layout.layer_ids)}
+            pending = self._read_ahead(hashes)
+        rows = {}
+        for k, (lid, (t, f, shape)) in enumerate(zip(self.layout.layer_ids, pending)):
+            if k == 0:
+                rows[lid] = t.finish(shape, f.result())[None]
+            else:
+                rows[lid] = lambda t=t, f=f, shape=shape: t.finish(shape, f.result())[None]
+        return rows
+
+    def _read_ahead(self, hashes: np.ndarray) -> list:
+        """Start background reads of every Engram layer's rows for hashes [S, n_layers, cols], one
+        layer after another so the first layer's rows (needed first) get every I/O lane."""
+        out, prev = [], None
+        for j, lid in enumerate(self.layout.layer_ids):
+            t = self.tables[lid]
+            f = t.prefetch(hashes[:, j], after=prev)
+            out.append((t, f, hashes[:, j].shape))
+            prev = f
+        return out
+
+    def _start_lookahead(self, sess, ids: list[int]):
+        """Request the rows for `ids`, the tokens the next forward on `sess` will append, while
+        this forward runs on the GPU. The hashes need only token ids and the n-gram history;
+        the history they produce is applied when that forward consumes the record."""
+        arr = np.asarray(ids, np.int64)
+        hashes, history = self.hasher.hash(arr, sess.pos, sess.history, None)
+        sess.engram_ahead = (sess.pos, arr, self._read_ahead(hashes), history)
 
     def forward(self, ids: list[int], sess: "Session | None" = None, all_logits: bool = False,
-                images=None, token_types=None, return_hidden: bool = False) -> mx.array:
+                images=None, token_types=None, return_hidden: bool = False,
+                engram_lookahead: list[int] | None = None) -> mx.array:
         """Append tokens to a session (prefill, continuation or one decode step).
         images/token_types carry VL inputs (image spans must be in a single start_pos-0 prefill).
+        engram_lookahead: the next chunk of a chunked prefill; its Engram rows are read while this
+        forward computes (text tokens only).
         Returns fp32 logits [vocab] at the last token ([len(ids), vocab] with all_logits).
         With return_hidden also returns main_hidden [len(ids), dim*n_targets] for the dSpark head."""
         sess = sess or self.session
         arr = np.asarray(ids, np.int64)
-        if images is None and token_types is None and len(arr) > PIPELINE_MIN:
-            return self._forward_pipelined(arr, sess, all_logits, return_hidden)
         image_mask = None
         if token_types is not None:
             tt = np.asarray(token_types)
             image_mask = mx.array((tt >= 0)[None])  # [1,N] bool, True inside image spans
         # image tokens take no part in an n-gram (release engram_mask = ~image_mask)
         engram_mask = None if token_types is None else (np.asarray(token_types) < 0)
-        rows = self._engram_rows(arr, sess.pos, sess, engram_mask)
+        rows = self._engram_rows(arr, sess.pos, sess, engram_mask, lazy=len(arr) >= ENGRAM_LAZY_MIN)
         seg = Seg(0, len(ids), sess.pos, sess.caches)
         out = self.model(mx.array(arr[None].astype(np.int32)), [seg], rows, all_logits=all_logits,
                          images=images, image_mask=image_mask, return_hidden=return_hidden)
         sess.pos += len(ids)
+        if engram_lookahead:
+            self._start_lookahead(sess, engram_lookahead)
         if return_hidden:
             logits, main_hidden = out
             mh = None if main_hidden is None else main_hidden[0]  # [N, dim*n_targets]
             return (logits if all_logits else logits[0]), mh
         return out if all_logits else out[0]
-
-    def _forward_pipelined(self, arr: np.ndarray, sess: "Session", all_logits: bool, return_hidden: bool):
-        """Text prefill in sub-chunks with the Engram row reads running ahead of the GPU.
-
-        Cold Engram rows are random SSD reads; done up front they stall the forward for as long
-        as the reads take. Hashing needs only token ids, so every sub-chunk's rows are requested
-        at once, and each sub-chunk's forward is queued (async_eval) as soon as its rows land,
-        while later reads continue. The first sub-chunk is small so the GPU starts early.
-        Sub-chunk boundaries do not change the result (the compressor and caches are
-        chunking-invariant, as for the engine's own prefill chunks)."""
-        hashes, sess.history = self.hasher.hash(arr, sess.pos, sess.history, None)  # [S, n_layers, cols]
-        bounds, lo = [], 0
-        while lo < len(arr):
-            hi = min(len(arr), lo + (PIPELINE_FIRST if lo == 0 else PIPELINE_CHUNK))
-            bounds.append((lo, hi))
-            lo = hi
-        lids = self.layout.layer_ids
-        pending = [[self.tables[lid].prefetch(hashes[a:b, j]) for j, lid in enumerate(lids)] for a, b in bounds]
-        logits_parts, hidden_parts = [], []
-        for (a, b), futs in zip(bounds, pending):
-            rows = {lid: self.tables[lid].finish(hashes[a:b, j].shape, f.result())[None]
-                    for j, (lid, f) in enumerate(zip(lids, futs))}
-            seg = Seg(0, b - a, sess.pos, sess.caches)
-            last = b == len(arr)
-            out = self.model(mx.array(arr[None, a:b].astype(np.int32)), [seg], rows,
-                             all_logits=all_logits, return_hidden=return_hidden)
-            sess.pos += b - a
-            logits, mh = out if return_hidden else (out, None)
-            if all_logits or last:
-                logits_parts.append(logits)
-            if mh is not None:
-                hidden_parts.append(mh)
-            mx.async_eval([logits] + ([mh] if mh is not None else []))
-        logits = mx.concatenate(logits_parts, axis=0) if all_logits else logits_parts[-1]
-        if return_hidden:
-            mh = None if not hidden_parts else mx.concatenate(hidden_parts, axis=1)[0]
-            return (logits if all_logits else logits[0]), mh
-        return logits if all_logits else logits[0]
 
     def decode_batch(self, sessions: list["Session"], tokens: list[int]) -> mx.array:
         """One token for each of several sessions in a single forward. Returns logits [B, vocab]."""
