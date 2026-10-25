@@ -70,7 +70,9 @@ token-identical to greedy on code (59/59) and structured (29/29). = parity with 
   time — weight-read-bound), so accepting a block amortizes. Secondary lever: fewer bytes/token (the
   LM head alone is 703 MB/token; a lighter head or uniform-Q2 raises AR proportionally — a quant
   tradeoff, not an engine change).
-- Prefill is already at parity (865 vs ds4.c 790 pp/s); no prefill work needed.
+- Prefill: the 865 pp/s figure was measured on repetitive text, where the Engram rows stay
+  page-cache warm. On unique text cold prefill is bound by Engram row reads; see
+  `RUNTIME_SERVING.md` (cold now 598–768 pp/s, warm 741–801).
 
 ## M4 — MLA decode attention kernel (`metal_decode_attn.py`, default OFF)
 
