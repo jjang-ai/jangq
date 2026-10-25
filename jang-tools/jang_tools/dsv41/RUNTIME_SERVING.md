@@ -69,6 +69,27 @@ Design, and the rules it encodes:
 The 1k case stays near 600 pp/s cold because layer 1's reads (~0.2 s) come before any compute
 and the first chunk has nothing to overlap with.
 
+### Serving memory settings that prefill depends on
+
+The standalone numbers above only hold in `vmlx serve` with two settings, both now defaults:
+
+1. **Allocator-cache floor.** The engine bounds MLX's allocator cache at 5% of resident, capped
+   at 4 GB. A 2048-token DSV4.1 chunk needs more scratch than that, so Metal buffers were freed
+   and re-created inside every chunk. AR serving, 21k-token cold prompt: 4 GB 475 pp/s, 16 GB
+   769, MLX default 772. `vmlx_engine/mlx_memory.py` adds a per-family floor (`deepseek_v41`
+   16 GB) that raises the computed default only; `VMLX_MLX_CACHE_LIMIT_MB` still overrides
+   exactly. The cache is cleared after every chunk, so idle residency is unchanged.
+2. **Prefill chunk with the DSpark draft resident.** Metal's recommended working set on a
+   256 GB machine is 239.1 GB (222.7 GiB, `iogpu.wired_limit_mb=0`). The backbone is 197 GiB
+   resident, and with the 8.3 GB draft 205.4 GiB. During prefill, active memory peaks at
+   ~209 GiB; with 2048-token chunks, active plus allocator cache crosses the working-set limit
+   and the GPU slows ~30%. The slowdown is GPU-side, not I/O: warm pages are equally slow, and
+   an 8.7 GB dummy MLX allocation without the draft reproduces it (760 → 548–620 pp/s).
+   Draft resident, 12k-token cold prompt: chunk 2048 545 pp/s, 1536 643, 1024 708, 768 684;
+   allocator cap 8–24 GB makes no difference at 1024. `DSV41DSparkGenerator` therefore caps
+   the prefill step at 1024 (`VMLX_DSV41_DSPARK_PREFILL_STEP` overrides). Without the draft,
+   2048 stays best. Raising `iogpu.wired_limit_mb` is the other lever (untested).
+
 ## Prefix cache (engine)
 
 - RAM paged prefix cache plus block-disk L2 (`--use-paged-cache --enable-block-disk-cache`).
@@ -98,22 +119,31 @@ reuse, multiturn recall, multimodal answers, reasoning-parser leaks, and the ser
 phys_footprint. Run with `VMLX_DSV41_DSPARK=0` for the AR baseline. Load only one copy of the
 model at a time: a second ~200 GB load on a 256 GB machine will be killed.
 
-Serving results (DSpark default on, 2048-token chunks, after the Engram I/O change):
+Serving results (all fixes merged; DSpark default on; unique-text cold prompts):
 
-| metric | result |
-|---|---|
-| cold prefill 1.3k | 614 pp/s |
-| cold prefill 5.4k | 294 pp/s (DSpark prefill was one unchunked forward; chunked + lookahead pending) |
-| decode code / code2 / structured / prose | 53.8 / 42.8 / 83.0 / 29.2 tok/s (AR ~30) |
-| TTFT, short prompt | 0.25–0.36 s |
-| RAM prefix hit, 3.4k tokens | 11.5 s → 0.58 s |
-| tool turn 2 | 280/354 tokens cached, 0.81 s |
-| multimodal (red image) | Red / Strawberry / Red |
+| metric | DSpark (default) | AR (`VMLX_DSV41_DSPARK=0`) |
+|---|---|---|
+| cold prefill 21k tokens | 690 pp/s (was 475) | 769 pp/s |
+| cold prefill 1.5–6.5k (before the memory settings) | 298–443 pp/s | 306–481 pp/s |
+| decode code / code2 / structured / prose | 48.0 / 41.1 / 91.9 / 29.1 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
+| TTFT, short prompt | 0.26–0.50 s | 0.19–0.59 s |
+| RAM prefix hit, 3.4k tokens | 6.1 s → 0.48 s | 6.45 s → 0.33 s |
+| SSD hit after restart, 3.4k tokens | 3394 cached, 2.3 s | |
+| tool turn 2 | 280/354 cached, 0.89 s | 280/354, 0.87 s |
+| per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
+| multimodal | Red / Apple / Red | same |
+| multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.46 s → 0.31 s; other image misses ("Blue") | |
+| stored entry size | ~0.8–0.9 KB/token + ~5 MB fixed windows → ~0.9 GB at 1M | |
+| phys_footprint after load / peak | 206.6 / 213.2 GB | 198.1 / 205.8 GB |
 
 ## Known open items
 
-- DSpark prefill must chunk at the engine step size and pass `engram_lookahead`.
-- DSpark must stay at or above AR on low-acceptance text (prose measured 29.2 vs AR ~30).
-- Multimodal turns don't reuse the prefix cache yet.
-- Stored prefix-cache entries: measure single-entry bytes per token at 8k/32k and confirm the
-  ~0.9 GB at 1M target.
+- DSpark decode on code2 (41 tok/s) and prose (≈ AR) is below the ~50 tok/s easy-code target;
+  acceptance-limited, not overhead-limited (the governor keeps it ≥ AR).
+- `tests/test_chunking.py` assumes 32-dim index heads, which don't fit the 64-wide groups of the
+  4-bit pools; it needs real-geometry heads.
+- Logits top-2 are often exactly tied (bf16 head output), so chunk boundaries flip first
+  tokens; compare head precision with the reference.
+- SSD-restored hit after a restart takes 2.3 s for 3.4k tokens (the old format took 0.57 s);
+  profile the format v2 restore.
+- `iogpu.wired_limit_mb` raise not tested.
