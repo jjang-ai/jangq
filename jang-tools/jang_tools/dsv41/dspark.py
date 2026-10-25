@@ -392,21 +392,44 @@ class DSparkRunner:
     def _greedy(self, logits):
         return int(mx.argmax(logits))
 
-    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None):
+    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None, session=None, start_offset=0):
         """Greedy speculative decode as a GENERATOR: yields committed backbone-greedy tokens one at a
         time (so a server can stream and check stops between/within accepted blocks). The yielded
         sequence is identical to ``generate()['tokens']``. Owns its own runtime ``Session`` +
-        checkpoint/restore, so it is independent of any engine cache. If ``stats`` (dict) is passed it
-        is filled with steps/drafted/accepted/emitted. This is the method the engine's V4.1 spec-decode
-        generator drives (see DECODE_DSPARK_METHODS.md M1)."""
+        checkpoint/restore. If ``stats`` (dict) is passed it is filled with steps/drafted/accepted/
+        emitted. ``session`` lets the engine spec-decode generator drive its OWN cache (the engine
+        DeepseekV41Cache list, duck-typing the runtime Session) so DSpark output populates the prefix
+        cache; with a restored prefix, ``start_offset`` skips the cached prompt and prefills only the
+        tail. (See DECODE_DSPARK_METHODS.md M1.)"""
+        sess, pending, c = self.prefill(prompt_ids, session=session, start_offset=start_offset)
+        yield from self.decode_stream(sess, pending, c, max_new, eos_ids=eos_ids, stats=stats)
+
+    def prefill(self, prompt_ids, session=None, start_offset=0):
+        """Prefill the prompt (tail only when start_offset>0 = a restored prefix) into ``session`` (a
+        runtime Session or the engine's _SeqState duck type), seed the draft windows, and return
+        (session, pending_logits, c) AT THE CLEAN PROMPT BOUNDARY — no decode yet, so the engine
+        generator can snapshot the cache here for the prefix cache before speculation advances it."""
         m, ds = self.m, self.ds
-        sess = m.new_session()
+        sess = session if session is not None else m.new_session()
         ds.reset_windows()
-        logits, mh = m.forward(list(prompt_ids), sess, all_logits=False, return_hidden=True)
         P = len(prompt_ids)
-        ds.seed_windows(mh[None], range(P))  # windows hold [0..c], c = P-1
-        c = P - 1                    # frontier: last position whose hidden is in the windows
-        pending = logits             # backbone logits predicting position c+1
+        # Always leave >=1 token to forward (need its logits as `pending`); never forward an empty tail.
+        o = max(0, min(int(start_offset), P - 1))
+        cur = int(getattr(sess, "pos", 0) or 0)
+        if cur > o:  # restored cache is ahead of where we'll resume -> trim back so we don't duplicate
+            for cache in (getattr(sess, "caches", None) or []):
+                if hasattr(cache, "trim"):
+                    cache.trim(cur - o)
+        tail = list(prompt_ids[o:])
+        logits, mh = m.forward(tail, sess, all_logits=False, return_hidden=True)  # appends [o..P-1]
+        ds.seed_windows(mh[None], range(o, P))  # draft windows hold [o..c]; c = P-1
+        return sess, logits, P - 1
+
+    def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None):
+        """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
+        backbone-greedy tokens one at a time (identical to greedy output); no-refeed fast path +
+        adaptive latch apply (DECODE_DSPARK_METHODS.md M1/M2)."""
+        m, ds = self.m, self.ds
         n_emitted = n_steps = n_drafted = n_accepted = 0
         eos_ids = set(int(e) for e in eos_ids)
         accept_ema, zero_streak, ar_latched = 1.0, 0, False   # adaptive state

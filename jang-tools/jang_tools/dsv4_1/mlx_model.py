@@ -72,6 +72,26 @@ class _SeqState:
         self.history = np.zeros(0, np.int64)
         self.pos = 0
 
+    def checkpoint(self):
+        """O(1) ref snapshot for DSpark speculative verification (mirrors runtime Session.checkpoint,
+        but over DeepseekV41Cache fields). QuantGrowBuffer.append writes past .n in place / regrows, so
+        snapshotting (window, compress_kv.snapshot(), index_k.snapshot(), pend) + history + pos and
+        restoring them is a safe rollback."""
+        snaps = []
+        for c in self.caches:
+            snaps.append((c.window, c.compress_kv.snapshot(), c.index_k.snapshot(), c.pend_kv, c.pend_score))
+        return (snaps, self.history, self.pos)
+
+    def restore(self, ck):
+        snaps, history, pos = ck
+        for c, s in zip(self.caches, snaps):
+            c.window = s[0]
+            c.compress_kv.load(s[1])
+            c.index_k.load(s[2])
+            c.pend_kv, c.pend_score = s[3], s[4]
+        self.history = history
+        self.pos = pos
+
 
 def _relink(cache: list) -> "_SeqState":
     """Unify a per-layer DeepseekV41Cache list onto one _SeqState. make_cache() already shares one;
