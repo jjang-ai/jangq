@@ -114,7 +114,7 @@ def _relink(cache: list) -> "_SeqState":
 class DeepseekV41Cache:
     """One decoder layer's KV cache for the engine. Duck-types jang_tools.dsv41.LayerCache (the runtime
     reads/writes .window / .compress_kv / .index_k / .pend_kv / .pend_score on it) and adds the engine
-    cache contract (offset / state / meta_state / trim / is_trimmable).
+    cache contract (offset / state / meta_state / from_state / is_trimmable / compress_ratio).
 
     The sliding window is the raw last-``win`` KV; compress_kv / index_k are append-only GrowBuffers of
     the compressed-global pool (one row per ``ratio`` tokens); pend_* is the compressor's partial group.
@@ -132,9 +132,9 @@ class DeepseekV41Cache:
         self._ratio = int(ratio or compress_ratio or 0)
         # LayerCache fields (names match jang_tools.dsv41.model.LayerCache exactly). compress_kv /
         # index_k are 4-bit RESIDENT (FP4-parity) so the live 1M-ctx cache is ~890 MB, not ~3.2 GB
-        # bf16 (the release stores these FP4 too). state() still emits the DEQUANTIZED bf16 (one array
-        # per pool), so the prefix/disk-cache serialization + reconstruction format is UNCHANGED;
-        # restore re-quantizes via load_dense. See jang_tools.dsv41.model.QuantGrowBuffer.
+        # bf16 (the release stores these FP4 too). state() serializes the 4-bit pools as stored (format
+        # v2 below), so stored prefix/SSD entries are the same size and bit-exact. See
+        # jang_tools.dsv41.model.QuantGrowBuffer.
         self.window = None
         self.compress_kv = QuantGrowBuffer()
         self.index_k = QuantGrowBuffer()
@@ -146,9 +146,6 @@ class DeepseekV41Cache:
     @property
     def offset(self) -> int:
         return int(self._seq.pos)
-
-    def is_trimmable(self) -> bool:
-        return True
 
     @property
     def nbytes(self) -> int:
@@ -165,27 +162,66 @@ class DeepseekV41Cache:
         return int(total)
 
     # --- serialization (prefix cache in RAM; disk cache on SSD) ---
+    #
+    # Format v2 (``meta_state["fmt"] == 2``): the 4-bit compressed/index pools are emitted AS STORED
+    # (packed wq uint32 + scales + biases, first n rows only), never dequantized. The old format emitted
+    # the dequantized bf16 view (~3.6x larger: ~3.3 GB per 1M-token entry, ~6.4 GB on SSD after the
+    # numpy float32 widening) and re-quantized on restore (not bit-exact). bf16/f16 arrays travel as
+    # their exact uint16 bit pattern (the numpy-based block store widens bf16 to float32 otherwise);
+    # meta "dtypes" records the original dtype so restore views them back bit-exactly.
+    #
+    # Size: per token ~0.9 KB at 1M context (compressed pools of the 4 KV-source layers, ratio 2/2/2/1,
+    # 512-dim rows at 4 bit = 256 B + 8 groups x 2 x 2 B scales/biases; plus 128-dim index rows), i.e.
+    # a stored 1M-token entry is ~0.9 GB, like the resident cache. Fixed per entry: the 40 sliding
+    # windows (128 x 512 bf16 each, ~5.2 MB) + the Engram history (int32, 4 B/token on layer 0).
+    #
+    # Pre-v2 entries are REJECTED (restore raises), never migrated: they were bf16 round-trips and were
+    # stored N tokens under an N-1 key (the prompt-boundary off-by-one), so they cannot be trusted.
+    FORMAT = 2
+
+    @staticmethod
+    def _to_bits(a):
+        """(array, dtype-name) with bf16/f16 carried as their exact uint16 bit pattern."""
+        name = str(a.dtype).split(".")[-1]
+        if a.dtype in (mx.bfloat16, mx.float16):
+            return a.view(mx.uint16), name
+        return a, name
+
+    @staticmethod
+    def _from_bits(a, name):
+        if name in ("bfloat16", "float16"):
+            want = getattr(mx, name)
+            if a.dtype == mx.uint16:
+                return a.view(want)
+            return a.astype(want)  # a store that widened it (value-exact for bf16/f16 sources)
+        want = getattr(mx, name, None)
+        if want is not None and a.dtype != want:
+            return a.astype(want)
+        return a
+
+    def _named_arrays(self):
+        """[(name, array)] of this layer's live state, 4-bit pools sliced to their n rows."""
+        out = []
+        if self.window is not None:
+            out.append(("window", self.window))
+        for tag, q in (("ck", self.compress_kv), ("ik", self.index_k)):
+            if q.wq is not None and q.n > 0:
+                out.append((f"{tag}_wq", q.wq[:, : q.n]))
+                out.append((f"{tag}_s", q.scales[:, : q.n]))
+                out.append((f"{tag}_b", q.biases[:, : q.n]))
+        if self.pend_kv is not None:
+            out.append(("pend_kv", self.pend_kv))
+        if self.pend_score is not None:
+            out.append(("pend_score", self.pend_score))
+        if self._idx == 0 and self._seq.history.size:
+            out.append(("hist", mx.array(self._seq.history.astype(np.int32))))
+        return out
+
     @property
     def state(self):
-        """Tuple of this layer's live KV arrays (and, on layer 0, the Engram history), in the order
-        declared by meta_state. mlx_lm.generate_step evals this each step; the prefix/disk caches store
-        and round-trip it through the setter."""
-        arrs = []
-        if self.window is not None:
-            arrs.append(self.window)
-        ck = self.compress_kv.view()
-        if ck is not None:
-            arrs.append(ck)
-        ik = self.index_k.view()
-        if ik is not None:
-            arrs.append(ik)
-        if self.pend_kv is not None:
-            arrs.append(self.pend_kv)
-        if self.pend_score is not None:
-            arrs.append(self.pend_score)
-        if self._idx == 0 and self._seq.history.size:
-            arrs.append(mx.array(self._seq.history.astype(np.int32)))
-        return tuple(arrs)
+        """Tuple of this layer's live arrays (format v2, see above), in the order declared by
+        meta_state["order"]. Layer 0 also carries the Engram history."""
+        return tuple(self._to_bits(a)[0] for _, a in self._named_arrays())
 
     @state.setter
     def state(self, value):
@@ -196,27 +232,21 @@ class DeepseekV41Cache:
 
     @property
     def meta_state(self):
-        order = []
-        if self.window is not None:
-            order.append("window")
-        if self.compress_kv.view() is not None:
-            order.append("ck")
-        if self.index_k.view() is not None:
-            order.append("ik")
-        if self.pend_kv is not None:
-            order.append("pend_kv")
-        if self.pend_score is not None:
-            order.append("pend_score")
-        if self._idx == 0 and self._seq.history.size:
-            order.append("hist")
+        named = self._named_arrays()
         return json.dumps({
-            "order": order, "idx": int(self._idx),
+            "fmt": self.FORMAT,
+            "order": [n for n, _ in named],
+            "dtypes": {n: str(a.dtype).split(".")[-1] for n, a in named},
+            "idx": int(self._idx), "ratio": int(self._ratio),
             "ck_n": int(self.compress_kv.n), "ik_n": int(self.index_k.n),
+            "ck_D": self.compress_kv.D, "ik_D": self.index_k.D,
             "pos": int(self._seq.pos),
         })
 
     @meta_state.setter
     def meta_state(self, value):
+        if isinstance(value, (tuple, list)) and len(value) == 1:
+            value = value[0]
         self._meta = json.loads(value) if isinstance(value, str) else dict(value)
         self._try_finalize()
 
@@ -226,56 +256,101 @@ class DeepseekV41Cache:
         if meta is None or value is None:
             return
         self._pending_state = None
+        self._meta = None
+        if int(meta.get("fmt", 0) or 0) != self.FORMAT:
+            raise ValueError(
+                f"stale DeepseekV41Cache entry (format {meta.get('fmt', 1)}, need {self.FORMAT}): "
+                "pre-v2 entries were bf16 round-trips stored at the wrong prompt boundary; rejecting")
+        order = list(meta["order"])
+        if len(order) != len(value):
+            raise ValueError(f"DeepseekV41Cache state has {len(value)} arrays, meta declares {len(order)}")
+        dtypes = meta.get("dtypes") or {}
+        arrs = {n: self._from_bits(a, dtypes.get(n, "")) for n, a in zip(order, value)}
         self._idx = int(meta.get("idx", self._idx))
-        order = meta["order"]
-        it = iter(value)
-        self.window = next(it) if "window" in order else None
-        # state stores the DEQUANTIZED bf16 (one array per pool); re-quantize into the 4-bit resident
-        # buffer. meta ck_n/ik_n matches the dense row count, so load_dense restores the same n.
-        if "ck" in order:
-            self.compress_kv.load_dense(next(it))
-        else:
-            self.compress_kv.load_dense(None)
-        if "ik" in order:
-            self.index_k.load_dense(next(it))
-        else:
-            self.index_k.load_dense(None)
-        self.pend_kv = next(it) if "pend_kv" in order else None
-        self.pend_score = next(it) if "pend_score" in order else None
+        if meta.get("ratio") is not None:
+            self._ratio = int(meta["ratio"])
+        self.window = arrs.get("window")
+        for tag, q in (("ck", self.compress_kv), ("ik", self.index_k)):
+            n = int(meta.get(f"{tag}_n", 0) or 0)
+            if f"{tag}_wq" in arrs:
+                wq, sc, bi = arrs[f"{tag}_wq"], arrs[f"{tag}_s"], arrs[f"{tag}_b"]
+                if not (wq.shape[1] == sc.shape[1] == bi.shape[1] == n):
+                    raise ValueError(f"DeepseekV41Cache {tag} pool rows {wq.shape[1]} != meta n {n}")
+                q.wq, q.scales, q.biases, q.n = wq, sc, bi, n
+                q.D = meta.get(f"{tag}_D") or int(wq.shape[2]) * 32 // q.BITS
+            else:
+                if n:
+                    raise ValueError(f"DeepseekV41Cache {tag} pool missing ({n} rows declared)")
+                q.wq = q.scales = q.biases = None
+                q.n, q.D = 0, None
+        self.pend_kv = arrs.get("pend_kv")
+        self.pend_score = arrs.get("pend_score")
         self._seq.pos = int(meta.get("pos", 0))
         if self._idx == 0:
-            hist = next(it) if "hist" in order else None
+            hist = arrs.get("hist")
             self._seq.history = (np.asarray(hist).astype(np.int64) if hist is not None
                                  else np.zeros(0, np.int64))
 
+    @classmethod
+    def from_state(cls, state, meta_state):
+        """mlx_lm-style constructor (disk prompt cache restore)."""
+        c = cls()
+        c.meta_state = meta_state
+        c.state = state
+        return c
+
+    @property
+    def compress_ratio(self):
+        """The layer's compression ratio, None for a sliding-window-only (ratio 0) layer -- the
+        engine's DSV4 record validator requires a ratio in [1, 4096] when one is given. The restore
+        does not depend on it (meta_state carries "ratio")."""
+        return int(self._ratio) if self._ratio else None
+
+    @property
+    def sliding_window(self):
+        return None if self.window is None else int(self.window.shape[1])
+
+    def is_trimmable(self) -> bool:
+        # Not exactly trimmable: the sliding window keeps only the last `win` rows (older rows cannot be
+        # rebuilt), dropping compressed rows needs the ratio-aligned group boundary, and the compressor's
+        # partial group (pend_*) is path state. Rollback is checkpoint()/restore() on the _SeqState.
+        return False
+
     def trim(self, n: int) -> int:
-        """Drop the last ``n`` committed tokens (speculative reject / prefix-length fit). Mirrors
-        DeepseekV4Cache.trim: trim the window, drop the proportional tail of the compressed pools,
-        clear the compressor's partial group; layer 0 also rolls back pos + Engram history."""
-        n = int(n)
-        if n <= 0:
-            return 0
-        if self.window is not None:
-            keep = self.window.shape[1] - n
-            self.window = self.window[:, :keep] if keep > 0 else None
-        self.pend_kv = None
-        self.pend_score = None
-        r = self._ratio
-        if r > 0:
-            rows = max(1, n // r)
-            for gb in (self.compress_kv, self.index_k):
-                gb.n = max(0, gb.n - rows)
-                if gb.n == 0:
-                    gb.wq = gb.scales = gb.biases = None
-        else:
-            # ratio 0 layers keep no compressed pool
-            for gb in (self.compress_kv, self.index_k):
-                gb.wq = gb.scales = gb.biases = None
-                gb.n = 0
-        if self._idx == 0:
-            self._seq.pos = max(0, self._seq.pos - n)
-            self._seq.history = self._seq.history[: self._seq.pos]
-        return n
+        """No-op (returns 0 trimmed): see is_trimmable. The previous lossy trim (window slice, pool
+        rows max(1, n // r), cleared pend) produced a state no forward could have produced."""
+        return 0
+
+
+def clone_cache_list(cache: list) -> list:
+    """Deep copy of an engine DeepseekV41Cache list (a prompt-boundary snapshot), bit-exact and compact:
+    the 4-bit pools are copied as stored (first n rows of wq/scales/biases), never dequantized, and all
+    layers share ONE new _SeqState (pos + one copy of the Engram history, not one per layer)."""
+    def cp(a):
+        return None if a is None else mx.array(a)  # mx.array(a) copies
+
+    src_seq = cache[0]._seq
+    seq = _SeqState()
+    seq.pos = int(src_seq.pos)
+    seq.history = src_seq.history.copy()
+    out = []
+    for c in cache:
+        cl = DeepseekV41Cache(seq, c._idx, c._ratio)
+        cl.window = cp(c.window)
+        for src, dst in ((c.compress_kv, cl.compress_kv), (c.index_k, cl.index_k)):
+            if src.wq is not None and src.n > 0:
+                dst.wq = cp(src.wq[:, : src.n])
+                dst.scales = cp(src.scales[:, : src.n])
+                dst.biases = cp(src.biases[:, : src.n])
+                dst.n, dst.D = int(src.n), src.D
+        cl.pend_kv = cp(c.pend_kv)
+        cl.pend_score = cp(c.pend_score)
+        out.append(cl)
+    seq.caches = list(out)
+    arrays = [a for c in out for _, a in c._named_arrays()]
+    if arrays:
+        mx.eval(arrays)
+    return out
 
 
 class Model(nn.Module):
@@ -320,10 +395,16 @@ class Model(nn.Module):
         from SSD while this chunk computes."""
         rt = self.runtime
         ids = [int(t) for t in mx.array(input_ids).reshape(-1).tolist()]
-        if cache and isinstance(cache[0], DeepseekV41Cache):
+        if cache and all(isinstance(c, DeepseekV41Cache) for c in cache):
             seq = _relink(cache)  # unify per-layer caches onto one Session (handles reconstructed lists)
+        elif cache:
+            # A cache list that is not (entirely) DeepseekV41Cache -- e.g. a generic disk-cache restore
+            # that rebuilt unknown classes as empty KVCache. Falling back to the runtime's shared
+            # session would silently continue a stale sequence; refuse instead.
+            raise TypeError("DeepseekV41 Model needs a DeepseekV41Cache list (got "
+                            + ", ".join(sorted({type(c).__name__ for c in cache})) + ")")
         else:
-            seq = rt.session  # fall back to the runtime's default session
+            seq = rt.session  # no engine cache: the runtime's default session (standalone use)
         logits = rt.forward(ids, seq, all_logits=all_logits, images=images, token_types=token_types,
                             engram_lookahead=kwargs.get("engram_lookahead"))
         if all_logits:
