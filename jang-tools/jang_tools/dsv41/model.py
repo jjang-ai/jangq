@@ -26,6 +26,12 @@ import numpy as np
 
 from jang_tools.dsv41.engram import EngramLayout, NgramHasher, open_engram_tables
 
+# Text prefill longer than PIPELINE_MIN tokens runs in sub-chunks so cold Engram row reads overlap
+# the GPU (DSV41._forward_pipelined): a small first sub-chunk, then PIPELINE_CHUNK at a time.
+PIPELINE_MIN = 256
+PIPELINE_FIRST = 128
+PIPELINE_CHUNK = 512
+
 GROUP_SIZE = 64
 
 
@@ -987,6 +993,8 @@ class DSV41:
         With return_hidden also returns main_hidden [len(ids), dim*n_targets] for the dSpark head."""
         sess = sess or self.session
         arr = np.asarray(ids, np.int64)
+        if images is None and token_types is None and len(arr) > PIPELINE_MIN:
+            return self._forward_pipelined(arr, sess, all_logits, return_hidden)
         image_mask = None
         if token_types is not None:
             tt = np.asarray(token_types)
@@ -1003,6 +1011,44 @@ class DSV41:
             mh = None if main_hidden is None else main_hidden[0]  # [N, dim*n_targets]
             return (logits if all_logits else logits[0]), mh
         return out if all_logits else out[0]
+
+    def _forward_pipelined(self, arr: np.ndarray, sess: "Session", all_logits: bool, return_hidden: bool):
+        """Text prefill in sub-chunks with the Engram row reads running ahead of the GPU.
+
+        Cold Engram rows are random SSD reads; done up front they stall the forward for as long
+        as the reads take. Hashing needs only token ids, so every sub-chunk's rows are requested
+        at once, and each sub-chunk's forward is queued (async_eval) as soon as its rows land,
+        while later reads continue. The first sub-chunk is small so the GPU starts early.
+        Sub-chunk boundaries do not change the result (the compressor and caches are
+        chunking-invariant, as for the engine's own prefill chunks)."""
+        hashes, sess.history = self.hasher.hash(arr, sess.pos, sess.history, None)  # [S, n_layers, cols]
+        bounds, lo = [], 0
+        while lo < len(arr):
+            hi = min(len(arr), lo + (PIPELINE_FIRST if lo == 0 else PIPELINE_CHUNK))
+            bounds.append((lo, hi))
+            lo = hi
+        lids = self.layout.layer_ids
+        pending = [[self.tables[lid].prefetch(hashes[a:b, j]) for j, lid in enumerate(lids)] for a, b in bounds]
+        logits_parts, hidden_parts = [], []
+        for (a, b), futs in zip(bounds, pending):
+            rows = {lid: self.tables[lid].finish(hashes[a:b, j].shape, f.result())[None]
+                    for j, (lid, f) in enumerate(zip(lids, futs))}
+            seg = Seg(0, b - a, sess.pos, sess.caches)
+            last = b == len(arr)
+            out = self.model(mx.array(arr[None, a:b].astype(np.int32)), [seg], rows,
+                             all_logits=all_logits, return_hidden=return_hidden)
+            sess.pos += b - a
+            logits, mh = out if return_hidden else (out, None)
+            if all_logits or last:
+                logits_parts.append(logits)
+            if mh is not None:
+                hidden_parts.append(mh)
+            mx.async_eval([logits] + ([mh] if mh is not None else []))
+        logits = mx.concatenate(logits_parts, axis=0) if all_logits else logits_parts[-1]
+        if return_hidden:
+            mh = None if not hidden_parts else mx.concatenate(hidden_parts, axis=1)[0]
+            return (logits if all_logits else logits[0]), mh
+        return logits if all_logits else logits[0]
 
     def decode_batch(self, sessions: list["Session"], tokens: list[int]) -> mx.array:
         """One token for each of several sessions in a single forward. Returns logits [B, vocab]."""

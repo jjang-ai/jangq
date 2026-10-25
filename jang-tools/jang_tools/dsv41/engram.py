@@ -3,8 +3,8 @@
 Port of the release's inference/engram.py. The two tables are ~98 GB each
 (384M rows x 256 FP8 bytes + 8 E8M0 scale bytes per row). Each position needs
 only (max_ngram_size - 1) * n_heads = 24 rows per Engram layer, so the tables
-stay in their original safetensors shards and are read through a read-only
-memory map: the OS page cache holds whatever is hot, and none of it is wired
+stay in their original safetensors shards and are read in place with concurrent
+pread calls: the OS page cache holds whatever is hot, and none of it is wired
 GPU memory.
 """
 
@@ -167,16 +167,22 @@ class NgramHasher:
         return np.concatenate(out, -1) + self.offsets[None], history
 
 
-_IO_POOL = ThreadPoolExecutor(32, thread_name_prefix="engram-io")
-_SMALL = 4096  # above this many rows (prefill), a memory-mapped gather is cheaper than per-row syscalls
+# Cold rows are random 256-byte reads spread over ~98 GB per table, so throughput is set by how
+# many reads are in flight. Measured on cold rows: a single-thread memmap gather (one page fault
+# at a time) reads ~8-11k rows/s; 64 concurrent pread lanes in 256-row tasks read ~130k rows/s.
+_IO_POOL = ThreadPoolExecutor(64, thread_name_prefix="engram-io")
+_IO_TASK = 256
+# Prefetch orchestration runs on its own pool so a waiting prefetch never holds an I/O lane.
+_PREFETCH_POOL = ThreadPoolExecutor(4, thread_name_prefix="engram-prefetch")
 
 
 class DiskEngramTable:
     """One layer's FP8 table, read from its safetensors shard in place.
 
-    Decode reads its few rows with concurrent pread calls (the SSD serves the random 256-byte
-    reads in parallel; sequential page faults would cost ~0.1 ms each). Large prefill batches use
-    a read-only memory map. Either way the OS page cache keeps hot n-grams; nothing is wired.
+    Rows are read with concurrent pread calls for every batch size: decode's few rows and
+    prefill's tens of thousands alike (the SSD serves random small reads in parallel; page faults
+    through a memory map are serviced one at a time). The OS page cache keeps hot n-grams;
+    nothing is wired.
     """
 
     def __init__(self, shards: Shards, layer_id: int):
@@ -193,28 +199,49 @@ class DiskEngramTable:
         self.block = w.shape[1] // s.shape[1]
 
     def _pread(self, uniq: np.ndarray):
-        def one(r):
-            r = int(r)
-            return os.pread(self.fd, self.dim, self.w_off + r * self.dim), os.pread(self.fd, self.sdim, self.s_off + r * self.sdim)
+        """Rows and scales for sorted unique row ids, read by concurrent pread tasks into
+        preallocated buffers (each task covers _IO_TASK rows)."""
+        n = len(uniq)
+        rows = np.empty((n, self.dim), np.uint8)
+        scales = np.empty((n, self.sdim), np.uint8)
+        fd, dim, sdim, w_off, s_off = self.fd, self.dim, self.sdim, self.w_off, self.s_off
+        ids = uniq.tolist()
 
-        got = list(_IO_POOL.map(one, uniq))
-        rows = np.frombuffer(b"".join(g[0] for g in got), np.uint8).reshape(len(uniq), self.dim)
-        scales = np.frombuffer(b"".join(g[1] for g in got), np.uint8).reshape(len(uniq), self.sdim)
+        def task(lo):
+            for i in range(lo, min(n, lo + _IO_TASK)):
+                r = ids[i]
+                rows[i] = np.frombuffer(os.pread(fd, dim, w_off + r * dim), np.uint8)
+                scales[i] = np.frombuffer(os.pread(fd, sdim, s_off + r * sdim), np.uint8)
+
+        if n <= _IO_TASK:
+            task(0)
+        else:
+            list(_IO_POOL.map(task, range(0, n, _IO_TASK)))
         return rows, scales
+
+    def read(self, ids: np.ndarray):
+        """Host-side half of lookup (thread-safe, no MLX calls): (inverse map, rows, scales)."""
+        uniq, inv = np.unique(ids.reshape(-1), return_inverse=True)
+        rr, ss = self._pread(uniq)
+        return inv, rr, ss
+
+    def prefetch(self, ids: np.ndarray):
+        """Start reading ids' rows in the background; pass the future's result to `finish`."""
+        return _PREFETCH_POOL.submit(self.read, ids)
 
     def lookup(self, ids: np.ndarray) -> mx.array:
         """ids [...] -> bf16 rows [..., dim]. Duplicate ids are read once."""
-        flat = ids.reshape(-1)
-        uniq, inv = np.unique(flat, return_inverse=True)
-        if len(uniq) <= _SMALL:
-            rr, ss = self._pread(uniq)
-        else:
-            rr, ss = np.asarray(self.rows[uniq]), np.asarray(self.scales[uniq])
+        return self.finish(ids.shape, self.read(ids))
+
+    def finish(self, shape, got) -> mx.array:
+        """Dequantize what `read` returned into bf16 rows of `shape + (dim,)`."""
+        inv, rr, ss = got
         r = mx.array(rr)
         s = mx.array(ss)
-        vals = mx.from_fp8(r, dtype=mx.float32).reshape(len(uniq), -1, self.block) * e8m0_to_float(s)[..., None]
-        vals = vals.reshape(len(uniq), self.dim).astype(mx.bfloat16)
-        return vals[mx.array(inv.astype(np.int32))].reshape(*ids.shape, self.dim)
+        n = rr.shape[0]
+        vals = mx.from_fp8(r, dtype=mx.float32).reshape(n, -1, self.block) * e8m0_to_float(s)[..., None]
+        vals = vals.reshape(n, self.dim).astype(mx.bfloat16)
+        return vals[mx.array(inv.astype(np.int32))].reshape(*shape, self.dim)
 
 
 def open_engram_tables(engram_dir: Path, layer_ids) -> dict[int, DiskEngramTable]:
