@@ -238,6 +238,14 @@ class QuantGrowBuffer:
                             group_size=GROUP_SIZE, bits=self.BITS)
         return deq[None]
 
+    def gather(self, idx: mx.array) -> mx.array:
+        """Dequantize only the rows ``idx`` ([M] int32, each in [0, n)) -> [M, D] bf16. Bit-identical
+        to ``view()[0][idx]`` (dequantization is per row/group), without materializing the pool."""
+        wq = mx.take(self.wq[0], idx, axis=0)
+        sc = mx.take(self.scales[0], idx, axis=0)
+        bi = mx.take(self.biases[0], idx, axis=0)
+        return mx.dequantize(wq, sc, bi, group_size=GROUP_SIZE, bits=self.BITS)
+
     def snapshot(self):
         return (self.wq, self.scales, self.biases, self.n, self.D)
 
@@ -271,6 +279,24 @@ class Shared:
         self.index_k = None
         self.topk_idxs = None
         self.candidates = None
+        self._views = {}
+
+    def view(self, buf, n):
+        """``buf.view(n)`` memoized for this forward: a pool shared by several consumer layers (layer
+        20's index pool feeds 5 indexers; each compressed pool up to 6 attention layers) is
+        dequantized once per forward instead of once per consumer. Lives only as long as this
+        Shared (one forward), so nothing extra stays resident between steps."""
+        key = (id(buf), int(n), int(getattr(buf, "n", 0)))
+        hit = self._views.get(key)
+        if hit is None or hit[0] is not buf:
+            hit = (buf, buf.view(n))
+            self._views[key] = hit
+        return hit[1]
+
+
+# Queries per segment up to which attention gathers only its selected compressed rows from the 4-bit
+# pool instead of dequantizing the whole pool (decode = 1, DSpark verify <= bs + 1).
+GATHER_MAX_QUERIES = 8
 
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
@@ -396,7 +422,7 @@ class Indexer(nn.Module):
         q = self.wq_b(qr).reshape(B, S, self.n_heads, self.head_dim)
         # the release scores in bf16 end to end; near-tied positions follow that rounding
         q = rope(q, mx.arange(start_pos, end))[0].astype(mx.bfloat16)  # [S,h,d]
-        index_k = shared.index_k.view(T)[0].astype(mx.bfloat16)  # [T,d]
+        index_k = shared.view(shared.index_k, T)[0].astype(mx.bfloat16)  # [T,d]
         w = (self.weights_proj(x) * (self.head_dim ** -0.5 * self.n_heads ** -0.5))[0]  # [S,h] bf16
         k = min(self.topk, T)
         chunk = max(16, min(512, (1 << 26) // max(1, self.n_heads * T)))
@@ -418,6 +444,31 @@ class Indexer(nn.Module):
         if self.is_candidate_source:
             shared.candidates = mx.concatenate(out_cand, axis=0)
         return mx.concatenate(out_idx, axis=0)[None]
+
+
+def append_compressed_rows(raw, widx, cidx, pool, T, shared, gather=False):
+    """Append the compressed-pool rows the queries attend to after the window rows.
+
+    raw [1,L,D] window KV, widx [1,S,W] window indices into raw, cidx [1,S,K] top-k compressed indices
+    in [0,T) (-1 = none). Returns (kv, idxs) for sparse_attention.
+
+    gather=False: the whole pool (dequantized once per forward via shared.view) is appended and cidx
+    is offset into it. gather=True (decode / DSpark verify): only the S*K selected rows are dequantized
+    from the 4-bit pool, each query's K slots get their own rows in the same order -- bit-identical
+    attention, without the full [T,D] dequant + concat + fp32 cast (~0.5-1 GB per layer per token at 1M
+    context)."""
+    if gather and isinstance(pool, QuantGrowBuffer):
+        S, K = cidx.shape[1], cidx.shape[2]
+        valid = cidx >= 0
+        rows = pool.gather(mx.where(valid, cidx, 0).reshape(-1).astype(mx.int32))  # [S*K, D]
+        slot = mx.arange(S * K, dtype=mx.int32).reshape(1, S, K) + raw.shape[1]
+        cidx = mx.where(valid, slot, -1)
+        kv = mx.concatenate([raw, rows[None].astype(raw.dtype)], axis=1)
+    else:
+        comp = shared.view(pool, T) if shared is not None else pool.view(T)
+        cidx = mx.where(cidx >= 0, cidx + raw.shape[1], -1)
+        kv = mx.concatenate([raw, comp], axis=1)
+    return kv, mx.concatenate([widx, cidx], axis=-1)
 
 
 class Seg:
@@ -499,11 +550,10 @@ class Attention(nn.Module):
         cache.window = raw[:, -win:]
 
         if self.ratio:
-            comp, cidx = self._compressed(x, qr, start, cache, shared)
-            if comp is not None:
-                cidx = mx.where(cidx >= 0, cidx + raw.shape[1], -1)
-                raw = mx.concatenate([raw, comp], axis=1)
-                widx = mx.concatenate([widx, cidx], axis=-1)
+            T, cidx = self._compressed(x, qr, start, cache, shared)
+            if T:
+                raw, widx = append_compressed_rows(raw, widx, cidx, shared.compress_kv, T, shared,
+                                                   gather=S <= GATHER_MAX_QUERIES)
         return sparse_attention(q, raw, self.attn_sink, widx, self.scale)
 
     def _compressed(self, x, qr, start_pos, cache: LayerCache, shared: Shared):
@@ -525,9 +575,8 @@ class Attention(nn.Module):
         if latent is not None:
             # a latent stands for the first token of its group
             cache.compress_kv.append(self._rope(latent, (g0 + mx.arange(latent.shape[1])) * r))
-        if T == 0:
-            return None, idxs
-        return shared.compress_kv.view(T), idxs
+        # T compressed rows are visible to this segment (read from shared.compress_kv by the caller)
+        return T, idxs
 
 
 class SwitchProj(nn.Module):
