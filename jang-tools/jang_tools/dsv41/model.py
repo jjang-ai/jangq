@@ -202,6 +202,12 @@ class Shared:
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
     """q [1,S,H,D], kv [1,N,D] (keys == values), sink [H], idxs [1,S,K] int32 (-1 = none)."""
+    if q.shape[1] == 1:  # decode step: fused in-place indexed Metal kernel (mlx-serve PR#911 port)
+        from jang_tools.dsv41.metal_decode_attn import dsv41_decode_attn, decode_attn_requested
+        if decode_attn_requested():
+            out = dsv41_decode_attn(q, kv, sink, idxs, scale)  # (1,1,H,D), keeps kv bf16 (no fp32 copy)
+            if out is not None:
+                return out
     q, kv, idxs = q[0], kv[0].astype(mx.float32), idxs[0]
     S, H, D = q.shape
     outs = []
