@@ -30,7 +30,7 @@ def main():
     eos_tok = m.tokenizer.token_to_id("<｜end▁of▁sentence｜>")
     eos = {e for e in (eos_tok, m.eos_id) if e is not None}
     fixed = DSparkRunner(m, ds)                       # width = bs (5)
-    adaptive = DSparkRunner(m, ds, adaptive=True, min_accept=0.4)  # adaptive width + pure-AR fallback
+    adaptive = DSparkRunner(m, ds, adaptive=True)     # EMA width-shrink + LATCH to bare AR after 2 zero-accept drafts
 
     prompts = {
         "code": "Write a Python function to compute fibonacci(n) iteratively. Return only code.",
