@@ -44,14 +44,19 @@ token-identical to greedy on code (59/59) and structured (29/29). = parity with 
 
 ## M2 — Adaptive never-below-AR (`DSparkRunner(adaptive=True)`)
 
-- `accept_ema = 0.7*ema + 0.3*(k/W)` each step; draft width `W = max(1, round(self.width * ema))`
-  (shrink as acceptance falls so low-accept content drafts — and rejects — less).
-- **LATCH:** after `latch_after = 2` consecutive zero-accept drafts, run **bare greedy** (no
-  draft/verify/hidden/window upkeep) for the rest of the generation. Latch state is per-`generate()`
-  (resets each request). Guarantees spec throughput ≥ AR on sustained low-accept content.
-- **Gap for vmlx-swift to improve:** the latch is permanent *within* a generation (no re-entry), so
-  mixed reasoning→code loses spec after one lull. Swift should add re-entry hysteresis (e.g. re-probe
-  at `16·2^k` intervals) — the Python reference lacks it.
+- `accept_ema = 0.7*ema + 0.3*(k/W)` each step; draft width `W = clamp(round(self.width * ema), 1,
+  self.width)` — depth is **acceptance-governed**, shrinking as acceptance falls AND growing back as
+  it recovers, always within the draft head's physical size `bs` (a capacity bound, not a policy depth).
+- **RECOVERABLE low-overhead mode (NOT a permanent latch):** after `latch_after = 2` consecutive
+  zero-accept drafts it ENTERS a bare-greedy mode (one forward/token, but it still keeps the draft
+  windows current via `return_hidden`+`seed_windows`) to avoid paying draft/verify overhead for
+  nothing — then issues one speculative **probe** every `probe_every = 16` emitted tokens and LEAVES
+  the mode the instant a probe accepts (`k ≥ 1`). So a mixed reasoning→code generation recovers
+  speculation automatically instead of losing it after one lull. No hard/fixed MTP depth is ever
+  enforced. (Per Eric 2026-10-25: "never enforce a hard MTP depth"; replaces the old permanent latch.)
+- **Verified (`scratchpad/verify_dspark_adaptive.py`):** output is **token-identical** to plain greedy
+  AR, and on a low-accept→easy prompt drafting re-engages (accepted > 0), proving recovery.
+- Swift parity: the vmlx-swift port should mirror this recoverable mode (no permanent latch).
 
 ## M3 — Why single-stream AR decode is at the floor (so MTP is the only lever)
 

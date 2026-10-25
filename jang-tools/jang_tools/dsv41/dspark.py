@@ -377,17 +377,24 @@ class DSparkRunner:
     internal compression."""
 
     def __init__(self, dsv41, dspark, width=None, conf_gate=None,
-                 adaptive=False, latch_after=2):
+                 adaptive=False, latch_after=2, probe_every=16):
         self.m = dsv41
         self.ds = dspark
         self.width = width or dspark.bs
         self.conf_gate = conf_gate  # if set, truncate the proposed block where confidence drops below it
-        # Adaptive floors throughput at plain AR: an acceptance EMA shrinks the draft width as it
-        # falls, and after ``latch_after`` consecutive zero-accept drafts it LATCHES to bare greedy
-        # (no draft/verify/hidden/window overhead) for the rest of the generation -> spec cannot fall
-        # below AR on sustained low-accept content (short detection transient amortizes to ~0).
+        # Adaptive drafting is acceptance-governed and RECOVERABLE -- it never enforces a fixed/hard
+        # MTP depth. The draft width each step tracks a rolling acceptance EMA, W = clamp(round(bs *
+        # ema), 1, bs): it shrinks as acceptance falls AND grows back as it recovers, always inside
+        # the draft head's physical size ``bs`` (a model-capacity bound, not a policy depth). On
+        # sustained zero-accept content it drops into a low-overhead AR mode (bare greedy, one
+        # forward) to avoid paying draft/verify overhead for nothing -- but that mode is NOT a
+        # permanent latch: it keeps the draft windows current and issues one speculative PROBE every
+        # ``probe_every`` emitted tokens, leaving AR mode the instant a probe accepts, so throughput
+        # recovers automatically the moment the content becomes predictable again. ``latch_after``
+        # consecutive zero-accept drafts is the trigger to ENTER (not lock) AR mode.
         self.adaptive = adaptive
         self.latch_after = latch_after
+        self.probe_every = max(1, int(probe_every))
 
     def _greedy(self, logits):
         return int(mx.argmax(logits))
@@ -425,11 +432,14 @@ class DSparkRunner:
     def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None):
         """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
         backbone-greedy tokens one at a time (identical to greedy output); no-refeed fast path +
-        adaptive latch apply (DECODE_DSPARK_METHODS.md M1/M2)."""
+        RECOVERABLE acceptance-governed drafting (DECODE_DSPARK_METHODS.md M1/M2). Depth is never
+        hard-enforced: width = clamp(round(bs*ema), 1, bs) shrinks AND grows with acceptance, and the
+        low-overhead AR mode self-probes out of itself (see __init__)."""
         m, ds = self.m, self.ds
         n_emitted = n_steps = n_drafted = n_accepted = 0
         eos_ids = set(int(e) for e in eos_ids)
-        accept_ema, zero_streak, ar_latched = 1.0, 0, False   # adaptive state
+        accept_ema, zero_streak = 1.0, 0            # adaptive state
+        ar_mode, since_probe = False, 0             # recoverable low-overhead mode (NOT a latch)
 
         def _rec():
             if stats is not None:
@@ -438,18 +448,26 @@ class DSparkRunner:
         while n_emitted < max_new:
             n_steps += 1
             p0 = self._greedy(pending)                 # backbone truth for c+1 (free)
-            if self.adaptive and ar_latched:
-                # Latched pure-AR: after >=latch_after zero-accept drafts, run BARE greedy for the
-                # rest -> byte-for-byte AR cost, so spec throughput cannot fall below AR.
-                pending = m.forward([p0], sess, all_logits=False)
+            if self.adaptive and ar_mode and since_probe < self.probe_every:
+                # Low-overhead AR step: one backbone forward (bare greedy), but keep the draft windows
+                # current (return_hidden + seed) so a later probe can resume drafting from correct
+                # state. This is a transient mode, re-tested by the probe below -- never a permanent
+                # hard depth.
+                plog, pmh = m.forward([p0], sess, all_logits=False, return_hidden=True)
+                ds.seed_windows(pmh[None], range(c + 1, c + 2))
                 c += 1
+                pending = plog
+                since_probe += 1
                 yield p0; n_emitted += 1
                 if (eos_ids and p0 in eos_ids) or n_emitted >= max_new:
                     _rec(); return
                 continue
+            probing = self.adaptive and ar_mode        # fell through while in AR mode -> recovery probe
+            if probing:
+                since_probe = 0
             draft_ids, conf = self.ds.draft(p0, c)     # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
             W = self.width                             # number of draft tokens to verify (1..bs)
-            if self.adaptive:                          # shrink width as acceptance falls
+            if self.adaptive:                          # depth tracks acceptance (shrinks AND grows)
                 W = max(1, min(self.width, round(self.width * accept_ema)))
             if self.conf_gate is not None:
                 cg = (conf >= self.conf_gate).tolist()
@@ -469,10 +487,15 @@ class DSparkRunner:
                     break
             n_accepted += k
             accept_ema = 0.7 * accept_ema + 0.3 * (k / max(1, W))  # update rolling acceptance
-            if self.adaptive:                          # latch to pure-AR after consecutive rejects
+            if self.adaptive:
                 zero_streak = zero_streak + 1 if k == 0 else 0
-                if zero_streak >= self.latch_after:
-                    ar_latched = True
+                if ar_mode:
+                    if k >= 1:                         # a probe accepted -> content predictable again
+                        ar_mode, zero_streak = False, 0
+                    else:
+                        since_probe = 0                # stay in AR mode; wait probe_every before next probe
+                elif zero_streak >= self.latch_after:  # ENTER (not lock) low-overhead AR mode
+                    ar_mode, since_probe = True, 0
             if k == W:
                 # whole block accepted: the verify forward already wrote exactly-correct causal KV for
                 # every position (no rejected tail to undo), so skip the restore+refeed commit forward
