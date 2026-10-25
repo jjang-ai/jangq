@@ -78,11 +78,27 @@ row; the partial pass is the GLM kernel verbatim). Equivalent to the stock gathe
 building block: the same in-place-indexed fp32-accumulate structure is what a head_dim-512 fused
 *prefill* attention kernel would use (not pursued — prefill already at parity).
 
-## Engine (vmlx-py) wiring status
+## Engine (vmlx-py) wiring status — DONE (vmlx `bf1ce697`)
 
-- `vmlx_engine/dspark/` (drafter/generate/session) is for Qwen3/MiniCPM DSpark, **not** V4.1.
-- `native_mtp.py` skips DSV4-family custom-generator runtimes; V4.1 serves on SingleBatchGenerator.
-- **TODO:** a V4.1 spec-decode generator in the engine that reuses this `DSparkRunner` math (M1+M2):
-  load the bundle `dspark/` draft (`jang_tools.dsv41.dspark.load_dspark`), and in the SBG decode step
-  do checkpoint → draft → verify-forward → accept → (fast path | restore+commit). The engine's
-  `DeepseekV41Cache` already exposes `trim`/rollback, enabling M1-step-7 no-refeed for partial accept.
+V4.1 DSpark speculative decode is wired into the engine serving path and verified live:
+- **Draft load** (`loaders/load_jangtq_dsv41.py`): `_maybe_load_dsv41_dspark` calls
+  `jang_tools.dsv41.dspark.load_dspark(runtime.args, runtime.model.embed, runtime.model.head)` and
+  attaches `model._dspark`. Gated by `VMLX_DSV41_DSPARK` (default OFF).
+- **Generator** (`utils/dsv41_dspark_generator.py::DSV41DSparkGenerator`): subclasses
+  `SingleBatchGenerator`; overrides `_start_request`/`_yield_current_and_schedule_next` to drive
+  `DSparkRunner.stream()` on `model.runtime` (its own runtime `Session` + checkpoint/restore + the
+  no-refeed fast path), yielding one committed token per scheduler step and reusing the inherited
+  finish-reason/Response/stop machinery. Text-only; VL requests fall back to the inherited AR path.
+- **Selection** (`scheduler.py::_create_batch_generator`): a branch before the SBG fallback returns
+  `DSV41DSparkGenerator` iff `model._dspark` is attached — so the default AR path is never affected.
+- **Verified live** (`vmlx serve`, warmed, thinking-off code request): coherent output, `finish=stop`,
+  **decode-only ~65.9 tok/s vs AR ~31** (2x+); generator selection confirmed in logs; output
+  token-identical to greedy by construction.
+- Note: the engine's older `vmlx_engine/dspark/` (drafter/generate/session) is Qwen3/MiniCPM DSpark,
+  unrelated to V4.1. Future: the engine's `DeepseekV41Cache` exposes `trim`, so a later version can do
+  M1-step-7 no-refeed for *partial* accept too (the standalone runtime skips it).
+
+### vmlx-swift mirror (Libraries/MLXLMCommon/SpecDec)
+Same shape: load the bundle `dspark/` draft, keep a draft-windows + backbone `Session` per sequence,
+and in the decode step run M1 (draft → verify forward → accept → fast-path|commit) + M2 (adaptive
+width + AR latch, **plus** the re-entry hysteresis the Python reference lacks).
