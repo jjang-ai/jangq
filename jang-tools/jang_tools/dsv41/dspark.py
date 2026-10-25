@@ -430,7 +430,7 @@ class DSparkRunner:
             feed = [p0] + draft_ids[1 : 1 + W]         # [p0,d1..dW] at positions c+1..c+1+W
             n_drafted += W
             ck = sess.checkpoint()
-            vlog, _ = m.forward(feed, sess, all_logits=True, return_hidden=True)  # vlog[j] predicts c+2+j
+            vlog, vmh = m.forward(feed, sess, all_logits=True, return_hidden=True)  # vlog[j] predicts c+2+j
             truth = [int(x) for x in mx.argmax(vlog, axis=-1).tolist()]  # truth for c+2 .. c+2+W
             k = 0
             for j in range(W):                         # draft d_{j+1}=draft_ids[1+j] @ c+2+j vs truth[j]
@@ -444,8 +444,22 @@ class DSparkRunner:
                 zero_streak = zero_streak + 1 if k == 0 else 0
                 if zero_streak >= self.latch_after:
                     ar_latched = True
+            if k == W:
+                # whole block accepted: the verify forward already wrote exactly-correct causal KV
+                # for every position (no rejected tail to undo), so skip the restore+refeed commit
+                # forward entirely -> 1 backbone forward this step instead of 2. truth[W] (the free
+                # bonus token) becomes the next step's p0 via pending=vlog[W].
+                emit = [p0] + draft_ids[1 : 1 + W]      # W+1 accepted tokens; bonus deferred to next p0
+                ds.seed_windows(vmh[None], range(c + 1, c + 1 + len(emit)))
+                c += len(emit)
+                pending = vlog[W]                       # predicts c+1 (== truth[W], next step's p0)
+                out.extend(emit)
+                if eos_ids and any(t in eos_ids for t in emit):
+                    out = out[: next(i for i, t in enumerate(out) if t in eos_ids) + 1]
+                    break
+                continue
             emit = [p0] + draft_ids[1 : 1 + k] + [truth[k]]  # all backbone-greedy truth, c+1..c+k+2
-            sess.restore(ck)                            # undo the W+1-token verify
+            sess.restore(ck)                            # undo the W+1-token verify (rejected tail present)
             flog, fmh = m.forward(emit, sess, all_logits=True, return_hidden=True)  # commit exactly `emit`
             ds.seed_windows(fmh[None], range(c + 1, c + 1 + len(emit)))  # windows now hold [0..c+len(emit)]
             c += len(emit)
