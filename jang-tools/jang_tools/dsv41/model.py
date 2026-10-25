@@ -280,6 +280,7 @@ class Shared:
         self.topk_idxs = None
         self.candidates = None
         self._views = {}
+        self.capture = False  # stash per-token projections for DSV41.commit_prefix (DSpark verify)
 
     def view(self, buf, n):
         """``buf.view(n)`` memoized for this forward: a pool shared by several consumer layers (layer
@@ -365,15 +366,32 @@ class Compressor(nn.Module):
         if ratio > 1:
             self.wgate = DenseLinear(args.hidden_size, args.head_dim)
 
-    def __call__(self, x, start_pos, cache: LayerCache):
+    def __call__(self, x, start_pos, cache: LayerCache, capture: bool = False):
         """Latents for the groups completed by this chunk, and the index of the first one.
 
         Group g pools tokens g*r .. g*r+r-1; a trailing partial group waits in the cache, so any
         chunking (single prefill, continuation, one token per step) yields the same groups."""
         r = self.ratio
         if r == 1:  # one token per group: a plain projection, no pooling
-            return self.norm(self.wkv(x)), start_pos
+            latent = self.norm(self.wkv(x))
+            if capture:
+                cache.verify_proj = latent
+            return latent, start_pos
         kv, score = self.wkv(x, mx.float32), self.wgate(x, mx.float32)
+        if capture:
+            cache.verify_proj = (kv, score)
+        return self._pool(kv, score, start_pos, cache, x.dtype)
+
+    def commit(self, proj, keep: int, start_pos: int, cache: LayerCache):
+        """Replay only the first ``keep`` tokens of a captured forward onto the restored cache:
+        the same groups / pending tail a forward of exactly those tokens would leave."""
+        if self.ratio == 1:
+            return proj[:, :keep], start_pos
+        kv, score = proj
+        return self._pool(kv[:, :keep], score[:, :keep], start_pos, cache, mx.bfloat16)
+
+    def _pool(self, kv, score, start_pos, cache: LayerCache, dtype):
+        r = self.ratio
         n_pend = 0
         if cache.pend_kv is not None:
             n_pend = cache.pend_kv.shape[1]
@@ -390,7 +408,7 @@ class Compressor(nn.Module):
         kv = kv[:, :full].reshape(B, -1, r, kv.shape[-1])
         score = score[:, :full].reshape(B, -1, r, score.shape[-1])
         out = mx.sum(kv * mx.softmax(score, axis=2), axis=2)
-        return self.norm(out.astype(x.dtype)), g0
+        return self.norm(out.astype(dtype)), g0
 
 
 class Indexer(nn.Module):
@@ -548,6 +566,8 @@ class Attention(nn.Module):
         wpos = (start + mx.arange(S))[:, None] - (K - 1) + mx.arange(K)[None]  # each query's window
         widx = mx.where(wpos < 0, -1, wpos - base)[None].astype(mx.int32)
         cache.window = raw[:, -win:]
+        if shared.capture:
+            cache.verify_kv = (start, kv)
 
         if self.ratio:
             T, cidx = self._compressed(x, qr, start, cache, shared)
@@ -562,7 +582,7 @@ class Attention(nn.Module):
         T = (start_pos + S) // r
         latent, g0 = None, 0
         if self.is_kv_source:
-            latent, g0 = self.compressor(x, start_pos, cache)
+            latent, g0 = self.compressor(x, start_pos, cache, capture=shared.capture)
             shared.compress_kv = cache.compress_kv
         if self.is_index_source:
             if T == 0:
@@ -1079,11 +1099,13 @@ class DSV41:
 
     def forward(self, ids: list[int], sess: "Session | None" = None, all_logits: bool = False,
                 images=None, token_types=None, return_hidden: bool = False,
-                engram_lookahead: list[int] | None = None) -> mx.array:
+                engram_lookahead: list[int] | None = None, capture_verify: bool = False) -> mx.array:
         """Append tokens to a session (prefill, continuation or one decode step).
         images/token_types carry VL inputs (image spans must be in a single start_pos-0 prefill).
         engram_lookahead: the next chunk of a chunked prefill; its Engram rows are read while this
         forward computes (text tokens only).
+        capture_verify: keep references to this forward's per-token cache inputs so commit_prefix
+        can later keep only a prefix of these tokens (DSpark partial accept, no second forward).
         Returns fp32 logits [vocab] at the last token ([len(ids), vocab] with all_logits).
         With return_hidden also returns main_hidden [len(ids), dim*n_targets] for the dSpark head."""
         sess = sess or self.session
@@ -1096,6 +1118,7 @@ class DSV41:
         engram_mask = None if token_types is None else (np.asarray(token_types) < 0)
         rows = self._engram_rows(arr, sess.pos, sess, engram_mask, lazy=len(arr) >= ENGRAM_LAZY_MIN)
         seg = Seg(0, len(ids), sess.pos, sess.caches)
+        seg.shared.capture = capture_verify
         out = self.model(mx.array(arr[None].astype(np.int32)), [seg], rows, all_logits=all_logits,
                          images=images, image_mask=image_mask, return_hidden=return_hidden)
         sess.pos += len(ids)
@@ -1106,6 +1129,39 @@ class DSV41:
             mh = None if main_hidden is None else main_hidden[0]  # [N, dim*n_targets]
             return (logits if all_logits else logits[0]), mh
         return out if all_logits else out[0]
+
+    def commit_prefix(self, sess, ck, keep: int):
+        """Keep only the first ``keep`` tokens of the capture_verify forward that followed checkpoint
+        ``ck`` -- the cache state a forward of exactly those tokens would have left, with no second
+        forward. Per layer: restore, then re-append the kept tokens' window rows and replay the
+        compressor on their captured projections (same groups, pending tail, pool/index rows and
+        RoPE positions as in Attention._compressed). History and position are truncated."""
+        history = sess.history                 # includes the verify's tokens (absolute positions)
+        sess.restore(ck)
+        start = sess.pos
+        for layer, cache in zip(self.model.layers, sess.caches):
+            attn = layer.attn
+            cap = getattr(cache, "verify_kv", None)
+            if cap is None:
+                raise RuntimeError("commit_prefix needs a capture_verify forward after the checkpoint")
+            v_start, kv = cap
+            assert v_start == start, (v_start, start)
+            prev = cache.window
+            raw = kv[:, :keep] if prev is None else mx.concatenate([prev, kv[:, :keep]], axis=1)
+            cache.window = raw[:, -attn.window:]
+            if attn.ratio and attn.is_kv_source:
+                r = attn.ratio
+                latent, g0 = attn.compressor.commit(cache.verify_proj, keep, start, cache)
+                if latent is not None:
+                    pos = (g0 + mx.arange(latent.shape[1])) * r
+                    if attn.is_index_source and attn.indexer.owns_k:
+                        ix = attn.indexer
+                        cache.index_k.append(attn._rope(ix.k_norm(ix.wk(latent)), pos))
+                    cache.compress_kv.append(attn._rope(latent, pos))
+            cache.verify_kv = None
+            cache.verify_proj = None
+        sess.history = history[: start + keep]
+        sess.pos = start + keep
 
     def decode_batch(self, sessions: list["Session"], tokens: list[int]) -> mx.array:
         """One token for each of several sessions in a single forward. Returns logits [B, vocab]."""

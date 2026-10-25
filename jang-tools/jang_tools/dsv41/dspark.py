@@ -27,6 +27,7 @@ relative to plain AR decode.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -580,6 +581,10 @@ class DSparkRunner:
         self.ar_probe_every = max(1, int(ar_probe_every))
         self.ema_alpha = float(ema_alpha)
         self.clock = clock
+        # Partial accepts commit the verify's kept prefix in place (DSV41.commit_prefix) instead of
+        # restore + a second forward. VMLX_DSV41_DSPARK_REFEED=1 restores the refeed path (A/B).
+        refeed = os.environ.get("VMLX_DSV41_DSPARK_REFEED", "").strip().lower() in {"1", "true", "yes", "on"}
+        self._capture_kw = {} if refeed or not hasattr(dsv41, "commit_prefix") else {"capture_verify": True}
 
     def _greedy(self, logits):
         return int(mx.argmax(logits))
@@ -716,7 +721,8 @@ class DSparkRunner:
             feed = [p0] + draft_ids[1 : 1 + W]         # [p0,d1..dW] at positions c+1..c+1+W
             n_drafted += W
             ck = sess.checkpoint()
-            vlog, vmh = m.forward(feed, sess, all_logits=True, return_hidden=True)  # vlog[j] predicts c+2+j
+            vlog, vmh = m.forward(feed, sess, all_logits=True, return_hidden=True,  # vlog[j] predicts c+2+j
+                                  **self._capture_kw)
             truth = [int(x) for x in mx.argmax(vlog, axis=-1).tolist()]  # truth for c+2 .. c+2+W
             k = 0
             for j in range(W):                         # draft d_{j+1}=draft_ids[1+j] @ c+2+j vs truth[j]
@@ -734,6 +740,15 @@ class DSparkRunner:
                 ds.seed_windows(vmh[None], range(c + 1, c + 1 + len(emit)))
                 c += len(emit)
                 pending = vlog[W]                       # predicts c+1 (== truth[W], next step's p0)
+            elif k > 0 and self._capture_kw:
+                # partial accept: keep the verify's first k+1 tokens (p0, d1..dk) and drop the rejected
+                # tail without a second forward (DSV41.commit_prefix replays only the kept tokens'
+                # window/compressor inputs onto the checkpoint). truth[k] becomes the next p0.
+                emit = [p0] + draft_ids[1 : 1 + k]
+                m.commit_prefix(sess, ck, len(emit))
+                ds.seed_windows(vmh[None, : len(emit)], range(c + 1, c + 1 + len(emit)))
+                c += len(emit)
+                pending = vlog[k]                       # predicts c+1 (== truth[k])
             else:
                 emit = [p0] + draft_ids[1 : 1 + k] + [truth[k]]  # all backbone-greedy truth, c+1..c+k+2
                 sess.restore(ck)                        # undo the W+1-token verify (rejected tail present)
