@@ -298,6 +298,8 @@ class Shared:
 # Queries per segment up to which attention gathers only its selected compressed rows from the 4-bit
 # pool instead of dequantizing the whole pool (decode = 1, DSpark verify <= bs + 1).
 GATHER_MAX_QUERIES = 8
+# Prefill wo_a in group-major layout (Attention.__call__); False keeps the token-major per-row products.
+WO_GROUP_MAJOR = True
 
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
@@ -548,11 +550,19 @@ class Attention(nn.Module):
         o = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
         o = self._rope(o, pos, inverse=True).astype(mx.bfloat16)
         # wo_a is block-diagonal over groups: one batched quantized matmul per group
-        o = o.reshape(B * N, self.n_groups, 1, -1)
         wa = self.wo_a
         w = wa.weight.reshape(self.n_groups, self.o_lora_rank, -1)
         sc = wa.scales.reshape(self.n_groups, self.o_lora_rank, -1)
         bi = wa.biases.reshape(self.n_groups, self.o_lora_rank, -1)
+        if WO_GROUP_MAJOR and B * N > GATHER_MAX_QUERIES:
+            # Prefill: group-major [G, tokens, K] so each group is one matrix multiply. The
+            # token-major layout below runs one 1-row product per token per group (2048-token
+            # chunk: 18.6 ms -> 2.1 ms per layer).
+            og = o.reshape(B * N, self.n_groups, -1).transpose(1, 0, 2)
+            og = mx.quantized_matmul(og, w, sc, bi, transpose=True, group_size=wa.group_size, bits=wa.bits)
+            return self.wo_b(og.transpose(1, 0, 2).reshape(B, N, -1))
+        # Decode / DSpark verify: per-row products, each row computed exactly as a 1-row decode.
+        o = o.reshape(B * N, self.n_groups, 1, -1)
         o = mx.quantized_matmul(o, w, sc, bi, transpose=True, group_size=wa.group_size, bits=wa.bits)
         return self.wo_b(o.reshape(B, N, -1))
 

@@ -24,7 +24,8 @@ import urllib.request
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--bundle", required=True)
-ap.add_argument("--image", required=True, help="a solid-red PNG")
+ap.add_argument("--image", help="a solid-red PNG (required unless --no-vision)")
+ap.add_argument("--no-vision", action="store_true", help="text-only bundle (e.g. DSV4-0731): skip the image checks")
 ap.add_argument("--image2", help="a solid-blue PNG (multimodal prefix-reuse miss check)")
 ap.add_argument("--disk-dir", required=True)
 ap.add_argument("--out", required=True)
@@ -47,7 +48,7 @@ def _data_url(path):
     return "data:image/png;base64," + base64.b64encode(open(path, "rb").read()).decode()
 
 
-IMG = _data_url(a.image)
+IMG = None if a.no_vision else _data_url(a.image)
 R: dict = {"mode": "ar" if a.ar else "dspark"}
 MID = None
 
@@ -161,33 +162,34 @@ try:
         mt += [{"role": "assistant", "content": y["content"]}, {"role": "user", "content": "And my name? One word."}]
         z = chat(mt, mx=10)
         R["multiturn"] = {"color": y["content"], "name": z["content"]}
-        sysm = {"role": "system", "content": "Answer in one word."}
-        u1 = {"role": "user", "content": [{"type": "text", "text": "What color is this image?"},
-                                          {"type": "image_url", "image_url": {"url": IMG}}]}
-        m1 = chat([sysm, u1], mx=8)
-        conv_mm = [sysm, u1, {"role": "assistant", "content": m1["content"]},
-                   {"role": "user", "content": "Name a fruit of exactly that color."}]
-        m2 = chat(conv_mm, mx=8)
-        conv_mm += [{"role": "assistant", "content": m2["content"]}, {"role": "user", "content": "What color was the image again?"}]
-        m3 = chat(conv_mm, mx=8)
-        R["multimodal"] = {"answers": [m1["content"], m2["content"], m3["content"]],
-                           "cached": [m1["cached"], m2["cached"], m3["cached"]]}
-        # Multimodal prefix reuse: a conversation long enough to be stored (> 256 tokens). The text
-        # follow-up should hit the cache entry from the image turn; a different image must miss.
-        long_sys = {"role": "system", "content": "You are a careful visual assistant. " + " ".join(
-            f"Guideline {i}: describe only what is visible, answer in one word when asked." for i in range(40))}
-        def img_turn(url):
-            return {"role": "user", "content": [{"type": "text", "text": "What color is this image? One word."},
-                                                {"type": "image_url", "image_url": {"url": url}}]}
-        v1 = chat([long_sys, img_turn(IMG)], mx=8)
-        conv_v = [long_sys, img_turn(IMG), {"role": "assistant", "content": v1["content"]},
-                  {"role": "user", "content": "Name a fruit of exactly that color. One word."}]
-        v2 = chat(conv_v, mx=8)
-        R["multimodal_reuse"] = {"answers": [v1["content"], v2["content"]], "ptok": [v1["ptok"], v2["ptok"]],
-                                 "cached": [v1["cached"], v2["cached"]], "s": [round(v1["s"], 2), round(v2["s"], 2)]}
-        if a.image2:
-            v3 = chat([long_sys, img_turn(_data_url(a.image2))], mx=8)
-            R["multimodal_reuse"].update(other_image=v3["content"], other_image_cached=v3["cached"])
+        if not a.no_vision:
+            sysm = {"role": "system", "content": "Answer in one word."}
+            u1 = {"role": "user", "content": [{"type": "text", "text": "What color is this image?"},
+                                              {"type": "image_url", "image_url": {"url": IMG}}]}
+            m1 = chat([sysm, u1], mx=8)
+            conv_mm = [sysm, u1, {"role": "assistant", "content": m1["content"]},
+                       {"role": "user", "content": "Name a fruit of exactly that color."}]
+            m2 = chat(conv_mm, mx=8)
+            conv_mm += [{"role": "assistant", "content": m2["content"]}, {"role": "user", "content": "What color was the image again?"}]
+            m3 = chat(conv_mm, mx=8)
+            R["multimodal"] = {"answers": [m1["content"], m2["content"], m3["content"]],
+                               "cached": [m1["cached"], m2["cached"], m3["cached"]]}
+            # Multimodal prefix reuse: a conversation long enough to be stored (> 256 tokens). The text
+            # follow-up should hit the cache entry from the image turn; a different image must miss.
+            long_sys = {"role": "system", "content": "You are a careful visual assistant. " + " ".join(
+                f"Guideline {i}: describe only what is visible, answer in one word when asked." for i in range(40))}
+            def img_turn(url):
+                return {"role": "user", "content": [{"type": "text", "text": "What color is this image? One word."},
+                                                    {"type": "image_url", "image_url": {"url": url}}]}
+            v1 = chat([long_sys, img_turn(IMG)], mx=8)
+            conv_v = [long_sys, img_turn(IMG), {"role": "assistant", "content": v1["content"]},
+                      {"role": "user", "content": "Name a fruit of exactly that color. One word."}]
+            v2 = chat(conv_v, mx=8)
+            R["multimodal_reuse"] = {"answers": [v1["content"], v2["content"]], "ptok": [v1["ptok"], v2["ptok"]],
+                                     "cached": [v1["cached"], v2["cached"]], "s": [round(v1["s"], 2), round(v2["s"], 2)]}
+            if a.image2:
+                v3 = chat([long_sys, img_turn(_data_url(a.image2))], mx=8)
+                R["multimodal_reuse"].update(other_image=v3["content"], other_image_cached=v3["cached"])
         rr = chat([{"role": "user", "content": "What is 17*23?"}], mx=300, think=True, effort="high")
         R["reasoning"] = {"reasoning_len": len(rr["reasoning"]), "content": rr["content"][:80],
                           "leak": "<think" in rr["content"] or "</think>" in rr["content"]}
