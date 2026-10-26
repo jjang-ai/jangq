@@ -341,6 +341,9 @@ def _attn_chunk(q, kv, sink, ix, scale):
 # partition: faster there (170k context: 25.1 vs 23.9 tok/s) and its bf16 index scores tie often.
 TOPK_BLOCK_MIN = 65536
 TOPK_BLOCK = 64
+# Fused index scores take the bf16 q / index keys / weights as is (the reference scores in bf16) on the
+# M5 matrix units when vMLX supports it; VMLX_DSV41_INDEX_BF16=0 keeps fp32 operands.
+FUSED_INDEX_BF16 = os.environ.get("VMLX_DSV41_INDEX_BF16", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 
 def topk_indices(scores, k):
@@ -496,7 +499,15 @@ class Indexer(nn.Module):
             qi = q[c : c + chunk]
             sc = None
             if fused is not None:
-                sc = fused(qf[None, c : c + chunk], kf, wf[None, c : c + chunk], 1.0)
+                sc = None
+                if FUSED_INDEX_BF16:
+                    try:  # vMLX >= 391ea34f: bf16 operands on the M5 matrix units (~4x the fp32 kernel)
+                        sc = fused(q[None, c : c + chunk], index_k[None], w[None, c : c + chunk], 1.0,
+                                   bf16_operands=True)
+                    except TypeError:  # older vMLX: fp32 operands only
+                        sc = None
+                if sc is None:
+                    sc = fused(qf[None, c : c + chunk], kf, wf[None, c : c + chunk], 1.0)
                 sc = None if sc is None else sc[0]
             if sc is None:
                 sc = mx.maximum(qi @ index_k.T, 0)  # [C,h,T]
