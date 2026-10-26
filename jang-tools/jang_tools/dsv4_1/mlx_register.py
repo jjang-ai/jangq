@@ -24,8 +24,8 @@ def register() -> None:
         mapping = getattr(mlx_lm_models, "_MODEL_MAPPING", None)
         if isinstance(mapping, dict):
             mapping[_MODEL_TYPE] = mlx_model
-    except Exception:
-        pass
+    except ImportError:  # no mlx_lm: nothing to register with
+        return
 
 
 register()

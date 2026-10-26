@@ -122,7 +122,7 @@ def main():
         completion = m.tokenizer.decode(out, skip_special_tokens=False)
         try:
             msg = enc.parse_message_from_completion_text(completion, thinking_mode=a.mode)
-        except Exception:
+        except (ValueError, AssertionError, IndexError, KeyError):  # not a parseable assistant turn: keep the raw text
             msg = {"role": "assistant", "content": completion}
         messages.append(msg)
         print(f"[{stats}]", file=sys.stderr)

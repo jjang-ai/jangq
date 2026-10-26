@@ -29,7 +29,7 @@ import numpy as np
 
 try:
     from mlx_lm.models.base import BaseModelArgs
-except Exception:  # pragma: no cover - mlx_lm always present in the engine env
+except ImportError:  # pragma: no cover - mlx_lm always present in the engine env
     @dataclass
     class BaseModelArgs:  # minimal shim
         @classmethod

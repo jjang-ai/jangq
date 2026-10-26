@@ -121,8 +121,8 @@ try:
         try:
             urllib.request.urlopen(base + "/health", timeout=5)
             break
-        except Exception:
-            pass
+        except OSError:  # not listening yet (URLError, connection refused, timeout)
+            continue
     MID = json.loads(urllib.request.urlopen(base + "/v1/models", timeout=5).read())["data"][0]["id"]
     chat([{"role": "user", "content": "hi"}], mx=4)
     # vmmap on a ~200 GB process disturbs the next request: memory is sampled only after the timed checks.
@@ -199,10 +199,11 @@ finally:
     proc.send_signal(signal.SIGINT)
     try:
         proc.wait(timeout=30)
-    except Exception:
+    except subprocess.TimeoutExpired:
         proc.kill()
     logf.close()
     keep = ("persist_ms", "wait_ms", "paged cache hit", "Stored paged", "DSpark", "Traceback", "Error")
     R["log"] = [l.rstrip()[:240] for l in open(log_path) if any(k in l for k in keep)][-80:]
-    json.dump(R, open(a.out, "w"), indent=1)
+    with open(a.out, "w") as f:
+        json.dump(R, f, indent=1)
     print(json.dumps({k: v for k, v in R.items() if k != "log"}, indent=1))

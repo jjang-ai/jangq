@@ -220,12 +220,25 @@ def test_hc_stage_and_post_match_stock(dims):
                        *blk.hc_mixes(xi, blk.hc_ffn_fn, blk.hc_ffn_scale, blk.hc_ffn_base))
                 for a, b in zip(out, ref):
                     assert np.array_equal(_bits(a[i]), _bits(b.reshape(b.shape[2:])))
-            post = MD.hc_post_decode(h[0], x[0], out[2], out[3])
-            assert np.array_equal(_bits(post), _bits(M._hc_post(h, x, out[2][None], out[3][None])[0]))
+            if MD._tf32():  # the expand reproduces the M5 matrix units' TF32 GEMM; elsewhere the
+                # runtime self-check keeps the stock ops (test_fused_hc_decode_is_bit_exact)
+                post = MD.hc_post_decode(h[0], x[0], out[2], out[3])
+                assert np.array_equal(_bits(post), _bits(M._hc_post(h, x, out[2][None], out[3][None])[0]))
 
 
 def test_fused_hc_decode_is_bit_exact(tiny, monkeypatch):
+    from jang_tools.dsv41 import metal_decode as MD
     M._HC_FUSED_OK.clear()
+    if not MD._tf32():
+        # This device's f32 GEMMs are not TF32 (or MLX_ENABLE_TF32=0): the fused hc path must stay off,
+        # so decode with the flag on is the stock decode.
+        monkeypatch.setattr(M, "FUSED_HC", False)
+        ta, la = _run_greedy(tiny)
+        monkeypatch.setattr(M, "FUSED_HC", True)
+        tb, lb = _run_greedy(tiny)
+        assert ta == tb and np.array_equal(la.view(np.uint32), lb.view(np.uint32))
+        assert M._HC_FUSED_OK and not any(M._HC_FUSED_OK.values())
+        return
     (ta, la), (tb, lb) = _ab(monkeypatch, tiny, "FUSED_HC", _run_greedy)
     assert ta == tb
     assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))

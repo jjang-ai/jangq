@@ -20,8 +20,8 @@ enc = None
 try:
     from jang_tools.dsv41.generate import load_encoding
     enc = load_encoding(BUNDLE)
-except Exception:
-    pass
+except (ImportError, OSError) as e:  # no bundle encoder: token ids only
+    print(f"encoding unavailable ({type(e).__name__}: {e}); using raw ids")
 
 def ids_for(prompt):
     if enc is not None:

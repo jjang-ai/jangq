@@ -32,7 +32,8 @@ def main():
     a = ap.parse_args()
     root = Path(a.dir).expanduser()
     url = f"https://huggingface.co/api/models/{a.repo}/revision/{a.revision}?blobs=true"
-    info = json.load(urllib.request.urlopen(url))
+    with urllib.request.urlopen(url) as resp:
+        info = json.load(resp)
     expected = {s["rfilename"]: s["lfs"]["sha256"] for s in info["siblings"] if s.get("lfs")}
     files = sorted(expected)
     missing = [f for f in files if not (root / f).exists()]

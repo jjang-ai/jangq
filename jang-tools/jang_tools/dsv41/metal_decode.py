@@ -734,9 +734,22 @@ def _hc_kernels(norm_eps: float, rms_eps: float, hc_eps: float, iters: int, n: i
     return stage, split, post
 
 
+@lru_cache(maxsize=1)
+def _gemm_rounds_to_tf32() -> bool:
+    """Whether this device's f32 GEMMs truncate operands to TF32. M5 matrix units do (MLX default);
+    other GPUs accumulate in another order, and the hc expand kernel then cannot be bit-equal (the
+    runtime self-check keeps the stock ops there). Probed with the expand einsum's own shape."""
+    comb = mx.full((1, 1, 4, 4), 1.0 + 2.0 ** -12, mx.float32)  # not representable in TF32
+    res = mx.ones((1, 1, 4, 256), mx.float32)
+    y = mx.einsum("bsjk,bsjd->bskd", comb, res)
+    return bool((y[0, 0, 0, 0] == 4.0).item())
+
+
 def _tf32() -> bool:
     import os
-    return os.environ.get("MLX_ENABLE_TF32", "1").strip() not in {"0", "false", "False"}
+    if os.environ.get("MLX_ENABLE_TF32", "1").strip() in {"0", "false", "False"}:
+        return False
+    return _gpu() and _gemm_rounds_to_tf32()
 
 
 def hc_stage_decode(x, pre, fn, scale, base, norm_w, norm_eps, rms_eps, hc_eps, iters):

@@ -79,8 +79,8 @@ def main():
                 continue
             try:
                 done_ords.add(json.loads(l)["_ord"])
-            except Exception:  # noqa: BLE001
-                pass
+            except (ValueError, KeyError):  # a torn last line from an interrupted run is skipped
+                continue
     todo = [r for r in rows if r["_ord"] not in done_ords]
     if done_ords:
         print(f"resume: {len(done_ords)} rows already in {partial.name}; {len(todo)} remaining", flush=True)
@@ -184,7 +184,7 @@ def _apply(enc, m, job, out_ids, eos, result):
     try:
         parsed = enc.parse_message_from_completion_text(
             text + "<｜end▁of▁sentence｜>", thinking_mode="thinking")
-    except Exception:  # noqa: BLE001
+    except (ValueError, AssertionError, IndexError, KeyError):  # unparseable turn: split at </think> instead
         head, _, tail = text.partition("</think>")
         parsed = {"reasoning_content": head, "content": tail}
     reason = (parsed.get("reasoning_content") or "").strip()

@@ -434,7 +434,7 @@ def _fused_index_scores():
         return None
     try:
         from vmlx_engine.metal.dsa_index_scores import dsa_pool_index_scores
-    except Exception:  # noqa: BLE001 - optional dependency
+    except ImportError:  # vMLX not installed: the stock bf16 indexer path
         return None
     return dsa_pool_index_scores
 
@@ -828,10 +828,16 @@ _HC_FUSED_OK: dict = {}
 
 def _hc_fused_ok(blk) -> bool:
     """Once per (D, eps) per process: the fused hc stage / expand reproduce the stock ops bit for bit
-    on a random stream with this block's weights (guards against another MLX build or TF32 off)."""
+    on a random stream with this block's weights (guards against another MLX build). Only where f32
+    GEMMs round to TF32 (M5 matrix units, MLX default): elsewhere the expand's 4-term sum follows another
+    order, a random-stream check can pass by chance and real decode then diverges, so stock ops."""
+    from jang_tools.dsv41.metal_decode import _tf32
     D = blk.hc_attn_fn.shape[1] // blk.hc
-    key = (D, blk.eps, blk.attn_norm.eps, blk.hc_eps, blk.iters)
+    tf32 = _tf32()
+    key = (D, blk.eps, blk.attn_norm.eps, blk.hc_eps, blk.iters, tf32)
     ok = _HC_FUSED_OK.get(key)
+    if ok is None and not tf32:
+        ok = _HC_FUSED_OK[key] = False
     if ok is None:
         ok = False
         try:
@@ -853,7 +859,7 @@ def _hc_fused_ok(blk) -> bool:
                     post = hc_post_decode(h[0, i:i + 1], x[0, i:i + 1], st[2][i:i + 1], st[3][i:i + 1])
                     ok = ok and post is not None and mx.array_equal(
                         post, _hc_post(h[:, i:i + 1], xi, st[2][None, i:i + 1], st[3][None, i:i + 1])[0]).item()
-        except Exception:  # noqa: BLE001 - any failure keeps the stock path
+        except (RuntimeError, ValueError, TypeError):  # kernel build / launch failed: stock path
             ok = False
         _HC_FUSED_OK[key] = ok
     return ok

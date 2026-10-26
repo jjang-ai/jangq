@@ -146,7 +146,7 @@ def main():
             n["id"] = i
             out.append(n)
             stats[(n["kind"], n["effort"])] += 1
-        except Exception as e:  # noqa: BLE001
+        except (ValueError, AssertionError, IndexError, KeyError, TypeError) as e:  # a malformed source row is counted, not fatal
             fails[f"{r['domain']}: {type(e).__name__}: {str(e)[:80]}"] += 1
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     with open(a.out, "w") as f:

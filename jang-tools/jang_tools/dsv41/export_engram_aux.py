@@ -19,7 +19,8 @@ import numpy as np
 bundle = Path(sys.argv[1]).expanduser()
 out = Path(sys.argv[2]).expanduser()
 
-cfg = json.load(open(bundle / "config.json"))["text_config"]
+with open(bundle / "config.json") as f:
+    cfg = json.load(f)["text_config"]
 from jang_tools.dsv41.engram import EngramLayout, NgramHasher
 
 layout = EngramLayout.from_config(cfg)

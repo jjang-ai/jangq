@@ -52,7 +52,7 @@ def completion_text(enc, m: dict) -> str:
 def same_args(a: str, b) -> bool:
     try:
         return json.loads(a) == (json.loads(b) if isinstance(b, str) else b)
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError):  # not JSON on either side
         return False
 
 
@@ -98,7 +98,7 @@ def audit_row(enc, tok, row) -> list[str]:
             comp = completion_text(enc, m)
             try:
                 parsed = enc.parse_message_from_completion_text(comp, thinking_mode="thinking")
-            except Exception as e:  # noqa: BLE001
+            except (ValueError, AssertionError, IndexError, KeyError) as e:
                 errs.append(f"roundtrip: turn {j} parse error {type(e).__name__}: {str(e)[:80]}")
                 continue
             if (parsed.get("reasoning_content") or "").strip() != (m.get("reasoning_content") or "").strip():
