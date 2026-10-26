@@ -57,3 +57,24 @@ def test_layer_async_is_bit_exact(tiny, monkeypatch):
     assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))
     va, vb = _ab(monkeypatch, tiny, "LAYER_ASYNC", _run_verify)
     assert np.array_equal(va.view(np.uint32), vb.view(np.uint32))
+
+
+def test_router_gemv_bit_exact_at_one_row():
+    from jang_tools.dsv41.metal_decode import router_logits
+    w = (mx.random.normal((384, 5120), key=mx.random.key(1)) / 70).astype(mx.bfloat16)
+    for R in (1, 2, 5, 8):
+        x = mx.random.normal((R, 5120), key=mx.random.key(R)).astype(mx.bfloat16)
+        out = router_logits(x, w)
+        per_row = mx.concatenate([x[i:i + 1].astype(mx.float32) @ w.astype(mx.float32).T for i in range(R)])
+        assert np.array_equal(_bits(out), _bits(per_row))  # row r == its own 1-row decode
+        stock = x.astype(mx.float32) @ w.astype(mx.float32).T
+        assert float(mx.abs(out - stock).max()) < 1e-5
+    assert router_logits(mx.zeros((9, 5120), mx.bfloat16), w) is None
+
+
+def test_router_gemv_decode_is_bit_exact(tiny, monkeypatch):
+    (ta, la), (tb, lb) = _ab(monkeypatch, tiny, "ROUTER_GEMV", _run_greedy)
+    assert ta == tb
+    assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))
+    va, vb = _ab(monkeypatch, tiny, "ROUTER_GEMV", _run_verify)
+    assert np.abs(va - vb).max() < 0.05 * np.abs(va).max()

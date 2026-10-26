@@ -44,6 +44,10 @@ def _env_on(name: str, default: str = "1") -> bool:
 # only the scheduling changes. VMLX_DSV41_LAYER_ASYNC=0 restores the single end-of-graph eval.
 LAYER_ASYNC = _env_on("VMLX_DSV41_LAYER_ASYNC")
 LAYER_ASYNC_MAX_ROWS = 16
+# Router logits for <= 8 rows from the bf16 gate weight with MLX's f32 GEMV order (metal_decode.py):
+# no per-call f32 copy of the 384 x 5120 weight. 1 row: bit-identical; 2-8 rows: each row exactly its
+# 1-row decode logits. VMLX_DSV41_ROUTER_GEMV=0 restores the f32-cast matmul.
+ROUTER_GEMV = _env_on("VMLX_DSV41_ROUTER_GEMV")
 
 
 @dataclass
@@ -899,7 +903,13 @@ class Block(nn.Module):
         B, S, D = x.shape
         xf = x.reshape(-1, D)
         g = self.ffn.gate
-        scores = mx.sqrt(nn.softplus(xf.astype(mx.float32) @ g.weight.astype(mx.float32).T))
+        logits = None
+        if ROUTER_GEMV and xf.shape[0] <= GATHER_MAX_QUERIES:
+            from jang_tools.dsv41.metal_decode import router_logits
+            logits = router_logits(xf, g.weight)
+        if logits is None:
+            logits = xf.astype(mx.float32) @ g.weight.astype(mx.float32).T
+        scores = mx.sqrt(nn.softplus(logits))
         # VL routing: image tokens use the separately-trained bias_vl (release Gate.forward)
         bias = g.bias if image_mask is None else mx.where(image_mask.reshape(-1, 1), g.bias_vl, g.bias)
         idx = mx.argpartition(-(scores + bias), kth=self.topk - 1, axis=-1)[:, : self.topk]
