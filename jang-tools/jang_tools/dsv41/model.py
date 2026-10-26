@@ -196,7 +196,7 @@ def _fp8_rows_kernel():
     kernel), or None when vMLX is not importable. VMLX_FP8_ROWS_QMV=0 disables it per call."""
     try:
         from vmlx_engine.metal.fp8_rows_qmv import fp8_rows_qmv
-    except Exception:  # noqa: BLE001 - optional dependency
+    except ImportError:  # optional dependency (vMLX not installed)
         return None
     return fp8_rows_qmv
 
@@ -777,7 +777,7 @@ def jangt_fused_moe(xf, idx, w, experts, shared, limit):
         return None
     try:
         from vmlx_engine.jangt.fused_moe import jt_moe_decode
-    except Exception:  # noqa: BLE001 - optional dependency
+    except ImportError:  # optional dependency (vMLX not installed)
         return None
     return jt_moe_decode(xf, idx, w, experts, shared, limit)
 
