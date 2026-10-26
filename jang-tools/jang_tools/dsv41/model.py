@@ -118,16 +118,41 @@ def yarn_inv_freq(dim, base, original_seq_len, factor, beta_fast, beta_slow) -> 
     return freqs.astype(np.float32)
 
 
+# Positions given as (start, step) -- position of row i = (start + i) * step, every call site except a multi-segment
+# batch -- run through mx.fast.rope: one kernel instead of the angle / cos / sin / rotate graph (~8 dispatches per
+# call, 3-4 calls per layer per forward). Same fp32 angles (MLX scales the integer position, then divides by the
+# wavelength) and the same bf16 store. VMLX_DSV41_FAST_ROPE=0 keeps the compiled cos/sin path.
+FAST_ROPE = os.environ.get("VMLX_DSV41_FAST_ROPE", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
 class Rope:
     """Interleaved-pair rotary embedding on the last `dim` features, at arbitrary positions."""
 
     def __init__(self, dim, inv_freq: np.ndarray):
         self.dim = dim
         self.inv_freq = mx.array(inv_freq)
+        wl = (1.0 / np.asarray(inv_freq, np.float64)).astype(np.float32)  # mx.fast.rope takes wavelengths
+        self.wavelen, self.neg_wavelen = mx.array(wl), mx.array(-wl)
 
-    def __call__(self, x: mx.array, positions: mx.array, inverse: bool = False) -> mx.array:
-        """x [..., L, (heads,) D] where the L axis matches `positions`; rotates x[..., -dim:]."""
+    def __call__(self, x: mx.array, positions, inverse: bool = False) -> mx.array:
+        """x [..., L, (heads,) D] where the L axis matches `positions`; rotates x[..., -dim:].
+        positions: an int array [L], or (start, step) for positions (start + i) * step."""
+        if isinstance(positions, tuple):
+            start, step = int(positions[0]), int(positions[1])
+            if FAST_ROPE:
+                return _fast_rope(x, self.dim, start, step, self.neg_wavelen if inverse else self.wavelen)
+            positions = (start + mx.arange(x.shape[1])) * step
         return _rope_fn(self.dim, x.ndim, inverse)(x, positions, self.inv_freq)
+
+
+def _fast_rope(x, dim, start: int, step: int, wavelen):
+    head, tail = x[..., :-dim], x[..., -dim:]
+    if x.ndim == 4:  # [B, L, H, D]: mx.fast.rope wants the sequence axis at -2
+        t = mx.fast.rope(tail.transpose(0, 2, 1, 3), dim, traditional=True, base=None, scale=float(step),
+                         offset=start, freqs=wavelen).transpose(0, 2, 1, 3)
+    else:
+        t = mx.fast.rope(tail, dim, traditional=True, base=None, scale=float(step), offset=start, freqs=wavelen)
+    return mx.concatenate([head, t], axis=-1)
 
 
 _ROPE = {}
@@ -166,11 +191,38 @@ class RMSNorm(nn.Module):
         return mx.fast.rms_norm(x, self.weight, self.eps)
 
 
+def _fp8_rows_kernel():
+    """vMLX's multi-row mxfp8 QMV (each weight read once for 2..8 rows, every row bit-identical to the 1-row
+    kernel), or None when vMLX is not importable. VMLX_FP8_ROWS_QMV=0 disables it per call."""
+    try:
+        from vmlx_engine.metal.fp8_rows_qmv import fp8_rows_qmv
+    except Exception:  # noqa: BLE001 - optional dependency
+        return None
+    return fp8_rows_qmv
+
+
+FP8_ROWS = _fp8_rows_kernel()
+
+
+class MxLinear(nn.QuantizedLinear):
+    """mxfp8 Linear. 2..8 rows (DSpark verify / draft) go through FP8_ROWS: MLX switches mxfp8 kernels above a few rows
+    (DeepSeek-V4.1, 40 layers, 6 rows: wo_b 3.05 -> 7.04 ms, wq_b 2.48 -> 4.33 ms vs 1 row) although the rows need no
+    extra weight bytes; the multi-row kernel also makes each verify row equal its 1-row decode on these projections."""
+
+    def __call__(self, x):
+        rows = x.size // x.shape[-1]
+        if FP8_ROWS is not None and 2 <= rows <= 8:
+            y = FP8_ROWS(x.reshape(1, rows, x.shape[-1]), self.weight, self.scales)
+            if y is not None:
+                return y.reshape(*x.shape[:-1], -1)
+        return super().__call__(x)
+
+
 def qlinear(in_dim, out_dim, bits):
     """bits: affine bit width (group GROUP_SIZE), or "mxfp8" (JANGHT bundles: byte-exact repack of the release FP8,
     E4M3 weights with an E8M0 scale per 32 inputs)."""
     if bits == "mxfp8":
-        return nn.QuantizedLinear(in_dim, out_dim, bias=False, group_size=32, bits=8, mode="mxfp8")
+        return MxLinear(in_dim, out_dim, bias=False, group_size=32, bits=8, mode="mxfp8")
     return nn.QuantizedLinear(in_dim, out_dim, bias=False, group_size=GROUP_SIZE, bits=bits)
 
 
@@ -179,6 +231,11 @@ def grouped_qmm(x, lin, groups, rows):
     `rows` outputs: one batched quantized matmul. Affine (biases) and mxfp8 (no biases) storage."""
     w = lin.weight.reshape(groups, rows, -1)
     sc = lin.scales.reshape(groups, rows, -1)
+    if FP8_ROWS is not None and getattr(lin, "mode", "affine") == "mxfp8" and x.ndim == 3 and x.shape[0] == groups \
+            and 2 <= x.shape[1] <= 8:   # group-major multi-row (verify): each group's weights read once
+        y = FP8_ROWS(x, w, sc)
+        if y is not None:
+            return y
     bi = getattr(lin, "biases", None)
     bi = None if bi is None else bi.reshape(groups, rows, -1)
     return mx.quantized_matmul(x, w, sc, bi, transpose=True, group_size=lin.group_size, bits=lin.bits,
@@ -476,13 +533,13 @@ class Indexer(nn.Module):
         r, end = self.ratio, start_pos + S
         if self.owns_k and latent is not None:
             k = self.k_norm(self.wk(latent))
-            cache.index_k.append(rope(k, (g0 + mx.arange(latent.shape[1])) * r))
+            cache.index_k.append(rope(k, (g0, r)))
         if self.owns_k:
             shared.index_k = cache.index_k
         T = end // r
         q = self.wq_b(qr).reshape(B, S, self.n_heads, self.head_dim)
         # the release scores in bf16 end to end; near-tied positions follow that rounding
-        q = rope(q, mx.arange(start_pos, end))[0].astype(mx.bfloat16)  # [S,h,d]
+        q = rope(q, (start_pos, 1))[0].astype(mx.bfloat16)  # [S,h,d]
         index_k = shared.view(shared.index_k, T)[0].astype(mx.bfloat16)  # [T,d]
         w = (self.weights_proj(x) * (self.head_dim ** -0.5 * self.n_heads ** -0.5))[0]  # [S,h] bf16
         k = min(self.topk, T)
@@ -601,7 +658,7 @@ class Attention(nn.Module):
         window / compression / indexing / attention run per segment against its own cache."""
         B, N, _ = x.shape
         pos = mx.concatenate([mx.arange(s.start, s.start + s.n) for s in segs]) if len(segs) > 1 \
-            else mx.arange(segs[0].start, segs[0].start + segs[0].n)
+            else (segs[0].start, 1)
         qr = self.q_norm(self.wq_a(x))
         q = self._rope(self.wq_b(qr).reshape(B, N, self.n_heads, self.head_dim), pos)
         kv = self._rope(self.kv_norm(self.wkv(x)), pos)
@@ -612,14 +669,16 @@ class Attention(nn.Module):
         o = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
         o = self._rope(o, pos, inverse=True).astype(mx.bfloat16)
         # wo_a is block-diagonal over groups: one batched quantized matmul per group
-        if B * N > GATHER_MAX_QUERIES:
-            # Prefill: group-major [G, tokens, K] so each group is one matrix multiply. The
-            # token-major layout below runs one 1-row product per token per group (2048-token
-            # chunk: 18.6 ms -> 2.1 ms per layer).
+        if B * N > 1:
+            # Every multi-row forward (prefill and DSpark verify): group-major [G, tokens, K] so each
+            # group is one matrix multiply reading its weights once. The token-major layout below runs
+            # one 1-row product per token per group (2048-token chunk: 18.6 ms -> 2.1 ms per layer;
+            # 6-row verify, 40 layers, mxfp8: 10.6 -> 4.5 ms). Verify rows were never bit-identical to
+            # 1-row decode anyway (the other projections switch kernels with the row count).
             og = o.reshape(B * N, self.n_groups, -1).transpose(1, 0, 2)
             og = grouped_qmm(og, self.wo_a, self.n_groups, self.o_lora_rank)
             return self.wo_b(og.transpose(1, 0, 2).reshape(B, N, -1))
-        # Decode / DSpark verify: per-row products, each row computed exactly as a 1-row decode.
+        # Decode: one row.
         o = grouped_qmm(o.reshape(B * N, self.n_groups, 1, -1), self.wo_a, self.n_groups, self.o_lora_rank)
         return self.wo_b(o.reshape(B, N, -1))
 
@@ -661,7 +720,7 @@ class Attention(nn.Module):
             idxs = shared.topk_idxs
         if latent is not None:
             # a latent stands for the first token of its group
-            cache.compress_kv.append(self._rope(latent, (g0 + mx.arange(latent.shape[1])) * r))
+            cache.compress_kv.append(self._rope(latent, (g0, r)))
         # T compressed rows are visible to this segment (read from shared.compress_kv by the caller)
         return T, idxs
 
@@ -1306,6 +1365,8 @@ class DSV41:
             self.model.load_weights(w, strict=False)
             mx.eval(self.model.parameters())
         self._check_loaded(index, skip)
+        if isinstance(qbits, BundleSpecs):
+            self._fp32_compute_weights()
 
         self.tokenizer = Tokenizer.from_file(str(bundle / "tokenizer.json"))
         self.hasher = NgramHasher(text, layout, bundle / "tokenizer.json")
@@ -1313,6 +1374,18 @@ class DSV41:
         self.tables = open_engram_tables(edir, layout.layer_ids)
         self.layout = layout
         self.reset()
+
+    def _fp32_compute_weights(self):
+        """fp32 copies, once, of the weights every use of which computes in fp32: the router gate (Block.moe casts it
+        on every call) and the pooled compressors' wkv / wgate (called with compute=fp32). Value-identical; removes a
+        cast kernel and its fp32 write per layer per forward for ~+0.2 GB resident."""
+        for blk in self.model.layers:
+            blk.ffn.gate.weight = blk.ffn.gate.weight.astype(mx.float32)
+            comp = getattr(blk.attn, "compressor", None)
+            if comp is not None and comp.ratio > 1:
+                comp.wkv.weight = comp.wkv.weight.astype(mx.float32)
+                comp.wgate.weight = comp.wgate.weight.astype(mx.float32)
+        mx.eval(self.model.parameters())
 
     def _check_loaded(self, index, skip):
         from mlx.utils import tree_flatten
@@ -1445,7 +1518,7 @@ class DSV41:
                 r = attn.ratio
                 latent, g0 = attn.compressor.commit(cache.verify_proj, keep, start, cache)
                 if latent is not None:
-                    pos = (g0 + mx.arange(latent.shape[1])) * r
+                    pos = (g0, r)
                     if attn.is_index_source and attn.indexer.owns_k:
                         ix = attn.indexer
                         cache.index_k.append(attn._rope(ix.k_norm(ix.wk(latent)), pos))

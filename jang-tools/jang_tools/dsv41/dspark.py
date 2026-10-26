@@ -135,8 +135,11 @@ class DSparkAttention(nn.Module):
         """Append the committed positions' main-derived KV to the window (release prefill/decode seed).
         Only the last `win` positions can ever be attended, so older rows are dropped before projecting."""
         if main_x.shape[1] > self.win:
+            if isinstance(positions, tuple):  # (first position, 1): consecutive
+                positions = (positions[0] + main_x.shape[1] - self.win, 1)
+            else:
+                positions = positions[-self.win:]
             main_x = main_x[:, -self.win:]
-            positions = positions[-self.win:]
         kv = self._rope(self.kv_norm(self.wkv(main_x)), positions)  # [1, S, head_dim]
         self.window.append(kv.astype(mx.bfloat16))
 
@@ -319,7 +322,10 @@ class DSpark(nn.Module):
         ``positions`` (consecutive). Also keeps the last ``win`` rows (``main_tail``) so a prompt-
         boundary snapshot can carry them and a prefix hit resumes with full draft windows."""
         positions = [int(p) for p in positions]
-        pos = mx.array(np.asarray(positions, np.int64))
+        if positions and positions[-1] - positions[0] == len(positions) - 1:
+            pos = (positions[0], 1)  # consecutive (every caller): mx.fast.rope
+        else:
+            pos = mx.array(np.asarray(positions, np.int64))
         for st in self.stages:
             st.attn.seed(main_x, pos)
         tail = getattr(self, "_main_tail", None)
@@ -363,7 +369,7 @@ class DSpark(nn.Module):
         x = mx.repeat(x[:, :, None, :], self.hc, axis=2)  # [1,bs,hc,d]
         pre_mix = mx.zeros((1, bs, self.hc), mx.float32)
         pre_mix[..., 0] = 1.0
-        positions = mx.arange(start_pos + 1, start_pos + 1 + bs)
+        positions = (start_pos + 1, 1)  # start_pos+1 .. start_pos+bs
         for st in self.stages:
             x, pre_mix = st.forward(x, pre_mix, positions)
         last = self.stages[-1]
