@@ -73,21 +73,19 @@ identical to greedy on code (59/59) and structured (29/29) over those short runs
   AR, and on a low-accept→easy prompt drafting re-engages (accepted > 0), proving recovery.
 - Swift parity: the vmlx-swift port should mirror this recoverable mode (no permanent latch).
 
-## M3 — Why single-stream AR decode is at the floor (so MTP is the only lever)
+## M3 — Where single-stream AR decode time goes (it was not at the floor)
 
-- 10.6 GB read/token; decode 31 t/s = **333 GB/s of ~800 peak (42 % util)**.
-- MLX `quantized_matmul` qmv is only ~50 %-bw-efficient at M=1 (fully-fused-qmv ceiling = 398 GB/s =
-  **1.19×**); `gather_qmm` = 0.29× of qmv; `lane_qmm` (TensorFold) is **11 % slower at M=1** (wins only
-  at 2–16 rows); `mx.compile` = no help (cannot merge independent GEMVs).
-- **DEAD ENDS for single-stream (all measured):** fused MLA decode-attn kernel, mx.compile, GEMV
-  fusion, gather_qmm swap, lane_qmm. Do not re-attempt.
-- **The lever is MTP (M1):** a wide verify costs ≈ one forward (M=1 and M=16 take ~the same per-GEMV
-  time — weight-read-bound), so accepting a block amortizes. Secondary lever: fewer bytes/token (the
-  LM head alone is 703 MB/token; a lighter head or uniform-Q2 raises AR proportionally — a quant
-  tradeoff, not an engine change).
+- 10.6 GB read/token; stock decode 29–31 t/s = **~330 GB/s of ~800 peak**. The earlier reading
+  ("MLX qmv is ~50 % bandwidth-efficient, so AR is at the floor and MTP is the only lever") was wrong:
+  the gap was dispatch count and host/GPU serialization, not the GEMVs. M5 below moves AR decode
+  29.0 → 39.2 tok/s (2k context) and 26.0 → 34.3 (100k), token-identical.
+- Still true: `mx.compile` does not merge independent GEMVs; `gather_qmm` is slower than qmv at
+  M=1; `lane_qmm` (TensorFold) is 11 % slower at M=1; the MLA decode-attention kernel alone (M4) is a
+  wash. Each is one dispatch out of ~150 per layer; only removing most of them pays.
+- MTP (M1) still multiplies whatever AR is: a wide verify costs about one forward.
 - Prefill: the 865 pp/s figure was measured on repetitive text, where the Engram rows stay
   page-cache warm. On unique text cold prefill is bound by Engram row reads; see
-  `RUNTIME_SERVING.md` (cold now 598–768 pp/s, warm 741–801).
+  `RUNTIME_SERVING.md`.
 
 ## M4 — MLA decode attention kernel (`metal_decode_attn.py`, default OFF)
 
@@ -99,6 +97,31 @@ row; the partial pass is the GLM kernel verbatim). Equivalent to the stock gathe
 **Default OFF — a wall-clock wash at decode** (attention is not the decode cost; see M3). Kept as a
 building block: the same in-place-indexed fp32-accumulate structure is what a head_dim-512 fused
 *prefill* attention kernel would use (not pursued — prefill already at parity).
+
+## M5 — Fused decode / verify kernels (`metal_decode.py`, default ON)
+
+Four bit-exact changes for forwards of at most 8 rows (decode, DSpark verify); prefill is untouched.
+Each kernel copies MLX's accumulation order (quantized GEMV walk, f32 GEMV tiling, row reduction,
+RMSNorm), so greedy decode is bit-equal with each flag off or on.
+
+| change | flag (`=0` disables) | per layer (synthetic, real dims) |
+|---|---|---|
+| per-layer `mx.async_eval` (<= 16 rows): the GPU runs early layers while later ones are encoded | `VMLX_DSV41_LAYER_ASYNC` | ~-0.14 ms |
+| router logits from the bf16 gate weight (MLX f32 GEMV order, no per-call f32 copy); only where MLX uses the same tiling (K < 16 E) | `VMLX_DSV41_ROUTER_GEMV` | 1 row 86 → 68 µs |
+| 6 routed + shared expert in 2 dispatches (mlx-serve `MOE_GU`/`MOE_DN`) instead of ~25 | `VMLX_DSV41_FUSED_MOE` | 1 row 0.279 → 0.226 ms |
+| hyper-connection collapse + mixes + Sinkhorn split + expand in 3 dispatches per sublayer instead of ~14; self-checks once against the stock path | `VMLX_DSV41_FUSED_HC` | 1 row 0.183 → 0.137 ms |
+| MoE expert dedup across verify rows (opt-in: slower, the fused MoE is already bound by distinct-expert bytes) | `VMLX_DSV41_MOE_DEDUP=1` | — |
+
+Real model (M5 Ultra, AR greedy, all four on vs off): 2k context 29.0–29.3 → 39.1–39.2 tok/s, 256 greedy
+tokens identical; 100k context 26.0–26.3 → 34.3 tok/s, 64 tokens identical. Verify rows (2–8) now each
+compute what a 1-row decode of that token computes, so verify is closer to sequential decode than the
+stock batched path (tiny model: max logit gap 1.61 → 0.35); it is still not bit-identical to it.
+
+Note: MLX runs f32 matmuls as TF32 on M5 by default (`MLX_ENABLE_TF32=1`); the hyper-connection einsum
+carries ~4e-4 relative error from it. The fused HC kernel reproduces that rounding to stay bit-equal.
+
+Tests: `tests/dsv41_decode_fusion_test.py` (op-level bit-equality, greedy identity on random-weight
+models from `dsv41/tests/synth.py`); benchmark harness `dsv41/tests/bench_decode.py`.
 
 ## Engine (vmlx-py) wiring status — DONE (vmlx `bf1ce697`)
 

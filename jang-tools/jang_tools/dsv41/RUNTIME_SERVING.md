@@ -94,6 +94,30 @@ indexer is the cost that grows with context. Two changes, both exact up to ties:
 with context and pushes peak active memory to ~214 GiB at 1M, past the resident cliff below; gathering
 in bf16 instead is output-identical but measured no faster at 256k.
 
+### Prompt-suffix pruning
+
+Layers 21–39 own no cache but their 128-token window: the compressed pool, index keys and candidates
+they read all come from layer 20 (the last KV source; the Engram layers are 1 and 14). For a prefill that
+ends at `prompt_end`, layer i only needs the trailing `1 + (40 - i) * 127` rows (layer 39: 128,
+layer 21: 2414): each window reaches 127 rows back, so a layer's first 127 kept rows see a partial
+window and the layer above starts 127 rows later. The logits at `prompt_end - 1` and every layer's
+window at `prompt_end` are those of a full prefill (`Model.prune_rows`, ported from ds4 #1272).
+
+- `DSV41.forward(..., prompt_end=)`; the engine's `SingleBatchGenerator._prefill` passes the end of each
+  prefill call (the N-1 prompt boundary), `DSparkRunner.prefill` the end of the prompt body. Decode,
+  DSpark verify (`capture_verify`), `all_logits` and multi-segment forwards never prune.
+- A layer that drops rows restarts its window at the kept suffix; a forward entirely before a layer's
+  kept range still runs its last row there. DSpark `return_hidden` rows are exact for the last 128
+  positions (all the draft reads), zero before.
+- Prefix-cache snapshots are only valid at `prompt_end`. Every engine snapshot is taken there.
+- `VMLX_DSV41_SUFFIX_PRUNE=0` disables. CPU test: `tests/test_suffix_prune.py` (tiny random model,
+  three pruned layers, chunk sizes 17–256).
+
+Measured (real model, cold unique text, 2048-token chunks, no draft): 8k 1019 → 1452 pp/s, 32k 938 →
+1641, 100k 875 → 1584. Exactness at 8k / 32k: last-token logits cos 0.99996 / 0.99994, same top-5,
+24 of 24 greedy tokens identical; window caches bit-identical through layer 27, bf16-level differences
+above.
+
 ### Grouped output projection
 
 `wo_a` is block-diagonal over 8 groups. For prefill (more than `GATHER_MAX_QUERIES` rows) it runs
@@ -160,27 +184,27 @@ reuse, multiturn recall, multimodal answers, reasoning-parser leaks, and the ser
 phys_footprint. Run with `VMLX_DSV41_DSPARK=0` for the AR baseline. Load only one copy of the
 model at a time: a second ~200 GB load on a 256 GB machine will be killed.
 
-Serving results (all fixes merged incl. fp32 head, in-place partial-accept commit and group-major `wo_a`;
-DSpark default on; unique-text cold prompts; M5 Ultra 256 GB; *the old 1.6k figure was disturbed by a
-vmmap sample taken right before it):
+Serving results (2026-10-26: prompt-suffix pruning + fused decode kernels (DECODE_DSPARK_METHODS M5) on top of
+the fp32 head, in-place partial-accept commit, group-major `wo_a` and matrix-unit index scores; DSpark
+default on; unique-text cold prompts; M5 Ultra 256 GB; previous round in parentheses):
 
 | metric | DSpark (default) | AR (`VMLX_DSV41_DSPARK=0`) |
 |---|---|---|
-| cold prefill 1.6k / 6.5k / 26.5k tokens | 822 / 955 / 940 pp/s (group-major `wo_a` + fused index scores; was 341* / 710 / 676) | 21k: 769 pp/s (before) |
-| decode code / code2 / structured / prose | 60.8–66.0 / 46.1–51.1 / 82.4–86.7 / 29.5–31.0 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
+| cold prefill 1.6k / 6.5k / 26.5k tokens (1024-token chunks, draft resident) | 845 / 1331 / 1554 pp/s (822 / 955 / 940) | 21k: 769 pp/s (before) |
+| decode code / code2 / structured / prose | 90.2 / 62.3 / 111.9 / 38.7 tok/s (60.8–66.0 / 46.1–51.1 / 82.4–86.7 / 29.5–31.0) | AR greedy 39.1–39.2 at 2k, 34.3 at 100k (29.0 / 26.0 before M5) |
 | decode after a 170k-token context (AR) | 25.0 tok/s; tokens identical with/without the block top-k | |
-| TTFT, short prompt | 0.24–0.52 s | 0.19–0.59 s |
-| RAM prefix hit, 3.4k tokens | 5.18 s → 0.38 s | 6.45 s → 0.33 s |
-| SSD hit after restart, 3.4k tokens | 3394 cached, 0.38–0.42 s (same as a RAM hit) | |
-| tool turn 2 | 280/354 cached, 0.85 s | 280/354, 0.87 s |
-| per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
+| TTFT, short prompt | 0.21–0.46 s | 0.19–0.59 s |
+| RAM prefix hit, 3.4k tokens | 3.38 s → 0.36 s | 6.45 s → 0.33 s |
+| SSD hit after restart, 3.4k tokens | 3394 cached, 0.34 s (same as a RAM hit) | |
+| tool turn 2 | 280/354 cached, 0.75 s | 280/354, 0.87 s |
+| per-tool-call persist / next-request wait | 2–118 ms / ≤ 102 ms (22 writes) | |
 | multimodal | Red / Apple / Red | same |
-| multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.48 s → 0.26 s; other image misses ("Blue") | |
+| multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.20 s → 0.22 s; other image misses ("Blue") | |
 | KV measured at 256k / 512k / **1M** tokens (resident; stored format v2) | 230.0 / 455.0 / **905.0 MiB** (920 / 910 / 905 B/token); stored 231.0 / 457.0 / **909.0 MiB** — 1M = 949 MB | |
-| long-context cold prefill (2048 chunks, no draft; matrix-unit index scores + block top-k) | 100k: 884 pp/s avg (40–50k 963, 88–100k 910); before the matrix-unit kernel 1M: 332 avg (windows 0–128k 792, 128–256k 618, 256–384k 431, 384–512k 366, 512–640k 306, 640–768k 270, 768–896k 234, 896k–1M 203) | |
-| phys_footprint after load / peak | 206.6 / 213.1 GB | 198.1 / 205.8 GB |
+| long-context cold prefill (2048 chunks, no draft) | with suffix pruning 8k / 32k / 100k: 1452 / 1641 / 1584 pp/s (875 at 100k without); matrix-unit index scores alone 100k: 884 pp/s avg (40–50k 963, 88–100k 910); before the matrix-unit kernel 1M: 332 avg (windows 0–128k 792, 128–256k 618, 256–384k 431, 384–512k 366, 512–640k 306, 640–768k 270, 768–896k 234, 896k–1M 203) | |
+| phys_footprint after load / end / peak | 206.8 / 206.9 / 213.2 GB | 198.1 / 205.8 GB |
 
-Decode cost by verify width (2k context, warm): 1 row 33 ms, 2 rows 44, 4 rows 51, 6 rows 60,
+Decode cost by verify width before M5 (2k context, warm): 1 row 33 ms, 2 rows 44, 4 rows 51, 6 rows 60,
 8 rows 67. The 1→2 step is MLX switching from its 1-row qmv kernel; beyond that each row adds ~4 ms of
 extra routed experts. vMLX's row-exact multi-row QMV (`vmlx_engine/metal/row_exact_qmv.py`, bit-equal
 to 1-row decode, weight fetched once) would flatten the dense part and make verify rows identical to
