@@ -167,7 +167,22 @@ class RMSNorm(nn.Module):
 
 
 def qlinear(in_dim, out_dim, bits):
+    """bits: affine bit width (group GROUP_SIZE), or "mxfp8" (JANGHT bundles: byte-exact repack of the release FP8,
+    E4M3 weights with an E8M0 scale per 32 inputs)."""
+    if bits == "mxfp8":
+        return nn.QuantizedLinear(in_dim, out_dim, bias=False, group_size=32, bits=8, mode="mxfp8")
     return nn.QuantizedLinear(in_dim, out_dim, bias=False, group_size=GROUP_SIZE, bits=bits)
+
+
+def grouped_qmm(x, lin, groups, rows):
+    """x [G, ..., K] (or [..., G, 1, K]) through the block-diagonal quantized Linear `lin` viewed as `groups` blocks of
+    `rows` outputs: one batched quantized matmul. Affine (biases) and mxfp8 (no biases) storage."""
+    w = lin.weight.reshape(groups, rows, -1)
+    sc = lin.scales.reshape(groups, rows, -1)
+    bi = getattr(lin, "biases", None)
+    bi = None if bi is None else bi.reshape(groups, rows, -1)
+    return mx.quantized_matmul(x, w, sc, bi, transpose=True, group_size=lin.group_size, bits=lin.bits,
+                               mode=getattr(lin, "mode", "affine"))
 
 
 class DenseLinear(nn.Module):
@@ -597,20 +612,15 @@ class Attention(nn.Module):
         o = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
         o = self._rope(o, pos, inverse=True).astype(mx.bfloat16)
         # wo_a is block-diagonal over groups: one batched quantized matmul per group
-        wa = self.wo_a
-        w = wa.weight.reshape(self.n_groups, self.o_lora_rank, -1)
-        sc = wa.scales.reshape(self.n_groups, self.o_lora_rank, -1)
-        bi = wa.biases.reshape(self.n_groups, self.o_lora_rank, -1)
         if B * N > GATHER_MAX_QUERIES:
             # Prefill: group-major [G, tokens, K] so each group is one matrix multiply. The
             # token-major layout below runs one 1-row product per token per group (2048-token
             # chunk: 18.6 ms -> 2.1 ms per layer).
             og = o.reshape(B * N, self.n_groups, -1).transpose(1, 0, 2)
-            og = mx.quantized_matmul(og, w, sc, bi, transpose=True, group_size=wa.group_size, bits=wa.bits)
+            og = grouped_qmm(og, self.wo_a, self.n_groups, self.o_lora_rank)
             return self.wo_b(og.transpose(1, 0, 2).reshape(B, N, -1))
         # Decode / DSpark verify: per-row products, each row computed exactly as a 1-row decode.
-        o = o.reshape(B * N, self.n_groups, 1, -1)
-        o = mx.quantized_matmul(o, w, sc, bi, transpose=True, group_size=wa.group_size, bits=wa.bits)
+        o = grouped_qmm(o.reshape(B * N, self.n_groups, 1, -1), self.wo_a, self.n_groups, self.o_lora_rank)
         return self.wo_b(o.reshape(B, N, -1))
 
     def _core(self, x, qr, q, kv, start, cache: LayerCache, shared: Shared):
@@ -698,11 +708,30 @@ class Gate(nn.Module):
         self.bias_vl = mx.zeros((E,), mx.float32)
 
 
+def jangt_experts(qbits, prefix: str, D: int, I: int, E: int):
+    """Routed experts stored JANGT (JANGHT bundles): Hadamard-128 + signs rotation, trellis L=12 at K bits per weight,
+    outlier input columns, down column scales folded into its input rotation. Run through the vMLX JANGT kernels
+    (vmlx_engine.jangt.switch.JTMixedSwitchGLU): rotate-once fused gate+up+SwiGLU(+clamp), rotated weighted down,
+    expert-sorted NAX tiles for prefill. Parameter names match the bundle (<prefix>.<proj>.jt_*)."""
+    from vmlx_engine.jangt.switch import JTMixedSwitchGLU
+
+    gu, dn = qbits[f"{prefix}.gate_proj"], qbits[f"{prefix}.down_proj"]
+    if qbits[f"{prefix}.up_proj"] != gu:
+        raise ValueError(f"jangt: gate/up formats differ for {prefix}")
+    n_out = qbits.jangt.get("outlier_columns", {})
+    return JTMixedSwitchGLU(D, I, E, gu, dn, int(n_out.get(f"{prefix}.gate_proj", 0)),
+                            int(n_out.get(f"{prefix}.down_proj", 0)), qbits.swiglu_limit)
+
+
 class FFN(nn.Module):
     def __init__(self, args: Args, layer_id: int, qbits: dict):
         super().__init__()
         self.gate = Gate(args)
-        self.experts = SwitchMLP(args, layer_id, qbits)
+        pfx = f"layers.{layer_id}.ffn.experts"
+        if isinstance(qbits[f"{pfx}.gate_proj"], dict):
+            self.experts = jangt_experts(qbits, pfx, args.hidden_size, args.moe_intermediate_size, args.n_routed_experts)
+        else:
+            self.experts = SwitchMLP(args, layer_id, qbits)
         self.shared_experts = SharedExpert(args, layer_id, qbits)
 
 
@@ -926,6 +955,8 @@ class Block(nn.Module):
         w = w * self.route_scale
 
         sw = self.ffn.experts
+        if getattr(sw, "is_jangt", False):
+            return self._shared(xf, sw.routed(xf, idx, w).astype(mx.float32)).astype(x.dtype).reshape(B, S, D)
         n = xf.shape[0]
         if FUSED_MOE and n <= GATHER_MAX_QUERIES and self.capture is None:
             from jang_tools.dsv41.metal_decode import moe_decode
@@ -961,15 +992,17 @@ class Block(nn.Module):
         else:
             y = y.reshape(n, self.topk, D)
         y = mx.sum(y, axis=1)
+        return self._shared(xf, y).astype(x.dtype).reshape(B, S, D)
 
-        se = self.ffn.shared_experts
+    def _shared(self, xf, y):
+        """y (fp32 routed sum) + the shared expert of xf, same clamp."""
+        se, lim = self.ffn.shared_experts, self.swiglu_limit
         sg = se.w1(xf).astype(mx.float32)
         su = se.w3(xf).astype(mx.float32)
         if lim > 0:
             su = mx.clip(su, -lim, lim)
             sg = mx.minimum(sg, lim)
-        y = y + se.w2((nn.silu(sg) * su).astype(mx.bfloat16)).astype(mx.float32)
-        return y.astype(x.dtype).reshape(B, S, D)
+        return y + se.w2((nn.silu(sg) * su).astype(mx.bfloat16)).astype(mx.float32)
 
     def _stage(self, xs, pre, p):
         """Fused hc_mixes + hc_pre + RMSNorm for sublayer p ("attn" / "ffn"), xs [S, 4, D]."""
@@ -1173,6 +1206,65 @@ def _infer_bits(bundle: Path) -> dict[str, int]:
     return bits
 
 
+class BundleSpecs(dict):
+    """Per-module formats read from config.json "quantization" (JANGHT bundles), in the qbits shape the modules take:
+    affine -> bit width (group GROUP_SIZE), mxfp8 -> "mxfp8", jangt -> {"mode": "jangt", "kbits": K}. A module the
+    config does not list raises (fail closed, no guessed format). Also carries the bundle's "jangt" block."""
+
+    def __init__(self, cfg: dict):
+        super().__init__()
+        self.q = cfg["quantization"]
+        self.jangt = cfg.get("jangt") or {}
+        if self.jangt and (int(self.jangt.get("version", 0)) != 1 or self.jangt.get("code") != "v2_halfbits"
+                           or int(self.jangt.get("state_bits", 0)) != 12):
+            raise ValueError(f"unsupported jangt block {self.jangt}")
+        text = cfg.get("text_config", cfg)
+        self.swiglu_limit = float(self.jangt.get("swiglu_limit", text.get("swiglu_limit", 0.0)) or 0.0)
+
+    @staticmethod
+    def wants(cfg: dict) -> bool:
+        q = cfg.get("quantization")
+        return isinstance(q, dict) and any(isinstance(v, dict) and v.get("mode") in ("mxfp8", "jangt") for v in q.values())
+
+    def __missing__(self, key):
+        e = self.q.get(key)
+        if not isinstance(e, dict):
+            raise KeyError(f"bundle config.json quantization has no entry for {key}")
+        mode = e.get("mode", "affine")
+        if mode == "mxfp8":
+            v = "mxfp8"
+        elif mode == "jangt":
+            v = {"mode": "jangt", "kbits": e["kbits"]}
+        elif mode == "affine" and int(e.get("group_size", GROUP_SIZE)) == GROUP_SIZE:
+            v = int(e["bits"])
+        else:
+            raise ValueError(f"unsupported quantization {e} for {key}")
+        self[key] = v
+        return v
+
+
+def quantize_listed_linears(model: nn.Module, cfg: dict, prefixes=("vision.", "aligner.")) -> int:
+    """Quantize the plain Linears under `prefixes` that config.json "quantization" lists (JANGHT bundles store the
+    vision tower / aligner Linears affine 8-bit); the rest of those modules stay as stored. Returns the count."""
+    q = cfg.get("quantization") or {}
+    listed = {k: v for k, v in q.items() if isinstance(v, dict) and k.startswith(prefixes)}
+    if not listed:
+        return 0
+    n = [0]
+
+    def pred(path, m):
+        e = listed.get(path)
+        if e is None or not isinstance(m, nn.Linear):
+            return False
+        n[0] += 1
+        return {"group_size": int(e["group_size"]), "bits": int(e["bits"]), "mode": e.get("mode", "affine")}
+
+    nn.quantize(model, class_predicate=pred)
+    if n[0] != len(listed):
+        raise RuntimeError(f"config lists {len(listed)} quantized vision/aligner Linears, the model has {n[0]}")
+    return n[0]
+
+
 class DSV41:
     """Loaded bundle + tokenizer + Engram hasher/tables, with a batch-1 session."""
 
@@ -1185,13 +1277,17 @@ class DSV41:
         self.args = Args.from_config(text)
         self.eos_id = cfg.get("eos_token_id", 1)
         layout = EngramLayout.from_config(text)
-        qbits = _infer_bits(bundle)
+        # JANGHT bundles declare every module's format (mxfp8 / affine / jangt); affine bundles are read from shapes
+        qbits = BundleSpecs(cfg) if BundleSpecs.wants(cfg) else _infer_bits(bundle)
+        self.cfg = cfg
         # vision tower (VL): weights live in the bundle as BF16 passthrough; enabled when present
         self.vision_args = None
         if "vision_config" in cfg and cfg["vision_config"].get("num_hidden_layers", 0) > 0:
             from jang_tools.dsv41.vision import VisionArgs
             self.vision_args = VisionArgs.from_config(cfg)
         self.model = Model(self.args, qbits, layout, self.vision_args)
+        if self.vision_args is not None and isinstance(qbits, BundleSpecs):
+            quantize_listed_linears(self.model, cfg)
 
         index = json.loads((bundle / "model.safetensors.index.json").read_text())["weight_map"]
         skip = () if self.vision_args is not None else ("vision.", "aligner.", "image_")

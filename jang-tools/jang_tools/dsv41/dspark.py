@@ -36,6 +36,7 @@ import numpy as np
 
 from jang_tools.dsv41.model import (
     GROUP_SIZE,
+    BundleSpecs,
     DenseLinear,
     RMSNorm,
     Rope,
@@ -44,6 +45,9 @@ from jang_tools.dsv41.model import (
     _hc_pre,
     _hc_split,
     _hc_split_metal,
+    grouped_qmm,
+    jangt_experts,
+    qlinear,
     sparse_attention,
     yarn_inv_freq,
 )
@@ -96,9 +100,10 @@ class BoundedWindow:
 
 
 class DSparkAttention(nn.Module):
-    """Latent attention whose KV window is main-hidden-derived; bf16 (draft precision)."""
+    """Latent attention whose KV window is main-hidden-derived; bf16 (draft precision), or the bundle's mxfp8
+    projections when `specs` (JANGHT bundle formats) is given."""
 
-    def __init__(self, args):
+    def __init__(self, args, specs=None, prefix=""):
         super().__init__()
         d, H = args.hidden_size, args.num_attention_heads
         self.n_heads, self.head_dim, self.rd = H, args.head_dim, args.qk_rope_head_dim
@@ -106,13 +111,19 @@ class DSparkAttention(nn.Module):
         self.win = args.sliding_window
         self.scale = self.head_dim ** -0.5
         self.attn_sink = mx.zeros((H,), mx.float32)
-        self.wq_a = DenseLinear(d, args.q_lora_rank)
+        def lin(name, i, o):
+            return DenseLinear(i, o) if specs is None else qlinear(i, o, specs[f"{prefix}.{name}"])
+
+        self.wq_a = lin("wq_a", d, args.q_lora_rank)
         self.q_norm = RMSNorm(args.q_lora_rank, args.rms_norm_eps)
-        self.wq_b = DenseLinear(args.q_lora_rank, H * self.head_dim)
-        self.wkv = DenseLinear(d, self.head_dim)
+        self.wq_b = lin("wq_b", args.q_lora_rank, H * self.head_dim)
+        self.wkv = lin("wkv", d, self.head_dim)
         self.kv_norm = RMSNorm(self.head_dim, args.rms_norm_eps)
-        self.wo_a = mx.zeros((self.n_groups, self.o_lora_rank, H * self.head_dim // self.n_groups), mx.bfloat16)
-        self.wo_b = DenseLinear(self.n_groups * self.o_lora_rank, d)
+        if specs is None:
+            self.wo_a = mx.zeros((self.n_groups, self.o_lora_rank, H * self.head_dim // self.n_groups), mx.bfloat16)
+        else:   # block-diagonal over groups, stored as one quantized Linear (grouped_qmm)
+            self.wo_a = qlinear(H * self.head_dim // self.n_groups, self.n_groups * self.o_lora_rank, specs[f"{prefix}.wo_a"])
+        self.wo_b = lin("wo_b", self.n_groups * self.o_lora_rank, d)
         inv = yarn_inv_freq(self.rd, args.rope_theta, 0, 1, 0, 0)  # dspark attn is never compressed -> plain rope
         self._rope = Rope(self.rd, inv)
         # main-hidden-derived KV for the last `win` committed positions (rope'd), oldest first. Bounded:
@@ -142,15 +153,19 @@ class DSparkAttention(nn.Module):
         o = sparse_attention(q, full, self.attn_sink, idxs, self.scale)  # [1, bs, H, head_dim]
         o = self._rope(o, positions, inverse=True).astype(mx.bfloat16)
         o = o.reshape(bs, self.n_groups, -1)  # [bs, groups, (H/groups)*head_dim]
-        o = mx.einsum("sgd,grd->sgr", o, self.wo_a)  # [bs, groups, o_lora_rank]
+        if isinstance(self.wo_a, nn.Module):  # quantized: group-major, one matmul per group
+            o = grouped_qmm(o.transpose(1, 0, 2), self.wo_a, self.n_groups, self.o_lora_rank).transpose(1, 0, 2)
+        else:
+            o = mx.einsum("sgd,grd->sgr", o, self.wo_a)  # [bs, groups, o_lora_rank]
         return self.wo_b(o.reshape(1, bs, -1))  # [1, bs, d]
 
 
 # --------------------------------------------------------------------------- draft MoE
 class DSparkMoE(nn.Module):
-    """128-expert top-3 MoE, routed experts 4-bit (gather_qmm), shared expert + gate bf16/f32."""
+    """128-expert top-3 MoE, routed experts 4-bit (gather_qmm), shared expert + gate bf16/f32. With `specs` (JANGHT
+    bundle formats): JANGT routed experts (vMLX kernels) and the bundle's mxfp8 shared expert."""
 
-    def __init__(self, args, n_experts, inter, bits=4):
+    def __init__(self, args, n_experts, inter, bits=4, specs=None, prefix=""):
         super().__init__()
         d = args.hidden_size
         self.topk = args.raw["dspark_num_experts_per_tok"]
@@ -159,6 +174,13 @@ class DSparkMoE(nn.Module):
         self.lim = args.swiglu_limit
         self.gate_w = mx.zeros((n_experts, d), mx.bfloat16)
         self.gate_bias = mx.zeros((n_experts,), mx.float32)
+        if specs is not None:
+            self.experts = jangt_experts(specs, f"{prefix}.experts", d, inter, n_experts)
+            sh = f"{prefix}.shared_experts"
+            self.sw1 = qlinear(d, inter, specs[f"{sh}.w1"])
+            self.sw3 = qlinear(d, inter, specs[f"{sh}.w3"])
+            self.sw2 = qlinear(inter, d, specs[f"{sh}.w2"])
+            return
         self.gate_proj = SwitchProj(n_experts, d, inter, bits)
         self.up_proj = SwitchProj(n_experts, d, inter, bits)
         self.down_proj = SwitchProj(n_experts, inter, d, bits)
@@ -175,7 +197,21 @@ class DSparkMoE(nn.Module):
         if self.norm_topk and self.topk > 1:
             w = w / (mx.sum(w, -1, keepdims=True) + 1e-20)
         w = w * self.route_scale
-        n = xf.shape[0]
+        lim = self.lim
+        if hasattr(self, "experts"):  # JANGT
+            y = self.experts.routed(xf, idx, w).astype(mx.float32)
+        else:
+            y = self._routed_affine(xf, idx, w)
+        sg = self.sw1(xf).astype(mx.float32)
+        su = self.sw3(xf).astype(mx.float32)
+        if lim > 0:
+            su = mx.clip(su, -lim, lim)
+            sg = mx.minimum(sg, lim)
+        y = y + self.sw2((nn.silu(sg) * su).astype(mx.bfloat16)).astype(mx.float32)
+        return y.astype(x.dtype).reshape(B, S, D)
+
+    def _routed_affine(self, xf, idx, w):
+        n, D = xf.shape
         xe = xf[:, None, None, :]  # [N,1,1,D]; small N (<=bs) so no sort (release threshold 64)
         gate = self.gate_proj(xe, idx, False).astype(mx.float32)
         up = self.up_proj(xe, idx, False).astype(mx.float32)
@@ -186,23 +222,16 @@ class DSparkMoE(nn.Module):
         h = nn.silu(gate) * up
         h = h * w[:, :, None, None]
         y = self.down_proj(h.astype(mx.bfloat16), idx, False).astype(mx.float32)
-        y = mx.sum(y.reshape(n, self.topk, D), axis=1)
-        sg = self.sw1(xf).astype(mx.float32)
-        su = self.sw3(xf).astype(mx.float32)
-        if lim > 0:
-            su = mx.clip(su, -lim, lim)
-            sg = mx.minimum(sg, lim)
-        y = y + self.sw2((nn.silu(sg) * su).astype(mx.bfloat16)).astype(mx.float32)
-        return y.astype(x.dtype).reshape(B, S, D)
+        return mx.sum(y.reshape(n, self.topk, D), axis=1)
 
 
 # --------------------------------------------------------------------------- one dSpark stage
 class DSparkStage(nn.Module):
-    def __init__(self, args, n_experts, inter, is_first, is_last, n_targets, markov_rank):
+    def __init__(self, args, n_experts, inter, is_first, is_last, n_targets, markov_rank, specs=None, prefix=""):
         super().__init__()
         d, hc = args.hidden_size, args.hc_mult
-        self.attn = DSparkAttention(args)
-        self.moe = DSparkMoE(args, n_experts, inter)
+        self.attn = DSparkAttention(args, specs, f"{prefix}.attn")
+        self.moe = DSparkMoE(args, n_experts, inter, specs=specs, prefix=f"{prefix}.ffn")
         self.attn_norm = RMSNorm(d, args.rms_norm_eps)
         self.ffn_norm = RMSNorm(d, args.rms_norm_eps)
         mix = (2 + hc) * hc
@@ -212,7 +241,7 @@ class DSparkStage(nn.Module):
             setattr(self, f"hc_{p}_scale", mx.zeros((3,), mx.float32))
         self.hc, self.iters, self.hc_eps, self.eps = hc, args.hc_sinkhorn_iters, args.hc_eps, args.rms_norm_eps
         if is_first:
-            self.main_proj = DenseLinear(d * n_targets, d)
+            self.main_proj = DenseLinear(d * n_targets, d) if specs is None else qlinear(d * n_targets, d, specs[f"{prefix}.main_proj"])
             self.main_norm = RMSNorm(d, args.rms_norm_eps)
         if is_last:
             self.norm = RMSNorm(d, args.rms_norm_eps)
@@ -256,7 +285,7 @@ def markov_chain(logits, markov_embed, head_t, seed_tok):
 class DSpark(nn.Module):
     """The 3-stage dSpark draft head. embed/head are the backbone's (shared)."""
 
-    def __init__(self, args, embed, head):
+    def __init__(self, args, embed, head, specs=None):
         super().__init__()
         self.args = args
         self.embed, self.head = embed, head  # backbone QuantizedEmbedding / QuantizedLinear
@@ -269,7 +298,8 @@ class DSpark(nn.Module):
         n_experts = args.raw["dspark_n_routed_experts"]
         inter = args.raw.get("dspark_moe_inter_dim", args.moe_intermediate_size)
         self.stages = [
-            DSparkStage(args, n_experts, inter, i == 0, i == self.n_stages - 1, len(self.targets), self.markov_rank)
+            DSparkStage(args, n_experts, inter, i == 0, i == self.n_stages - 1, len(self.targets), self.markov_rank,
+                        specs, f"mtp.{i}")
             for i in range(self.n_stages)
         ]
 
@@ -402,27 +432,55 @@ def _resolve_dspark_file(path: Path):
     return None
 
 
+def _bundle_specs(path: Path):
+    """BundleSpecs of a JANGHT bundle (config.json declares mxfp8 / jangt modules), else None."""
+    import json
+
+    try:
+        cfg = json.loads((path / "config.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return BundleSpecs(cfg) if BundleSpecs.wants(cfg) else None
+
+
+def _set_linear(sh, lin, name):
+    """Bundle tensors `name`.weight (+ .scales / .biases when quantized) into a DenseLinear or QuantizedLinear."""
+    if isinstance(lin, nn.QuantizedLinear):
+        lin.weight = sh.to_mx(f"{name}.weight")
+        lin.scales = sh.to_mx(f"{name}.scales")
+        if getattr(lin, "biases", None) is not None:
+            lin.biases = sh.to_mx(f"{name}.biases")
+    else:
+        lin.weight = _to_bf16(sh, f"{name}.weight")
+
+
 def load_dspark(source_dir, args, embed, head):
     """Load the dSpark draft head. Prefers a bundle's self-contained ``dspark/`` subdir
     (routed experts already stacked + 4-bit); otherwise reads the raw ``mtp.*`` from the
-    source model shards and quantizes experts on the fly. Both paths are byte-identical."""
+    source model shards and quantizes experts on the fly. Both paths are byte-identical.
+    JANGHT bundles (config.json declares the formats) ship ``dspark/dspark.safetensors`` with mxfp8
+    projections and JANGT routed experts; those load as stored (no dequantization)."""
     path = Path(source_dir).expanduser()
     ds_file = _resolve_dspark_file(path)
+    specs = _bundle_specs(path)
+    if specs is not None and ds_file is None:
+        raise FileNotFoundError(f"JANGHT bundle {path} has no dspark/dspark.safetensors")
     if ds_file is not None:
         sh = _DictShards(mx.load(str(ds_file)))
     else:
         sh = Shards(path, allow_missing=True)
-    ds = DSpark(args, embed, head)
+    ds = DSpark(args, embed, head, specs)
     n_experts = args.raw["dspark_n_routed_experts"]
     for i, st in enumerate(ds.stages):
         p = f"mtp.{i}"
         a = st.attn
-        a.wq_a.weight = _to_bf16(sh, f"{p}.attn.wq_a.weight")
-        a.wq_b.weight = _to_bf16(sh, f"{p}.attn.wq_b.weight")
-        a.wkv.weight = _to_bf16(sh, f"{p}.attn.wkv.weight")
-        a.wo_b.weight = _to_bf16(sh, f"{p}.attn.wo_b.weight")
-        woa = _to_bf16(sh, f"{p}.attn.wo_a.weight")  # [groups*o_lora_rank, (H/groups)*head_dim]
-        a.wo_a = woa.reshape(a.n_groups, a.o_lora_rank, -1)
+        for name in ("wq_a", "wq_b", "wkv", "wo_b"):
+            _set_linear(sh, getattr(a, name), f"{p}.attn.{name}")
+        if isinstance(a.wo_a, nn.Module):
+            _set_linear(sh, a.wo_a, f"{p}.attn.wo_a")
+        else:
+            woa = _to_bf16(sh, f"{p}.attn.wo_a.weight")  # [groups*o_lora_rank, (H/groups)*head_dim]
+            a.wo_a = woa.reshape(a.n_groups, a.o_lora_rank, -1)
         a.q_norm.weight = _to_bf16(sh, f"{p}.attn.q_norm.weight")
         a.kv_norm.weight = _to_bf16(sh, f"{p}.attn.kv_norm.weight")
         a.attn_sink = sh.to_mx(f"{p}.attn.attn_sink").astype(mx.float32)
@@ -435,10 +493,12 @@ def load_dspark(source_dir, args, embed, head):
         m = st.moe
         m.gate_w = _to_bf16(sh, f"{p}.ffn.gate.weight")
         m.gate_bias = sh.to_mx(f"{p}.ffn.gate.bias").astype(mx.float32)
-        m.sw1.weight = _to_bf16(sh, f"{p}.ffn.shared_experts.w1.weight")
-        m.sw3.weight = _to_bf16(sh, f"{p}.ffn.shared_experts.w3.weight")
-        m.sw2.weight = _to_bf16(sh, f"{p}.ffn.shared_experts.w2.weight")
-        for proj, mat in (("gate_proj", "w1"), ("up_proj", "w3"), ("down_proj", "w2")):
+        for name in ("w1", "w3", "w2"):
+            _set_linear(sh, getattr(m, f"s{name}"), f"{p}.ffn.shared_experts.{name}")
+        if hasattr(m, "experts"):  # JANGT routed experts, bundle names <p>.ffn.experts.<proj>.jt_*
+            ex = f"{p}.ffn.experts."
+            m.experts.load_weights([(k[len(ex):], sh.to_mx(k)) for k in sh.d if k.startswith(ex)], strict=True)
+        for proj, mat in (() if hasattr(m, "experts") else (("gate_proj", "w1"), ("up_proj", "w3"), ("down_proj", "w2"))):
             pre = f"{p}.ffn.experts.{proj}.weight"
             if pre in sh:  # bundle dspark/ subdir: experts already stacked + quantized
                 qw = sh.to_mx(pre)
@@ -449,7 +509,7 @@ def load_dspark(source_dir, args, embed, head):
             sp = getattr(m, proj)
             sp.weight, sp.scales, sp.biases = qw, s, b
         if i == 0:
-            st.main_proj.weight = _to_bf16(sh, f"{p}.main_proj.weight")
+            _set_linear(sh, st.main_proj, f"{p}.main_proj")
             st.main_norm.weight = _to_bf16(sh, f"{p}.main_norm.weight")
         if i == ds.n_stages - 1:
             st.norm.weight = _to_bf16(sh, f"{p}.norm.weight")
