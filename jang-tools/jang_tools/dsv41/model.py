@@ -335,9 +335,10 @@ def _attn_chunk(q, kv, sink, ix, scale):
     return _attn_core(q, kv, sink, ix, mx.array(scale, mx.float32))
 
 
-# Rows at least this long take the block top-k (topk_indices): MLX's GPU argpartition is a full sort of
-# the row, which at long context dominates the indexer (100k keys: 32.7 -> 13.5 ms, 1M: 51.9 -> 3.2 ms
-# for the selection).
+# Prefill rows at least this long take the block top-k (topk_indices): MLX's GPU argpartition is a full
+# sort of the row, which at long context dominates the indexer (2048 x 100k keys: 32.7 -> 13.5 ms,
+# 256 x 1M: 51.9 -> 3.2 ms for the selection). Decode (<= GATHER_MAX_QUERIES rows) keeps the direct
+# partition: faster there (170k context: 25.1 vs 23.9 tok/s) and its bf16 index scores tie often.
 TOPK_BLOCK_MIN = 65536
 TOPK_BLOCK = 64
 
@@ -352,7 +353,7 @@ def topk_indices(scores, k):
     T = scores.shape[-1]
     if k >= T:
         return mx.broadcast_to(mx.arange(T, dtype=mx.int32), scores.shape)
-    if scores.ndim == 2 and T >= TOPK_BLOCK_MIN and T // TOPK_BLOCK > k:
+    if scores.ndim == 2 and scores.shape[0] > GATHER_MAX_QUERIES and T >= TOPK_BLOCK_MIN and T // TOPK_BLOCK > k:
         C, b = scores.shape[0], TOPK_BLOCK
         pad = -T % b
         s = mx.concatenate([scores, mx.full((C, pad), -mx.inf, dtype=scores.dtype)], axis=-1) if pad else scores
