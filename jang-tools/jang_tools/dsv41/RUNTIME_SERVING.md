@@ -95,6 +95,9 @@ The standalone numbers above only hold in `vmlx serve` with two settings, both n
 - RAM paged prefix cache plus block-disk L2 (`--use-paged-cache --enable-block-disk-cache`).
   Entries are keyed on N-1 prompt tokens: the snapshot is taken at the prompt boundary,
   before the last prompt token, which is re-fed on a hit.
+- The block-disk directory is namespaced by a fingerprint of the serving configuration and engine
+  code, so entries written by a different engine build are not reused (a new namespace directory
+  appears instead). Benchmarks of SSD reuse must restart the same build.
 - Per-tool-call persistence: the terminal snapshot is written when a request finishes;
   the next request waits for it (`Terminal persistence settled ... persist_ms`,
   `Admission waited ... wait_ms` in the server log). Measured: `persist_ms` 7–121 ms, admission
@@ -129,7 +132,7 @@ on; unique-text cold prompts; M5 Ultra 256 GB):
 | decode code / code2 / structured / prose | 60.8 / 51.1 / 82.4 / 29.5 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
 | TTFT, short prompt | 0.24–0.52 s | 0.19–0.59 s |
 | RAM prefix hit, 3.4k tokens | 5.18 s → 0.38 s | 6.45 s → 0.33 s |
-| SSD hit after restart, 3.4k tokens | 3394 cached, 3.15 s | |
+| SSD hit after restart, 3.4k tokens | 3394 cached, 0.38 s (same as a RAM hit, 0.39 s) | |
 | tool turn 2 | 280/354 cached, 0.85 s | 280/354, 0.87 s |
 | per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
 | multimodal | Red / Apple / Red | same |
@@ -153,6 +156,4 @@ template regenerated for that MLX.
   4-bit pools; it needs real-geometry heads.
 - Logits top-2 are often exactly tied (bf16 head output), so chunk boundaries flip first
   tokens; compare head precision with the reference.
-- SSD-restored hit after a restart takes 2.3–3.2 s for 3.4k tokens (the old format took 0.57 s);
-  profile the format v2 restore.
 - `iogpu.wired_limit_mb` raise not tested.
