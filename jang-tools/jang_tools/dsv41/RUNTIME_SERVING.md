@@ -84,11 +84,13 @@ indexer is the cost that grows with context. Two changes, both exact up to ties:
   2.4x faster at 2048 x 100k, 16x at 256 x 1M. Decode keeps the direct partition: for one row it is
   cheaper (170k context: 25.1 vs 23.9 tok/s), and decode index scores take the bf16 path where exact
   ties are common, so a different pick among tied values would change decode output.
-Where long-context prefill stands: the indexer is now compute-bound. The fused kernel runs its q.k
-products on 8x8 simdgroup matrices at ~27 TFLOPS fp32; feeding it fp16 fragments is no faster (100k
-keys: 63.1 vs 61.1 ms; simdgroup MMA has one rate for half and float), so the next lever is a version on
-the M5 matrix units (Metal 4 tensor ops, as `vmlx_engine/metal/lane_qmm.py`), worth at most ~2x on the
-indexer. The per-layer attention input (window + whole pool, concatenated and cast to fp32) also grows
+- **Matrix units:** the simdgroup fp32 kernel tops out near 27 TFLOPS (fp16 fragments are no faster:
+  simdgroup MMA has one rate for half and float). vMLX's `dsa_index_scores_mpp` runs the same fused
+  function on the M5 matrix units (Metal 4 tensor ops) with bf16 operands at ~115-120 TFLOPS: 4.3x the
+  fp32 kernel at 2048 x 100k keys. The indexer passes its bf16 tensors (`bf16_operands=True`; falls back
+  to the fp32 kernel on older vMLX / non-M5 / `VMLX_DSV41_INDEX_BF16=0`). Cold prefill to 100k: average
+  831 -> 884 pp/s, 40-50k 913 -> 963, 88-100k 818 -> 910. Numerics vs the fp32 kernel: mean cos 0.9964,
+  top-1 100%, greedy continuation identical. The per-layer attention input (window + whole pool, concatenated and cast to fp32) also grows
 with context and pushes peak active memory to ~214 GiB at 1M, past the resident cliff below; gathering
 in bf16 instead is output-identical but measured no faster at 256k.
 
@@ -175,7 +177,7 @@ vmmap sample taken right before it):
 | multimodal | Red / Apple / Red | same |
 | multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.48 s → 0.26 s; other image misses ("Blue") | |
 | KV measured at 256k / 512k / **1M** tokens (resident; stored format v2) | 230.0 / 455.0 / **905.0 MiB** (920 / 910 / 905 B/token); stored 231.0 / 457.0 / **909.0 MiB** — 1M = 949 MB | |
-| long-context cold prefill (2048 chunks, no draft; fused index scores + block top-k) | 100k: 821 pp/s avg (40–50k 913, 88–100k 775); 1M: 332 avg (windows 0–128k 792, 128–256k 618, 256–384k 431, 384–512k 366, 512–640k 306, 640–768k 270, 768–896k 234, 896k–1M 203) | |
+| long-context cold prefill (2048 chunks, no draft; matrix-unit index scores + block top-k) | 100k: 884 pp/s avg (40–50k 963, 88–100k 910); before the matrix-unit kernel 1M: 332 avg (windows 0–128k 792, 128–256k 618, 256–384k 431, 384–512k 366, 512–640k 306, 640–768k 270, 768–896k 234, 896k–1M 203) | |
 | phys_footprint after load / peak | 206.6 / 213.1 GB | 198.1 / 205.8 GB |
 
 Decode cost by verify width (2k context, warm): 1 row 33 ms, 2 rows 44, 4 rows 51, 6 rows 60,
