@@ -43,7 +43,16 @@ def _run_verify(model, rows=5):
     return np.array(lg.astype(mx.float32))
 
 
-_KERNEL = {"ROUTER_GEMV": "router_logits", "FUSED_MOE": "moe_decode", "FUSED_HC": "hc_mixes_decode"}
+_KERNEL = {"ROUTER_GEMV": "router_logits", "FUSED_MOE": "moe_decode", "FUSED_HC": "hc_stage_decode"}
+
+
+def _run_sequential(model, rows=5):
+    """The verify tokens decoded one forward each (what a verify row should reproduce)."""
+    caches = S.new_caches(model.args)
+    mx.eval(S.forward(model, PROMPT, caches, 0))
+    out = [np.array(S.forward(model, [t], caches, len(PROMPT) + i).astype(mx.float32))[0]
+           for i, t in enumerate([7, 300, 11, 900, 3, 77, 512, 64][:rows])]
+    return np.stack(out)
 
 
 def _ab(monkeypatch, model, attr, run):
@@ -190,3 +199,53 @@ def test_fused_moe_decode_is_bit_exact(tiny, monkeypatch):
     assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))
     va, vb = _ab(monkeypatch, tiny, "FUSED_MOE", _run_verify)
     assert np.abs(va - vb).max() < 0.05 * np.abs(va).max()
+
+
+# ----------------------------------------------------------------------------- fused hyper-connections
+
+@pytest.mark.parametrize("dims", ["tiny", "real"])
+def test_hc_stage_and_post_match_stock(dims):
+    from jang_tools.dsv41 import metal_decode as MD
+    args = S.tiny_args(1) if dims == "tiny" else S.real_args(1, 16)
+    blk = S.build(args).layers[0]
+    D = args.hidden_size
+    for t in range(6):
+        for R in (1, 3):
+            x = (mx.random.normal((1, R, 4, D), key=mx.random.key(t)) * (0.3 + 2 * t)).astype(mx.bfloat16)
+            pre = mx.softmax(mx.random.normal((1, R, 4), key=mx.random.key(50 + t)), -1)
+            h = (mx.random.normal((1, R, D), key=mx.random.key(70 + t)) * 2).astype(mx.bfloat16)
+            out = MD.hc_stage_decode(x[0], pre[0], blk.hc_ffn_fn, blk.hc_ffn_scale, blk.hc_ffn_base,
+                                     blk.ffn_norm.weight, blk.ffn_norm.eps, blk.eps, blk.hc_eps, blk.iters)
+            for i in range(R):  # each row == the stock ops on that row alone (= stock decode)
+                xi = x[:, i:i + 1]
+                ref = (blk.ffn_norm(M._hc_pre(xi, pre[:, i:i + 1])),
+                       *blk.hc_mixes(xi, blk.hc_ffn_fn, blk.hc_ffn_scale, blk.hc_ffn_base))
+                for a, b in zip(out, ref):
+                    assert np.array_equal(_bits(a[i]), _bits(b.reshape(b.shape[2:])))
+            post = MD.hc_post_decode(h[0], x[0], out[2], out[3])
+            assert np.array_equal(_bits(post), _bits(M._hc_post(h, x, out[2][None], out[3][None])[0]))
+
+
+def test_fused_hc_decode_is_bit_exact(tiny, monkeypatch):
+    M._HC_FUSED_OK.clear()
+    (ta, la), (tb, lb) = _ab(monkeypatch, tiny, "FUSED_HC", _run_greedy)
+    assert ta == tb
+    assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))
+    assert all(M._HC_FUSED_OK.values()) and M._HC_FUSED_OK
+    # Verify rows: stock runs the mixes / einsum as TF32 GEMMs over the rows, the fused stage computes
+    # each row as its 1-row decode, so the fused verify is closer to sequential decode.
+    va, vb = _ab(monkeypatch, tiny, "FUSED_HC", _run_verify)
+    monkeypatch.setattr(M, "FUSED_HC", False)
+    seq = _run_sequential(tiny)
+    assert np.abs(vb - seq).max() <= np.abs(va - seq).max()
+
+
+def test_all_fusions_together_decode_bit_exact(tiny, monkeypatch):
+    flags = ("ROUTER_GEMV", "FUSED_MOE", "FUSED_HC", "LAYER_ASYNC")
+    for f in flags:
+        monkeypatch.setattr(M, f, False)
+    a, la = _run_greedy(tiny, 16)
+    for f in flags:
+        monkeypatch.setattr(M, f, True)
+    b, lb = _run_greedy(tiny, 16)
+    assert a == b and np.array_equal(la.view(np.uint32), lb.view(np.uint32))

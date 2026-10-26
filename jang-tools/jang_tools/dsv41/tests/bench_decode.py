@@ -114,9 +114,28 @@ def bench_moe(a):
               f"{_fmt(tuple(v / n for v in off), tuple(v / n for v in on))}")
 
 
+def bench_hc(a):
+    """The hyper-connection stage alone: the decode stack with attention and MoE replaced by x * 0.5."""
+    M.Attention.__call__ = lambda self, x, segs: x * 0.5
+    M.Block.moe = lambda self, x, image_mask=None: x * 0.5
+    args = S.real_args(a.layers, a.experts)
+    model = S.build(args)
+    caches = S.new_caches(args)
+    state = {"pos": 0}
+
+    def step():
+        mx.eval(S.forward(model, [1] * a.rows, caches, state["pos"], all_logits=True))
+        state["pos"] += a.rows
+
+    out = _ab(step, {k: FLAG_SETTERS[k] for k in (a.flags or "fused_hc").split(",") if k in FLAG_SETTERS},
+              a.rounds, a.reps)
+    for k, (off, on) in out.items():
+        print(f"hc/layer rows={a.rows} {k:12s} {_fmt(tuple(v / a.layers for v in off), tuple(v / a.layers for v in on))}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["stack", "moe"])
+    ap.add_argument("what", choices=["stack", "moe", "hc"])
     ap.add_argument("--cycles", type=int, default=4)
     ap.add_argument("--layers", type=int, default=10)
     ap.add_argument("--experts", type=int, default=16)
@@ -127,7 +146,7 @@ def main():
     ap.add_argument("--reps", type=int, default=10)
     ap.add_argument("--flags", default="")
     a = ap.parse_args()
-    {"stack": bench_stack, "moe": bench_moe}[a.what](a)
+    {"stack": bench_stack, "moe": bench_moe, "hc": bench_hc}[a.what](a)
 
 
 if __name__ == "__main__":

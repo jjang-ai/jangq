@@ -52,6 +52,11 @@ ROUTER_GEMV = _env_on("VMLX_DSV41_ROUTER_GEMV")
 # MOE_GU/MOE_DN) instead of ~25. 1 row: bit-identical; 2-8 rows: each row exactly its 1-row decode.
 # VMLX_DSV41_FUSED_MOE=0 restores gather_qmm + qlinear.
 FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
+# Hyper-connection stage for <= 8 rows in three Metal dispatches per sublayer (metal_decode.hc_*:
+# mixes + collapse + RMSNorm, Sinkhorn split, expand) instead of ~14, each MLX op's order reproduced.
+# Bit-identical (checked once per process against the stock ops; a mismatch keeps the stock path).
+# VMLX_DSV41_FUSED_HC=0 restores the stock ops.
+FUSED_HC = _env_on("VMLX_DSV41_FUSED_HC")
 
 
 @dataclass
@@ -862,6 +867,42 @@ def _hc_split(hc: int, iters: int, eps: float):
     return _HC_SPLIT[key]
 
 
+_HC_FUSED_OK: dict = {}
+
+
+def _hc_fused_ok(blk) -> bool:
+    """Once per (D, eps) per process: the fused hc stage / expand reproduce the stock ops bit for bit
+    on a random stream with this block's weights (guards against another MLX build or TF32 off)."""
+    D = blk.hc_attn_fn.shape[1] // blk.hc
+    key = (D, blk.eps, blk.attn_norm.eps, blk.hc_eps, blk.iters)
+    ok = _HC_FUSED_OK.get(key)
+    if ok is None:
+        ok = False
+        try:
+            from jang_tools.dsv41.metal_decode import hc_post_decode, hc_stage_decode
+            k = mx.random.key(7)
+            x = (mx.random.normal((1, 2, blk.hc, D), key=k) * 3).astype(mx.bfloat16)
+            pre = mx.softmax(mx.random.normal((1, 2, blk.hc), key=mx.random.key(8)), axis=-1)
+            h = (mx.random.normal((1, 2, D), key=mx.random.key(9)) * 2).astype(mx.bfloat16)
+            st = hc_stage_decode(x[0], pre[0], blk.hc_attn_fn, blk.hc_attn_scale, blk.hc_attn_base,
+                                 blk.attn_norm.weight, blk.attn_norm.eps, blk.eps, blk.hc_eps, blk.iters)
+            if st is not None:
+                ok = True
+                for i in range(2):  # stock, one row at a time
+                    xi = x[:, i:i + 1]
+                    ref = (blk.attn_norm(_hc_pre(xi, pre[:, i:i + 1])),
+                           *blk.hc_mixes(xi, blk.hc_attn_fn, blk.hc_attn_scale, blk.hc_attn_base))
+                    for a, b in zip(st, ref):
+                        ok = ok and mx.array_equal(a[i], b.reshape(b.shape[2:])).item()
+                    post = hc_post_decode(h[0, i:i + 1], x[0, i:i + 1], st[2][i:i + 1], st[3][i:i + 1])
+                    ok = ok and post is not None and mx.array_equal(
+                        post, _hc_post(h[:, i:i + 1], xi, st[2][None, i:i + 1], st[3][None, i:i + 1])[0]).item()
+        except Exception:  # noqa: BLE001 - any failure keeps the stock path
+            ok = False
+        _HC_FUSED_OK[key] = ok
+    return ok
+
+
 class Block(nn.Module):
     def __init__(self, args: Args, layer_id: int, layout: EngramLayout, qbits: dict):
         super().__init__()
@@ -968,7 +1009,38 @@ class Block(nn.Module):
         y = y + se.w2((nn.silu(sg) * su).astype(mx.bfloat16)).astype(mx.float32)
         return y.astype(x.dtype).reshape(B, S, D)
 
+    def _stage(self, xs, pre, p):
+        """Fused hc_mixes + hc_pre + RMSNorm for sublayer p ("attn" / "ffn"), xs [S, 4, D]."""
+        from jang_tools.dsv41.metal_decode import hc_stage_decode
+        norm = getattr(self, f"{p}_norm")
+        return hc_stage_decode(xs, pre, getattr(self, f"hc_{p}_fn"), getattr(self, f"hc_{p}_scale"),
+                               getattr(self, f"hc_{p}_base"), norm.weight, norm.eps, self.eps, self.hc_eps, self.iters)
+
+    @staticmethod
+    def _post(h, xs, post, comb):
+        from jang_tools.dsv41.metal_decode import hc_post_decode
+        out = hc_post_decode(h, xs, post, comb)
+        return out if out is not None else _hc_post(h[None], xs[None], post[None], comb[None])[0]
+
+    def _call_fused_hc(self, x, segs, pre_mix, image_mask):
+        S = x.shape[1]
+        xs = x[0]
+        st = self._stage(xs, pre_mix.reshape(S, self.hc), "attn")
+        if st is None:
+            return None
+        xin, a_pre, a_post, a_comb = st
+        xs = self._post(self.attn(xin[None], segs)[0], xs, a_post, a_comb)
+        st = self._stage(xs, a_pre, "ffn")
+        xin, f_pre, f_post, f_comb = st
+        xs = self._post(self.moe(xin[None], image_mask)[0], xs, f_post, f_comb)
+        return xs[None], f_pre[None]
+
     def __call__(self, x, segs, pre_mix, image_mask=None):
+        if (FUSED_HC and x.shape[0] == 1 and x.shape[1] <= GATHER_MAX_QUERIES and self.hc == 4
+                and _hc_fused_ok(self)):
+            out = self._call_fused_hc(x, segs, pre_mix, image_mask)
+            if out is not None:
+                return out
         residual = x
         a_pre, a_post, a_comb = self.hc_mixes(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         h = self.attn(self.attn_norm(self.hc_pre(x, pre_mix)), segs)

@@ -472,3 +472,278 @@ def moe_decode(x, idx, w, experts, shared, swiglu_limit: float, group_size: int 
            grid=(D // (4 * rg) * 32 * (topk + 1), R, 1), threadgroup=(32 * (topk + 1), 1, 1),
            output_shapes=[(R, D)], output_dtypes=[mx.bfloat16])[0]
     return y
+
+
+# ----------------------------------------------------------------------------- fused hyper-connections
+# Per sublayer the stock decode runs hc_mixes (astype, square, mean = 2-pass all-reduce, rsqrt, f32
+# GEMV 24 x 20480, multiply, Sinkhorn kernel), hc_pre (compiled multiply + axis reduction + cast),
+# RMSNorm and hc_post (compiled multiply, einsum GEMM, add, cast): ~14 dispatches. Here (mlx-serve
+# HC_STAGE / HC_SPLIT, oMLX K1/K2) three:
+#   hc_stage: tg 0 collapses the stream with the previous pre and RMS-norms it (MLX rms_single_row /
+#             rms_looped order); tg 1 sums x^2 in MLX's row_reduce_looped order; tgs 2-7 run MLX's gemv
+#             (BM1 BN8 SM1 SN32 TM4 TN4, its choice for 24 x 20480) for the 24 mixes.
+#   hc_split: mean, rsqrt, mixes * rs and the release Sinkhorn (the code of _hc_split_metal)
+#             -> pre / post / comb.
+#   hc_post:  post * h + comb^T . residual -> next stream (bf16). MLX's f32 GEMM for the einsum runs on
+#             the M5 matrix units in TF32 (MLX_ENABLE_TF32=1, the default): comb truncated to TF32, the
+#             four products summed pairwise; reproduced exactly here.
+# Each row (decode or verify) is computed as its own 1-row decode. Bit-identity with the stock ops is
+# checked once at first use (hc_selfcheck); any mismatch (another MLX, TF32 off) disables the path.
+
+_HC_STAGE_SRC = r"""
+    const uint tg = threadgroup_position_in_grid.x;
+    const uint r = threadgroup_position_in_grid.y;
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const device T* xr = x + (size_t)r * (HC * D);
+    threadgroup float tmem[1024];
+    if (tg == 0) {
+      // hc_pre: s = sum_j pre_j * x_j in f32 (sequential axis reduction), cast to T; then RMSNorm.
+      float p[HC];
+      for (int j = 0; j < HC; j++) p[j] = pre[r * HC + j];
+      float acc = 0;
+      if (NORM_LOOPED) {
+        for (uint b = 0; b < (uint)D; b += 1024u * 4u) {
+          if (b + lid * 4u + 4u <= (uint)D) {
+            for (int i = 0; i < 4; i++) {
+              uint d = b + lid * 4u + i;
+              float s = 0.0f;
+              for (int j = 0; j < HC; j++) { float t = p[j] * float(xr[j * D + d]); s = t + s; }
+              float xi = float(static_cast<T>(s));
+              acc += xi * xi;
+            }
+          } else {
+            for (int i = 0; i < 4; i++) {
+              uint d = b + lid * 4u + i;
+              if (d < (uint)D) {
+                float s = 0.0f;
+                for (int j = 0; j < HC; j++) { float t = p[j] * float(xr[j * D + d]); s = t + s; }
+                float xi = float(static_cast<T>(s));
+                acc += xi * xi;
+              }
+            }
+          }
+        }
+      } else {
+        float tx[4];
+        for (int i = 0; i < 4; i++) {
+          uint d = lid * 4u + i;
+          float s = 0.0f;
+          if (d < (uint)D) {
+            for (int j = 0; j < HC; j++) { float t = p[j] * float(xr[j * D + d]); s = t + s; }
+          }
+          tx[i] = (d < (uint)D) ? float(static_cast<T>(s)) : 0.0f;
+          acc += tx[i] * tx[i];
+        }
+      }
+      acc = simd_sum(acc);
+      if (sg == 0) tmem[lane] = 0;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (lane == 0) tmem[sg] = acc;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (sg == 0) {
+        acc = simd_sum(tmem[lane]);
+        if (lane == 0) tmem[32] = metal::precise::rsqrt(acc / (float)D + NORM_EPS);
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      const float inv = tmem[32];
+      for (uint d = lid; d < (uint)D; d += 1024u) {
+        float s = 0.0f;
+        for (int j = 0; j < HC; j++) { float t = p[j] * float(xr[j * D + d]); s = t + s; }
+        T xv = static_cast<T>(s);
+        xin[(size_t)r * D + d] = nw[d] * static_cast<T>(xv * inv);
+      }
+    } else if (tg == 1) {
+      // sum(x^2) over the HC * D values: MLX row_reduce_looped, one threadgroup of RED_TGS threads.
+      float total = 0.0f;
+      if (lid < (uint)RED_TGS) {
+        const int n = HC * D;
+        const int blocks = n / (RED_TGS * 4);
+        const int extra = n - blocks * (RED_TGS * 4);
+        long off = lid * 4;
+        for (int b = 0; b < blocks; b++) {
+          for (int i = 0; i < 4; i++) { float v = float(xr[off + i]); total = (v * v) + total; }
+          off += RED_TGS * 4;
+        }
+        const int index = lid * 4;
+        if (index + 4 <= extra) {
+          for (int i = 0; i < 4; i++) { float v = float(xr[off + i]); total = (v * v) + total; }
+        } else {
+          for (int i = 0; index + i < extra; i++) { float v = float(xr[off + i]); total = (v * v) + total; }
+        }
+      }
+      total = simd_sum(total);
+      if (lane == 0) tmem[sg] = total;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      const uint nsg = (RED_TGS + 31) / 32;
+      total = lid < nsg ? tmem[lid] : 0.0f;
+      total = simd_sum(total);
+      if (lid == 0) part[r] = total;
+    } else {
+      // MLX gemv BM1 BN8 SM1 SN32 TM4 TN4: one MLX threadgroup (8 simdgroups) per real one, so the
+      // 6 output tiles stream fn on 6 cores as MLX does; simdgroups 8.. idle.
+      const uint v = sg / 8u, sgN = sg % 8u;
+      const int out_row = (v == 0) ? (int)(tg - 2) * 4 : MIX;
+      float res[4] = {0, 0, 0, 0};
+      if (out_row < MIX) {
+        int bn = (int)(32u * sgN + lane) * 4;
+        const device float* mat = fn + (size_t)out_row * (HC * D);
+        const int n_iter = (HC * D) / 1024;
+        for (int i = 0; i < n_iter; ++i) {
+          float vc[4];
+          for (int tn = 0; tn < 4; tn++) vc[tn] = float(xr[bn + tn]);
+          int mo = 0;
+          for (int tm = 0; tm < 4; tm++) {
+            float inter[4];
+            for (int tn = 0; tn < 4; tn++) inter[tn] = mat[mo + bn + tn];
+            for (int tn = 0; tn < 4; tn++) res[tm] += inter[tn] * vc[tn];
+            mo += HC * D;
+          }
+          bn += 1024;
+        }
+        const int leftover = (HC * D) - n_iter * 1024;
+        if (leftover > 0) {
+          float vc[4];
+          for (int tn = 0; tn < 4; tn++) vc[tn] = (bn + tn < HC * D) ? float(xr[bn + tn]) : 0.0f;
+          for (int tm = 0; tm < 4; tm++) {
+            float inter[4];
+            for (int tn = 0; tn < 4; tn++) inter[tn] = (bn + tn < HC * D) ? mat[tm * (HC * D) + bn + tn] : 0.0f;
+            for (int tn = 0; tn < 4; tn++) res[tm] += inter[tn] * vc[tn];
+          }
+        }
+        for (int tm = 0; tm < 4; tm++)
+          for (ushort sn = 16; sn >= 1; sn >>= 1) res[tm] += simd_shuffle_down(res[tm], sn);
+      }
+      // tgp reduction across the 8 K-split simdgroups (tgp_results = base + sgN * (blockM + TM))
+      threadgroup float* tr = tmem + v * 64u + sgN * 8u;
+      if (lane == 0) for (int tm = 0; tm < 4; tm++) tr[tm] = res[tm];
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (lane == 0 && sgN == 0 && out_row < MIX) {
+        for (int sgn = 1; sgn < 8; sgn++)
+          for (int tm = 0; tm < 4; tm++) res[tm] += tmem[v * 64u + sgn * 8u + tm];
+        for (int tm = 0; tm < 4; tm++) dots[(size_t)r * MIX + out_row + tm] = res[tm];
+      }
+    }
+"""
+
+_HC_SPLIT2_SRC = r"""
+    const uint lane = thread_index_in_simdgroup;
+    const uint r = threadgroup_position_in_grid.y;
+    const float total = part[r];
+    if (lane != 0) return;
+    const float mean = total * INV_N;
+    const float rs = metal::precise::rsqrt(mean + RMS_EPS);
+    float m[24];
+    for (int j = 0; j < 24; j++) m[j] = dots[(size_t)r * 24 + j] * rs;
+    const uint t = r;
+    float s0 = scale[0], s1 = scale[1], s2 = scale[2];
+    for (int j = 0; j < 4; j++) {
+        pre[t * 4 + j] = 1.0f / (1.0f + metal::precise::exp(-(m[j] * s0 + base[j]))) + EPS;
+        post[t * 4 + j] = 2.0f / (1.0f + metal::precise::exp(-(m[4 + j] * s1 + base[4 + j])));
+    }
+    float c[16];
+    for (int i = 0; i < 16; i++) c[i] = m[8 + i] * s2 + base[8 + i];
+    for (int rr = 0; rr < 4; rr++) {
+        float mx_ = c[rr * 4];
+        for (int k = 1; k < 4; k++) mx_ = metal::max(mx_, c[rr * 4 + k]);
+        float sum = 0.0f;
+        for (int k = 0; k < 4; k++) { c[rr * 4 + k] = metal::precise::exp(c[rr * 4 + k] - mx_); sum += c[rr * 4 + k]; }
+        for (int k = 0; k < 4; k++) c[rr * 4 + k] = c[rr * 4 + k] / sum + EPS;
+    }
+    for (int k = 0; k < 4; k++) {
+        float cs = c[k] + c[4 + k] + c[8 + k] + c[12 + k];
+        for (int rr = 0; rr < 4; rr++) c[rr * 4 + k] = c[rr * 4 + k] / (cs + EPS);
+    }
+    for (int it = 0; it < ITERS - 1; it++) {
+        for (int rr = 0; rr < 4; rr++) {
+            float rsum = c[rr * 4] + c[rr * 4 + 1] + c[rr * 4 + 2] + c[rr * 4 + 3];
+            for (int k = 0; k < 4; k++) c[rr * 4 + k] = c[rr * 4 + k] / (rsum + EPS);
+        }
+        for (int k = 0; k < 4; k++) {
+            float cs = c[k] + c[4 + k] + c[8 + k] + c[12 + k];
+            for (int rr = 0; rr < 4; rr++) c[rr * 4 + k] = c[rr * 4 + k] / (cs + EPS);
+        }
+    }
+    for (int i = 0; i < 16; i++) comb[t * 16 + i] = c[i];
+"""
+
+_HC_POST_SRC = r"""
+    const uint d = thread_position_in_grid.x;
+    const uint r = thread_position_in_grid.y;
+    if (d >= (uint)D) return;
+    float hv = float(h[(size_t)r * D + d]);
+    float rv[4];
+    for (int j = 0; j < 4; j++) rv[j] = float(res[((size_t)r * 4 + j) * D + d]);
+    for (int k = 0; k < 4; k++) {
+      float c[4];
+      for (int j = 0; j < 4; j++) c[j] = TF32 ? as_type<float>(as_type<uint>(comb[r * 16 + j * 4 + k]) & 0xFFFFE000u)
+                                              : comb[r * 16 + j * 4 + k];
+      float p0 = c[0] * rv[0], p1 = c[1] * rv[1], p2 = c[2] * rv[2], p3 = c[3] * rv[3];
+      float e = (p0 + p1) + (p2 + p3);
+      float t = post[r * 4 + k] * hv;
+      out[((size_t)r * 4 + k) * D + d] = static_cast<T>(t + e);
+    }
+"""
+
+
+def _red_tgs(n: int) -> int:
+    """MLX threadgroup_size_from_row_size: the row_reduce_looped width for a 1-row sum of n values."""
+    if n <= 512:
+        return 32
+    if n <= 1024:
+        return 128
+    return min(1024, ((n + 3) // 4 + 31) // 32 * 32)
+
+
+@lru_cache(maxsize=None)
+def _hc_kernels(norm_eps: float, rms_eps: float, hc_eps: float, iters: int, n: int):
+    lit = lambda v: f"{float(v):.9e}f"  # noqa: E731
+    stage_src = _HC_STAGE_SRC.replace("NORM_EPS", lit(norm_eps)).replace("RED_TGS", str(_red_tgs(n)))
+    stage = mx.fast.metal_kernel(name=f"dsv41_hc_stage_{n}", input_names=["x", "pre", "fn", "nw"],
+                                 output_names=["xin", "part", "dots"], source=stage_src)
+    split_src = (_HC_SPLIT2_SRC.replace("INV_N", lit(1.0 / n)).replace("RMS_EPS", lit(rms_eps))
+                 .replace("ITERS", str(int(iters))).replace("EPS", lit(hc_eps)))
+    split = mx.fast.metal_kernel(name=f"dsv41_hc_split2_{iters}", input_names=["part", "dots", "scale", "base"],
+                                 output_names=["pre", "post", "comb"], source=split_src)
+    post = mx.fast.metal_kernel(name="dsv41_hc_post", input_names=["h", "res", "post", "comb"],
+                                output_names=["out"], source=_HC_POST_SRC)
+    return stage, split, post
+
+
+def _tf32() -> bool:
+    import os
+    return os.environ.get("MLX_ENABLE_TF32", "1").strip() not in {"0", "false", "False"}
+
+
+def hc_stage_decode(x, pre, fn, scale, base, norm_w, norm_eps, rms_eps, hc_eps, iters):
+    """x [R, 4, D] bf16 stream; pre [R, 4] f32 (the previous sublayer's pre). Returns (xin [R, D] bf16 =
+    RMSNorm(hc_pre(x, pre)), pre', post', comb' of hc_mixes(x)), or None if not eligible."""
+    if x.ndim != 3 or x.shape[1] != 4 or x.dtype != mx.bfloat16 or not _gpu():
+        return None
+    R, hc, D = x.shape
+    n = hc * D
+    if (R > MAX_ROWS or fn.shape != (24, n) or fn.dtype != mx.float32 or norm_w.dtype != mx.bfloat16
+            or norm_w.shape != (D,) or n % 4 or n < 16 * 24 or D > 1024 * 4 * 64):
+        return None
+    stage, split, _ = _hc_kernels(float(norm_eps), float(rms_eps), float(hc_eps), int(iters), n)
+    xin, part, dots = stage(inputs=[x, pre.astype(mx.float32), fn, norm_w], template=[("T", mx.bfloat16), ("D", D),
+                            ("HC", hc), ("MIX", 24), ("NORM_LOOPED", D > 4096)],
+                            grid=(1024 * (2 + 24 // 4), R, 1), threadgroup=(1024, 1, 1),
+                            output_shapes=[(R, D), (R, 1), (R, 24)],
+                            output_dtypes=[mx.bfloat16, mx.float32, mx.float32], init_value=0)
+    p, po, cb = split(inputs=[part, dots, scale.astype(mx.float32), base.astype(mx.float32)],
+                      grid=(32, R, 1), threadgroup=(32, 1, 1),
+                      output_shapes=[(R, 4), (R, 4), (R, 16)], output_dtypes=[mx.float32] * 3)
+    return xin, p, po, cb.reshape(R, 4, 4)
+
+
+def hc_post_decode(h, residual, post, comb):
+    """h [R, D] bf16, residual [R, 4, D] bf16, post [R, 4], comb [R, 4, 4] -> [R, 4, D] bf16, or None."""
+    if h.ndim != 2 or residual.ndim != 3 or residual.shape[1] != 4 or not _gpu() or h.dtype != mx.bfloat16:
+        return None
+    R, D = h.shape
+    _, _, post_k = _hc_kernels(0.0, 0.0, 0.0, 1, 4 * D)
+    return post_k(inputs=[h, residual, post.astype(mx.float32), comb.reshape(R, 16).astype(mx.float32)],
+                  template=[("T", mx.bfloat16), ("D", D), ("TF32", _tf32())],
+                  grid=(D, R, 1), threadgroup=(256, 1, 1), output_shapes=[(R, 4, D)], output_dtypes=[mx.bfloat16])[0]
