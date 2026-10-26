@@ -57,20 +57,17 @@ def bench_stack(a):
     state = {"pos": a.ctx, "tok": 1}
 
     def step():
-        lg = S.forward(model, [state["tok"]], caches, state["pos"])
-        state["tok"] = int(mx.argmax(lg[0]))
-        state["pos"] += 1
+        lg = S.forward(model, [state["tok"]] * a.rows, caches, state["pos"], all_logits=a.rows > 1)
+        state["tok"] = int(mx.argmax(lg[-1]))
+        state["pos"] += a.rows
 
     def set_async(on):
         M.LAYER_ASYNC = on
 
-    flags = {"layer_async": set_async}
-    for k in a.flags.split(","):
-        if k and k in FLAG_SETTERS:
-            flags[k] = FLAG_SETTERS[k]
+    flags = {k: FLAG_SETTERS[k] for k in a.flags.split(",") if k in FLAG_SETTERS} or {"layer_async": set_async}
     out = _ab(step, flags, a.rounds, a.reps)
     for k, (off, on) in out.items():
-        print(f"stack L={a.layers} E={a.experts} ctx={a.ctx} {k:12s} {_fmt(off, on)}")
+        print(f"stack L={a.layers} E={a.experts} ctx={a.ctx} rows={a.rows} {k:12s} {_fmt(off, on)}")
 
 
 FLAG_SETTERS = {}
@@ -82,6 +79,12 @@ def _flag(name):
     return set_
 
 
+def _all(on):
+    for name in ("LAYER_ASYNC", "ROUTER_GEMV", "FUSED_MOE", "FUSED_HC"):
+        setattr(M, name, on)
+
+
+FLAG_SETTERS["all"] = _all
 FLAG_SETTERS.update(router_gemv=_flag("ROUTER_GEMV"), fused_moe=_flag("FUSED_MOE"), fused_hc=_flag("FUSED_HC"),
                     moe_dedup=_flag("MOE_DEDUP"))
 
