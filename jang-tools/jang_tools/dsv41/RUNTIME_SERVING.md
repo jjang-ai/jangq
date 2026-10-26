@@ -69,6 +69,22 @@ Design, and the rules it encodes:
 The 1k case stays near 600 pp/s cold because layer 1's reads (~0.2 s) come before any compute
 and the first chunk has nothing to overlap with.
 
+### Long-context indexer
+
+Each of the 8 index layers scores every compressed row for every query (32 heads x 128), so the
+indexer is the cost that grows with context. Two changes, both exact up to ties:
+- **Fused scores:** prefill (more than 8 rows) uses vMLX's `dsa_pool_index_scores` Metal kernel,
+  `sum_h w * relu(q . k)` in fp32 in one pass, instead of materializing `[C, heads, T]` and reducing
+  it (100k keys: 164 -> 97 ms per index layer per 2048-token chunk). Query chunks keep the `[C, T]`
+  fp32 block near 1 GB. Optional import; `VMLX_DSV41_FUSED_INDEX=0` or no vMLX keeps the bf16 path.
+  Numerics vs bf16: prefill logits mean cos 0.9962, top-1 agreement 100%.
+- **Block top-k:** MLX's GPU `argpartition` sorts the whole row. For rows of 65536+ keys,
+  `topk_indices` picks the 512 blocks of 64 with the largest maxima (they hold the top-512 values)
+  and partitions only those entries. Identical selected values; 2.4x faster at 100k, 16x at 1M.
+Remaining long-context cost: the per-layer attention input (window + whole pool, concatenated and
+cast to fp32) grows with context, pushing peak active memory to ~214 GiB at 1M, past the resident
+cliff below.
+
 ### Grouped output projection
 
 `wo_a` is block-diagonal over 8 groups. For prefill (more than `GATHER_MAX_QUERIES` rows) it runs
@@ -150,8 +166,8 @@ vmmap sample taken right before it):
 | per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
 | multimodal | Red / Apple / Red | same |
 | multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.48 s → 0.26 s; other image misses ("Blue") | |
-| KV at 8k / 32k / 128k (resident; stored format v2 within 0.5%) | 12.0 / 33.1 / 117.5 MiB; marginal 900 B/token → **0.88 GiB at 1M** (stored 904 B/token → 0.89 GiB) | |
-| 128k cold prefill (2048 chunks, no draft, average) | 527 pp/s | |
+| KV measured at 256k / 512k / **1M** tokens (resident; stored format v2) | 230.0 / 455.0 / **905.0 MiB** (920 / 910 / 905 B/token); stored 231.0 / 457.0 / **909.0 MiB** — 1M = 949 MB | |
+| long-context cold prefill (2048 chunks, no draft; fused index scores + block top-k) | 100k: 821 pp/s avg (40–50k 913, 88–100k 775); 1M: 332 avg (windows 0–128k 792, 128–256k 618, 256–384k 431, 384–512k 366, 512–640k 306, 640–768k 270, 768–896k 234, 896k–1M 203) | |
 | phys_footprint after load / peak | 206.6 / 213.1 GB | 198.1 / 205.8 GB |
 
 Decode cost by verify width (2k context, warm): 1 row 33 ms, 2 rows 44, 4 rows 51, 6 rows 60,
