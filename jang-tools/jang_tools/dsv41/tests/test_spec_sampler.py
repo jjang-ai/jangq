@@ -121,3 +121,11 @@ def test_control_biased_sampler_is_detected():
     p = exact()
     d = tv(run(Biased, False), p)
     assert d > 0.08, d
+
+
+def test_unseeded_sampler_draws_its_own_seed():
+    """A served request without a seed (the app's default at temperature > 0) gets a random per-request seed."""
+    from jang_tools.dsv41.dspark import SpecSampler
+    a, b = SpecSampler(1.0), SpecSampler(1.0)
+    assert isinstance(a.seed, int) and isinstance(b.seed, int)
+    assert SpecSampler(0.7, top_p=0.9, top_k=20, seed=None).seed >= 0
