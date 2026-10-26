@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -47,6 +48,7 @@ from jang_tools.dsv41.model import (
     _hc_split_metal,
     grouped_qmm,
     jangt_experts,
+    jangt_fused_moe,
     qlinear,
     sparse_attention,
     yarn_inv_freq,
@@ -202,6 +204,9 @@ class DSparkMoE(nn.Module):
         w = w * self.route_scale
         lim = self.lim
         if hasattr(self, "experts"):  # JANGT
+            y = jangt_fused_moe(xf, idx, w, self.experts, SimpleNamespace(w1=self.sw1, w3=self.sw3, w2=self.sw2), lim)
+            if y is not None:
+                return y.reshape(B, S, D)
             y = self.experts.routed(xf, idx, w).astype(mx.float32)
         else:
             y = self._routed_affine(xf, idx, w)

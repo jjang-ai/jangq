@@ -767,6 +767,18 @@ class Gate(nn.Module):
         self.bias_vl = mx.zeros((E,), mx.float32)
 
 
+def jangt_fused_moe(xf, idx, w, experts, shared, limit):
+    """vMLX's fused JANGT routed + mxfp8 shared-expert decode (4 dispatches instead of ~14, every row bit-identical to
+    the stock path run alone; self-checked on first use), or None (not importable / not eligible / disabled)."""
+    if not FUSED_MOE or xf.shape[0] > GATHER_MAX_QUERIES:
+        return None
+    try:
+        from vmlx_engine.jangt.fused_moe import jt_moe_decode
+    except Exception:  # noqa: BLE001 - optional dependency
+        return None
+    return jt_moe_decode(xf, idx, w, experts, shared, limit)
+
+
 def jangt_experts(qbits, prefix: str, D: int, I: int, E: int):
     """Routed experts stored JANGT (JANGHT bundles): Hadamard-128 + signs rotation, trellis L=12 at K bits per weight,
     outlier input columns, down column scales folded into its input rotation. Run through the vMLX JANGT kernels
@@ -1015,6 +1027,10 @@ class Block(nn.Module):
 
         sw = self.ffn.experts
         if getattr(sw, "is_jangt", False):
+            if self.capture is None:
+                y = jangt_fused_moe(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
+                if y is not None:
+                    return y.reshape(B, S, D)
             return self._shared(xf, sw.routed(xf, idx, w).astype(mx.float32)).astype(x.dtype).reshape(B, S, D)
         n = xf.shape[0]
         if FUSED_MOE and n <= GATHER_MAX_QUERIES and self.capture is None:
