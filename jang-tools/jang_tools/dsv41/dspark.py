@@ -275,16 +275,22 @@ class DSparkStage(nn.Module):
 
 
 # --------------------------------------------------------------------------- dSpark head
-def markov_chain(logits, markov_embed, head_t, seed_tok):
+def markov_chain(logits, markov_embed, head_t, seed_tok, noise=None, inv_temp=1.0):
     """Greedy Markov-biased decode of a drafted block, kept on the device (no per-step host sync).
     logits [bs, vocab] f32; markov_embed [vocab, rank]; head_t [rank, vocab] f32 (the markov head,
     cast + transposed once). Returns (drafted ids [bs] int32, markov embeddings [bs, rank] f32), where
-    step i uses the embedding of the previous token (seed_tok for i = 0)."""
+    step i uses the embedding of the previous token (seed_tok for i = 0).
+    noise [bs, vocab] (sampled speculation, SpecSampler): step i drafts argmax(score * inv_temp + noise[i]) with the
+    Gumbel noise the target will use at that position, so a drafter close to the target proposes the target's own
+    sample (coupled drafting) instead of its argmax."""
     tok = mx.array([int(seed_tok)], dtype=mx.int32)
     toks, membeds = [], []
     for i in range(logits.shape[0]):
         me = mx.take(markov_embed, tok, axis=0)[0].astype(mx.float32)  # [rank]
-        tok = mx.argmax(logits[i] + me @ head_t, keepdims=True).astype(mx.int32)  # [1]
+        score = logits[i] + me @ head_t
+        if noise is not None:
+            score = score * inv_temp + noise[i]
+        tok = mx.argmax(score, keepdims=True).astype(mx.int32)  # [1]
         toks.append(tok)
         membeds.append(me)
     return mx.concatenate(toks), mx.stack(membeds, axis=0)
@@ -363,10 +369,11 @@ class DSpark(nn.Module):
             st.attn.window.buf, st.attn.window.n = buf, n
 
     # --- draft one block (release forward_embed -> stages -> forward_head), greedy ---
-    def draft(self, seed_tok, start_pos):
+    def draft(self, seed_tok, start_pos, noise=None, temperature=1.0):
         """Draft from `seed_tok` (the backbone's token for position start_pos+1). Windows must hold
         committed KV for [0..start_pos]. Returns (output_ids[bs+1], confidence[bs]) where
-        output_ids = [seed_tok(@start_pos+1), draft(@start_pos+2), ..., draft(@start_pos+bs+1)]."""
+        output_ids = [seed_tok(@start_pos+1), draft(@start_pos+2), ..., draft(@start_pos+bs+1)].
+        noise [bs, vocab] / temperature: coupled sampled drafting (markov_chain)."""
         bs = self.bs
         ids = np.full(bs, self.noise, np.int32)
         ids[0] = seed_tok
@@ -384,7 +391,8 @@ class DSpark(nn.Module):
         # bf16 -- vocab x rank, ~130 MB -- on every one of the bs steps), and the chain stays on the
         # device: each step's argmax indexes the next embedding without a host round-trip, so the
         # whole block costs one sync instead of bs.
-        drafted, me = markov_chain(logits, last.markov_embed, self._markov_head_t(), seed_tok)
+        drafted, me = markov_chain(logits, last.markov_embed, self._markov_head_t(), seed_tok, noise,
+                                   1.0 / float(temperature) if noise is not None else 1.0)
         conf = (mx.concatenate([xc[0], me], axis=-1) @ last.conf_proj.T)[:, 0]  # [bs]
         mx.eval(drafted, conf)
         return [int(seed_tok)] + [int(t) for t in drafted.tolist()], conf
@@ -563,6 +571,49 @@ def _session_arrays(sess):
                     out.append(a)
     return out
 
+class SpecSampler:
+    """Exact sampled speculative decoding for DSparkRunner (temperature > 0).
+
+    The token at each target position is argmax(f(logprobs) / T + g) with g i.i.d. Gumbel noise -- a draw from
+    categorical(f(logprobs) / T), the AR sampler's distribution (f = mlx_lm's top_p, min_p, top_k filters in the same
+    order, applied to log-probabilities as make_sampler does). The noise is keyed by the request seed and the ABSOLUTE
+    position, so a position verified in one round and re-sampled in the next from the same logits (the rejected row of a
+    partial accept) replays the same sample: every committed token is argmax(z / T + g_pos) with g_pos independent of
+    everything that decided it, whatever the drafter proposed. (Fresh noise per round is biased: the re-sampled rejected
+    position then follows the target distribution conditioned on the coupled draft's rejection; measured in
+    tests/test_spec_sampler.py, TV 0.070 vs <= 0.041 for plain sampling.) The drafter sees the same noise (coupled
+    drafting), so it proposes the target's sample whenever its own distribution is close, instead of its argmax."""
+
+    def __init__(self, temperature, top_p=1.0, min_p=0.0, top_k=0, seed=None):
+        self.temperature = float(temperature)
+        if not self.temperature > 0:
+            raise ValueError("SpecSampler needs temperature > 0 (temperature 0 is the greedy runner)")
+        self.top_p, self.min_p, self.top_k = float(top_p or 0.0), float(min_p or 0.0), int(top_k or 0)
+        self.seed = int(seed) if seed is not None else int.from_bytes(os.urandom(4), "little")
+        self._filters = bool((0 < self.top_p < 1.0) or self.min_p != 0.0 or self.top_k > 0)
+
+    def _key(self, pos: int):
+        return mx.random.key((self.seed * 2654435761 + int(pos) * 40503 + 1) & 0x7FFFFFFFFFFFFFFF)
+
+    def noise(self, first_pos: int, n: int, vocab: int):
+        """Gumbel rows for absolute positions first_pos .. first_pos + n - 1 (one key per position)."""
+        return mx.stack([mx.random.gumbel((vocab,), key=self._key(first_pos + i)) for i in range(n)])
+
+    def pick(self, logits, noise):
+        """logits [n, vocab] (or [vocab]) -> sampled token ids [n] (or scalar), with noise rows [n, vocab]."""
+        z = logits.astype(mx.float32)
+        if self._filters:
+            from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p
+            z = z - mx.logsumexp(z, axis=-1, keepdims=True)
+            if 0 < self.top_p < 1.0:
+                z = apply_top_p(z, self.top_p)
+            if self.min_p != 0.0:
+                z = apply_min_p(z, self.min_p)
+            if self.top_k > 0:
+                z = apply_top_k(z, self.top_k)
+        return mx.argmax(z * (1.0 / self.temperature) + noise.reshape(z.shape), axis=-1)
+
+
 class _Governor:
     """Wall-clock AR/speculation governor for DSparkRunner (adaptive mode).
 
@@ -660,7 +711,7 @@ class DSparkRunner:
     def _greedy(self, logits):
         return int(mx.argmax(logits))
 
-    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None, session=None, start_offset=0):
+    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None, session=None, start_offset=0, sampler=None):
         """Greedy speculative decode as a GENERATOR: yields committed backbone-greedy tokens one at a
         time (so a server can stream and check stops between/within accepted blocks). The yielded
         sequence is identical to ``generate()['tokens']``. Owns its own runtime ``Session`` +
@@ -670,7 +721,7 @@ class DSparkRunner:
         cache; with a restored prefix, ``start_offset`` skips the cached prompt and prefills only the
         tail. (See DECODE_DSPARK_METHODS.md M1.)"""
         sess, pending, c = self.prefill(prompt_ids, session=session, start_offset=start_offset)
-        yield from self.decode_stream(sess, pending, c, max_new, eos_ids=eos_ids, stats=stats)
+        yield from self.decode_stream(sess, pending, c, max_new, eos_ids=eos_ids, stats=stats, sampler=sampler)
 
     # Prefill chunk size (tokens per backbone forward). Matches the engine's default prefill_step_size;
     # the engine passes its configured value explicitly.
@@ -741,12 +792,14 @@ class DSparkRunner:
         ds.seed_windows(mh[None], range(end - 1, end))
         return sess, logits, end - 1
 
-    def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None):
+    def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None, sampler=None):
         """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
         backbone-greedy tokens one at a time (the same tokens as plain greedy decode, up to the usual
         floating-point caveat that a multi-token verify forward and a one-token decode forward are
         not bitwise identical, so a near-tie argmax can in principle differ); no-refeed fast path.
-        In adaptive mode a wall-clock governor picks AR or speculative steps (see _Governor)."""
+        In adaptive mode a wall-clock governor picks AR or speculative steps (see _Governor).
+        sampler (SpecSampler): exact sampled speculation instead -- every committed token is the target's sample
+        (temperature / top_p / min_p / top_k as the AR sampler), drafts kept only when equal to it."""
         m, ds = self.m, self.ds
         n_emitted = n_steps = n_drafted = n_accepted = n_spec = n_ar = 0
         eos_ids = set(int(e) for e in eos_ids)
@@ -761,9 +814,16 @@ class DSparkRunner:
                 if gov is not None:
                     stats.update(spec_s_per_tok=gov.spec, ar_s_per_tok=gov.ar)
 
+        vocab = None
         while n_emitted < max_new:
             n_steps += 1
-            p0 = self._greedy(pending)                 # backbone truth for c+1 (syncs the previous step)
+            G = None
+            if sampler is not None:                    # one fresh noise block for positions c+1 .. c+2+bs
+                vocab = vocab or int(pending.shape[-1])
+                G = sampler.noise(c + 1, 2 + int(self.ds.bs), vocab)
+                p0 = int(sampler.pick(pending.reshape(1, -1), G[0:1])[0])
+            else:
+                p0 = self._greedy(pending)             # backbone truth for c+1 (syncs the previous step)
             now = self.clock()
             if gov is not None and last is not None:   # previous step's work is complete only now
                 gov.record(last[0], now - last[2], last[1])
@@ -782,7 +842,10 @@ class DSparkRunner:
                     _rec(); return
                 continue
             n_spec += 1
-            draft_ids, conf = self.ds.draft(p0, c)     # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
+            if sampler is not None:                    # coupled draft: the target's noise at c+2 .. c+bs+1
+                draft_ids, conf = self.ds.draft(p0, c, noise=G[1:1 + int(self.ds.bs)], temperature=sampler.temperature)
+            else:
+                draft_ids, conf = self.ds.draft(p0, c)  # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
             W = self.width                             # number of draft tokens to verify (1..bs)
             if self.adaptive:                          # depth tracks acceptance (shrinks AND grows)
                 W = max(1, min(self.width, round(self.width * accept_ema)))
@@ -796,7 +859,10 @@ class DSparkRunner:
             ck = sess.checkpoint()
             vlog, vmh = m.forward(feed, sess, all_logits=True, return_hidden=True,  # vlog[j] predicts c+2+j
                                   **self._capture_kw)
-            truth = [int(x) for x in mx.argmax(vlog, axis=-1).tolist()]  # truth for c+2 .. c+2+W
+            if sampler is not None:                    # the target's samples for c+2 .. c+2+W
+                truth = [int(x) for x in sampler.pick(vlog, G[1:2 + W]).tolist()]
+            else:
+                truth = [int(x) for x in mx.argmax(vlog, axis=-1).tolist()]  # truth for c+2 .. c+2+W
             k = 0
             for j in range(W):                         # draft d_{j+1}=draft_ids[1+j] @ c+2+j vs truth[j]
                 if draft_ids[1 + j] == truth[j]:
