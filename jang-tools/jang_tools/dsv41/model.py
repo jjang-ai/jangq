@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -413,6 +414,19 @@ class Compressor(nn.Module):
         return self.norm(out.astype(dtype)), g0
 
 
+def _fused_index_scores():
+    """vMLX's fused DSA index-score Metal kernel (`dsa_pool_index_scores`), or None when vMLX is not
+    importable or VMLX_DSV41_FUSED_INDEX=0. The kernel returns None for shapes it does not admit, and
+    the caller then takes the stock path."""
+    if os.environ.get("VMLX_DSV41_FUSED_INDEX", "1").strip().lower() in {"0", "false", "off", "no"}:
+        return None
+    try:
+        from vmlx_engine.metal.dsa_index_scores import dsa_pool_index_scores
+    except Exception:  # noqa: BLE001 - optional dependency
+        return None
+    return dsa_pool_index_scores
+
+
 class Indexer(nn.Module):
     def __init__(self, args: Args, layer_id: int, qbits: dict):
         super().__init__()
@@ -445,13 +459,26 @@ class Indexer(nn.Module):
         index_k = shared.view(shared.index_k, T)[0].astype(mx.bfloat16)  # [T,d]
         w = (self.weights_proj(x) * (self.head_dim ** -0.5 * self.n_heads ** -0.5))[0]  # [S,h] bf16
         k = min(self.topk, T)
-        chunk = max(16, min(512, (1 << 26) // max(1, self.n_heads * T)))
+        fused = _fused_index_scores() if S > GATHER_MAX_QUERIES and T >= 32 else None
+        if fused is not None:
+            # Prefill: one fused kernel per query chunk computes sum_h w * relu(q . k) in fp32 without
+            # materializing [C, h, T] (100k keys: 164 -> 97 ms per index layer per 2048-token chunk).
+            # The chunk keeps the [C, T] fp32 scores near 1 GB at any context length.
+            chunk = max(16, min(S, (1 << 28) // T))
+            qf, kf, wf = q.astype(mx.float32), index_k.astype(mx.float32)[None], w.astype(mx.float32)
+        else:
+            chunk = max(16, min(512, (1 << 26) // max(1, self.n_heads * T)))
         out_idx, out_cand = [], []
         for c in range(0, S, chunk):
             qi = q[c : c + chunk]
-            sc = mx.maximum(qi @ index_k.T, 0)  # [C,h,T]
-            sc = mx.sum((sc * w[c : c + chunk, :, None]).astype(mx.float32), axis=1).astype(mx.bfloat16)
-            sc = sc.astype(mx.float32)  # [C,T]
+            sc = None
+            if fused is not None:
+                sc = fused(qf[None, c : c + chunk], kf, wf[None, c : c + chunk], 1.0)
+                sc = None if sc is None else sc[0]
+            if sc is None:
+                sc = mx.maximum(qi @ index_k.T, 0)  # [C,h,T]
+                sc = mx.sum((sc * w[c : c + chunk, :, None]).astype(mx.float32), axis=1).astype(mx.bfloat16)
+                sc = sc.astype(mx.float32)  # [C,T]
             # compressed positions a query can see: a group is visible once the query passed its last token
             lens = ((start_pos + mx.arange(c, c + qi.shape[0]) + 1) // r)[:, None]
             sc = mx.where(mx.arange(T)[None] >= lens, -mx.inf, sc)
