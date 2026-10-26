@@ -253,6 +253,14 @@ template regenerated for that MLX.
 
 ## Known open items
 
+- **Long-context retrieval is correct to 300k tokens and wrong from ~461k.** Needle probe: one "Doc line N: value V"
+  line per ~16 tokens with random 3-digit values (a formula value lets the model derive the answer instead of finding
+  it), question about the line at 54% depth, thinking off. Correct at 45k / 92k / 199k / 300k (618, 905, 508, 458);
+  wrong at 461k (833 vs 640) and 924k (292 vs 150). Identical answers with prompt-suffix pruning on and off (461k:
+  833 both) and with the fp32 or matrix-unit index kernel, and vmlx-swift misses too, so it is not pruning or the
+  index precision. Not yet separated: the 2-bit routed experts vs a path shared by both runtimes at high positions
+  (YaRN-scaled RoPE, compressed-position RoPE, indexer). Needs a source-model reference above 400k.
+
 - Prose decode ≈ AR (acceptance ~0.36; the governor keeps it at AR, not above).
 - Regenerate `row_exact_qmv` for the installed MLX and use it for DSpark verify rows (speed +
   exact greedy identity).
