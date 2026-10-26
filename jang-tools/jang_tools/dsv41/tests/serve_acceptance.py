@@ -125,10 +125,11 @@ try:
             pass
     MID = json.loads(urllib.request.urlopen(base + "/v1/models", timeout=5).read())["data"][0]["id"]
     chat([{"role": "user", "content": "hi"}], mx=4)
-    R["footprint_after_load"] = footprint()
+    # vmmap on a ~200 GB process disturbs the next request: memory is sampled only after the timed checks.
     if a.restart_probe:
         r = chat(SSD_PROMPT, mx=8)
         R["ssd_restart"] = {"ptok": r["ptok"], "cached": r["cached"], "s": round(r["s"], 2)}
+        R["footprint_after_load"] = footprint()
     else:
         tag = f"{R['mode']}-{int(time.time())}"  # unique text: no prefix hit, cold Engram rows
         for n in (1000, 4000, 16000):

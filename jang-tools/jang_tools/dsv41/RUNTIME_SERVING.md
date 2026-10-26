@@ -69,6 +69,17 @@ Design, and the rules it encodes:
 The 1k case stays near 600 pp/s cold because layer 1's reads (~0.2 s) come before any compute
 and the first chunk has nothing to overlap with.
 
+### Grouped output projection
+
+`wo_a` is block-diagonal over 8 groups. For prefill (more than `GATHER_MAX_QUERIES` rows) it runs
+group-major, one matrix multiply per group; token-major ran one 1-row product per token per group
+and took a third of each layer (2048-token chunk: 18.6 → 2.1 ms per layer; cold prefill with the draft
+resident 708 → 909 pp/s standalone). Decode and DSpark verify keep the per-row products so each verify
+row is computed like a 1-row decode. Numerics: prefill logits vs token-major mean cos 0.9954, top-1
+98.4%, which is inside the model's own bf16 sensitivity (moving chunk boundaries 1024 → 512: mean cos
+0.9943, min 0.73). Measured per-layer costs at a 2048-token chunk (layer 21): MoE 21.5 ms, attention core
+12.8 ms, `wo_a` 2.1 ms (was 18.6), `wq_b` 2.9 ms, hyper-connection mixes 2.6 ms, `wq_a` 1.7 ms.
+
 ### Serving memory settings that prefill depends on
 
 The standalone numbers above only hold in `vmlx serve` with two settings, both now defaults:
@@ -88,7 +99,9 @@ The standalone numbers above only hold in `vmlx serve` with two settings, both n
    Draft resident, 12k-token cold prompt: chunk 2048 545 pp/s, 1536 643, 1024 708, 768 684;
    allocator cap 8–24 GB makes no difference at 1024. `DSV41DSparkGenerator` therefore caps
    the prefill step at 1024 (`VMLX_DSV41_DSPARK_PREFILL_STEP` overrides). Without the draft,
-   2048 stays best. Raising `iogpu.wired_limit_mb` is the other lever (untested).
+   2048 stays best. The cliff tracks resident memory, not the allocator cap: with no draft and
+   2048-token chunks, +0/2/4/6/8 GB of extra resident memory gives 764/772/773/753/588 pp/s, and with
+   +8 GB the cap (6–16 GB) changes nothing. Raising `iogpu.wired_limit_mb` is untested.
 
 ## Prefix cache (engine)
 
@@ -122,17 +135,17 @@ reuse, multiturn recall, multimodal answers, reasoning-parser leaks, and the ser
 phys_footprint. Run with `VMLX_DSV41_DSPARK=0` for the AR baseline. Load only one copy of the
 model at a time: a second ~200 GB load on a 256 GB machine will be killed.
 
-Serving results (all fixes merged incl. fp32 head and in-place partial-accept commit; DSpark default
-on; unique-text cold prompts; M5 Ultra 256 GB):
+Serving results (all fixes merged incl. fp32 head, in-place partial-accept commit and group-major `wo_a`;
+DSpark default on; unique-text cold prompts; M5 Ultra 256 GB; *the old 1.6k figure was disturbed by a
+vmmap sample taken right before it):
 
 | metric | DSpark (default) | AR (`VMLX_DSV41_DSPARK=0`) |
 |---|---|---|
-| cold prefill 6.5k / 26.5k tokens | 710 / 676 pp/s | 21k: 769 pp/s |
-| cold prefill 1.6k (first request after load) | 341 pp/s | |
-| decode code / code2 / structured / prose | 60.8 / 51.1 / 82.4 / 29.5 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
+| cold prefill 1.6k / 6.5k / 26.5k tokens | 822 / 933 / 872 pp/s (was 341* / 710 / 676 before the group-major `wo_a`) | 21k: 769 pp/s (before) |
+| decode code / code2 / structured / prose | 60.8–66.0 / 46.4–51.1 / 82.4–86.6 / 29.5–31.0 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
 | TTFT, short prompt | 0.24–0.52 s | 0.19–0.59 s |
 | RAM prefix hit, 3.4k tokens | 5.18 s → 0.38 s | 6.45 s → 0.33 s |
-| SSD hit after restart, 3.4k tokens | 3394 cached, 0.38 s (same as a RAM hit, 0.39 s) | |
+| SSD hit after restart, 3.4k tokens | 3394 cached, 0.38–0.42 s (same as a RAM hit) | |
 | tool turn 2 | 280/354 cached, 0.85 s | 280/354, 0.87 s |
 | per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
 | multimodal | Red / Apple / Red | same |
