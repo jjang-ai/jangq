@@ -84,9 +84,13 @@ indexer is the cost that grows with context. Two changes, both exact up to ties:
   2.4x faster at 2048 x 100k, 16x at 256 x 1M. Decode keeps the direct partition: for one row it is
   cheaper (170k context: 25.1 vs 23.9 tok/s), and decode index scores take the bf16 path where exact
   ties are common, so a different pick among tied values would change decode output.
-Remaining long-context cost: the per-layer attention input (window + whole pool, concatenated and
-cast to fp32) grows with context, pushing peak active memory to ~214 GiB at 1M, past the resident
-cliff below.
+Where long-context prefill stands: the indexer is now compute-bound. The fused kernel runs its q.k
+products on 8x8 simdgroup matrices at ~27 TFLOPS fp32; feeding it fp16 fragments is no faster (100k
+keys: 63.1 vs 61.1 ms; simdgroup MMA has one rate for half and float), so the next lever is a version on
+the M5 matrix units (Metal 4 tensor ops, as `vmlx_engine/metal/lane_qmm.py`), worth at most ~2x on the
+indexer. The per-layer attention input (window + whole pool, concatenated and cast to fp32) also grows
+with context and pushes peak active memory to ~214 GiB at 1M, past the resident cliff below; gathering
+in bf16 instead is output-identical but measured no faster at 256k.
 
 ### Grouped output projection
 
