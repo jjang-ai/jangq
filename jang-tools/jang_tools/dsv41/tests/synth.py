@@ -107,8 +107,8 @@ def build(args, expert_bits=bundle_bits, seed=0, dtype=mx.bfloat16) -> M.Model:
             new += [(name, w), (base + ".scales", s), (base + ".biases", b)]
         elif name.endswith((".scales", ".biases")):
             continue
-        elif "norm" in name or name.endswith(("q_weight", "k_weight")):
-            new.append((name, (1 + 0.1 * mx.random.normal(p.shape, key=k)).astype(p.dtype)))
+        elif "norm" in name or name.endswith(("q_weight", "k_weight")):  # BF16 in the bundle
+            new.append((name, (1 + 0.1 * mx.random.normal(p.shape, key=k)).astype(mx.bfloat16)))
         elif name.endswith("_scale") and "hc_" in name:
             new.append((name, (0.5 + 0.1 * mx.random.normal(p.shape, key=k)).astype(p.dtype)))
         elif name.endswith("_base") and "hc_" in name:

@@ -76,30 +76,48 @@ def bench_stack(a):
 FLAG_SETTERS = {}
 
 
-def _layer_inputs(a):
-    args = S.real_args(1, a.experts)
+def _flag(name):
+    def set_(on):
+        setattr(M, name, on)
+    return set_
+
+
+FLAG_SETTERS.update(router_gemv=_flag("ROUTER_GEMV"), fused_moe=_flag("FUSED_MOE"), fused_hc=_flag("FUSED_HC"))
+
+
+def _chain(a, op):
+    """op(block, x [1,R,D] bf16) -> [1,R,D]; runs it over `--layers` distinct real-dimension blocks,
+    `--cycles` times, as one serial graph (each layer's input depends on the previous output), so the
+    weights stream from DRAM as in decode. Returns run() and the number of op calls per run."""
+    args = S.real_args(a.layers, a.experts)
     model = S.build(args, expert_bits=lambda i: (a.gate_bits, 3))
-    blk = model.layers[0]
-    x = (mx.random.normal((1, a.rows, args.hidden_size)) * 0.8).astype(mx.bfloat16)
-    mx.eval(x)
-    return args, blk, x
+    x0 = (mx.random.normal((1, a.rows, args.hidden_size)) * 0.8).astype(mx.bfloat16)
+    mx.eval(x0)
+    n = a.layers * a.cycles
+
+    def run():
+        x = x0
+        for c in range(a.cycles):
+            for blk in model.layers:
+                x = mx.fast.rms_norm(op(blk, x), None, 1e-6)
+        mx.eval(x)
+
+    return run, n
 
 
 def bench_moe(a):
-    args, blk, x = _layer_inputs(a)
-
-    def run():
-        mx.eval(blk.moe(x))
-
-    out = _ab(run, {k: FLAG_SETTERS[k] for k in a.flags.split(",") if k in FLAG_SETTERS} or {"none": lambda on: None},
-              a.rounds, a.reps)
+    run, n = _chain(a, lambda blk, x: blk.moe(x))
+    flags = {k: FLAG_SETTERS[k] for k in (a.flags or "fused_moe").split(",") if k in FLAG_SETTERS}
+    out = _ab(run, flags, a.rounds, a.reps)
     for k, (off, on) in out.items():
-        print(f"moe rows={a.rows} gate_bits={a.gate_bits} E={a.experts} {k:12s} {_fmt(off, on)}")
+        print(f"moe/layer rows={a.rows} gate_bits={a.gate_bits} E={a.experts} {k:12s} "
+              f"{_fmt(tuple(v / n for v in off), tuple(v / n for v in on))}")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("what", choices=["stack", "moe"])
+    ap.add_argument("--cycles", type=int, default=4)
     ap.add_argument("--layers", type=int, default=10)
     ap.add_argument("--experts", type=int, default=16)
     ap.add_argument("--ctx", type=int, default=1024)

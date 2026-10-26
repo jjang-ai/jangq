@@ -48,6 +48,10 @@ LAYER_ASYNC_MAX_ROWS = 16
 # no per-call f32 copy of the 384 x 5120 weight. 1 row: bit-identical; 2-8 rows: each row exactly its
 # 1-row decode logits. VMLX_DSV41_ROUTER_GEMV=0 restores the f32-cast matmul.
 ROUTER_GEMV = _env_on("VMLX_DSV41_ROUTER_GEMV")
+# Routed + shared experts for <= 8 rows in two Metal dispatches (metal_decode.moe_decode, mlx-serve
+# MOE_GU/MOE_DN) instead of ~25. 1 row: bit-identical; 2-8 rows: each row exactly its 1-row decode.
+# VMLX_DSV41_FUSED_MOE=0 restores gather_qmm + qlinear.
+FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
 
 
 @dataclass
@@ -920,6 +924,11 @@ class Block(nn.Module):
 
         sw = self.ffn.experts
         n = xf.shape[0]
+        if FUSED_MOE and n <= GATHER_MAX_QUERIES and self.capture is None:
+            from jang_tools.dsv41.metal_decode import moe_decode
+            y = moe_decode(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
+            if y is not None:
+                return y.reshape(B, S, D)
         do_sort = n * self.topk >= 64
         xe = xf[:, None, None, :]  # [N,1,1,D]
         if do_sort:
