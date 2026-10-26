@@ -34,6 +34,18 @@ ENGRAM_LAZY_MIN = 64
 GROUP_SIZE = 64
 
 
+def _env_on(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "off", "no"}
+
+
+# Decode / DSpark verify forwards of at most this many tokens submit each layer to the GPU as soon as it
+# is built (mx.async_eval per layer) instead of building all 40 layers and then waiting, so the GPU runs
+# the early layers while Python builds the later ones (ds4 #1261, oMLX language.py). Bit-identical:
+# only the scheduling changes. VMLX_DSV41_LAYER_ASYNC=0 restores the single end-of-graph eval.
+LAYER_ASYNC = _env_on("VMLX_DSV41_LAYER_ASYNC")
+LAYER_ASYNC_MAX_ROWS = 16
+
+
 @dataclass
 class Args:
     vocab_size: int
@@ -1038,6 +1050,7 @@ class Model(nn.Module):
         prune = (SUFFIX_PRUNE and prompt_end is not None and len(segs) == 1 and not all_logits and N > 1
                  and prompt_end >= segs[0].start + N)
         seg0, cur = segs[0], N
+        per_layer_async = LAYER_ASYNC and tokens.shape[-1] <= LAYER_ASYNC_MAX_ROWS
         for i, layer in enumerate(self.layers):
             if prune and i >= self.prune_from:
                 n = min(cur, self.prune_rows(i, seg0.start, N, prompt_end))
@@ -1070,6 +1083,8 @@ class Model(nn.Module):
                     mh = mx.pad(mh, [(0, 0), (N - cur, 0), (0, 0)])
                 main_hiddens.append(mh)
             h, pre_mix = layer(h, segs, pre_mix, image_mask)
+            if per_layer_async:
+                mx.async_eval(h, pre_mix)
         if not all_logits:
             last = mx.array([sg.lo + sg.n - 1 for sg in segs])
             h, pre_mix = h[:, last], pre_mix[:, last]
