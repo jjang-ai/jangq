@@ -1376,11 +1376,10 @@ class DSV41:
         self.reset()
 
     def _fp32_compute_weights(self):
-        """fp32 copies, once, of the weights every use of which computes in fp32: the router gate (Block.moe casts it
-        on every call) and the pooled compressors' wkv / wgate (called with compute=fp32). Value-identical; removes a
-        cast kernel and its fp32 write per layer per forward for ~+0.2 GB resident."""
+        """fp32 copies, once, of the pooled compressors' wkv / wgate (only ever called with compute=fp32).
+        Value-identical; removes a cast kernel and its fp32 write per layer per forward. (The router gate stays bf16:
+        metal_decode.router_logits reads it directly with MLX's f32 GEMV order.)"""
         for blk in self.model.layers:
-            blk.ffn.gate.weight = blk.ffn.gate.weight.astype(mx.float32)
             comp = getattr(blk.attn, "compressor", None)
             if comp is not None and comp.ratio > 1:
                 comp.wkv.weight = comp.wkv.weight.astype(mx.float32)
