@@ -6,7 +6,7 @@ output and the final aligner output. This validates the 2D RoPE, the attention, 
 the 3x3 unfold merge independently of the main backbone forward.
 
   python -m jang_tools.dsv41.tests.parity_vision --bundle <bundle> \
-      --ref /Users/eric/models/DeepSeek-V4.1-Flash-1017/inference
+      --ref ~/models/DeepSeek-V4.1-Flash-1017/inference
 """
 
 from __future__ import annotations
