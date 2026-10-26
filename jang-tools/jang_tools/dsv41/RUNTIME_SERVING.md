@@ -137,7 +137,8 @@ on; unique-text cold prompts; M5 Ultra 256 GB):
 | per-tool-call persist / next-request wait | 7–108 ms / ≤ 93 ms | |
 | multimodal | Red / Apple / Red | same |
 | multimodal reuse (925-token image turn, text follow-up) | 924/941 cached, 1.48 s → 0.26 s; other image misses ("Blue") | |
-| stored entry size | ~0.8–0.9 KB/token + ~5 MB fixed windows → ~0.9 GB at 1M | |
+| KV at 8k / 32k / 128k (resident; stored format v2 within 0.5%) | 12.0 / 33.1 / 117.5 MiB; marginal 900 B/token → **0.88 GiB at 1M** (stored 904 B/token → 0.89 GiB) | |
+| 128k cold prefill (2048 chunks, no draft, average) | 527 pp/s | |
 | phys_footprint after load / peak | 206.6 / 213.1 GB | 198.1 / 205.8 GB |
 
 Decode cost by verify width (2k context, warm): 1 row 33 ms, 2 rows 44, 4 rows 51, 6 rows 60,
