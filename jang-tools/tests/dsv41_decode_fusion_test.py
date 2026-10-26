@@ -43,7 +43,8 @@ def _run_verify(model, rows=5):
     return np.array(lg.astype(mx.float32))
 
 
-_KERNEL = {"ROUTER_GEMV": "router_logits", "FUSED_MOE": "moe_decode", "FUSED_HC": "hc_stage_decode"}
+_KERNEL = {"ROUTER_GEMV": ("router_logits",), "FUSED_MOE": ("moe_decode", "moe_decode_dedup"),
+           "FUSED_HC": ("hc_stage_decode",), "MOE_DEDUP": ("moe_decode_dedup",)}
 
 
 def _run_sequential(model, rows=5):
@@ -59,12 +60,10 @@ def _ab(monkeypatch, model, attr, run):
     """run(model) with M.<attr> off, then on; with a kernel behind the flag, assert it actually ran."""
     from jang_tools.dsv41 import metal_decode as MD
     calls = []
-    name = _KERNEL.get(attr)
-    if name:
-        orig = getattr(MD, name)
-
-        def counted(*a, **k):
-            out = orig(*a, **k)
+    names = _KERNEL.get(attr, ())
+    for name in names:
+        def counted(*a, _orig=getattr(MD, name), **k):
+            out = _orig(*a, **k)
             calls.append(out is not None)
             return out
 
@@ -74,8 +73,8 @@ def _ab(monkeypatch, model, attr, run):
     assert not calls
     monkeypatch.setattr(M, attr, True)
     b = run(model)
-    if name:
-        assert calls and all(calls), f"{name} not taken"
+    if names:
+        assert calls and any(calls), f"{names} not taken"
     return a, b
 
 
@@ -249,3 +248,26 @@ def test_all_fusions_together_decode_bit_exact(tiny, monkeypatch):
         monkeypatch.setattr(M, f, True)
     b, lb = _run_greedy(tiny, 16)
     assert a == b and np.array_equal(la.view(np.uint32), lb.view(np.uint32))
+
+
+# ----------------------------------------------------------------------------- MoE dedup (verify rows)
+
+@pytest.mark.parametrize("dims", ["tiny", "real"])
+def test_moe_dedup_equals_per_row_fused(dims):
+    """Each distinct expert streamed once for all its rows: bit-identical to the per-row fused MoE
+    (bundle dims with 16 experts: many repeats across rows; tiny with 128: few)."""
+    from jang_tools.dsv41.metal_decode import moe_decode, moe_decode_dedup
+    args = S.tiny_args(1) if dims == "tiny" else S.real_args(1, 16)
+    blk = S.build(args, expert_bits=lambda i: (2, 3)).layers[0]
+    for R in (2, 3, 5, 8):
+        x = (mx.random.normal((R, args.hidden_size), key=mx.random.key(R)) * 2).astype(mx.bfloat16)
+        idx, w = _route(blk, x)
+        a = moe_decode(x, idx, w, blk.ffn.experts, blk.ffn.shared_experts, blk.swiglu_limit)
+        b = moe_decode_dedup(x, idx, w, blk.ffn.experts, blk.ffn.shared_experts, blk.swiglu_limit)
+        assert np.array_equal(_bits(a), _bits(b))
+    assert moe_decode_dedup(x[:1], idx[:1], w[:1], blk.ffn.experts, blk.ffn.shared_experts, 10.0) is None
+
+
+def test_moe_dedup_verify_forward_bit_equal(tiny, monkeypatch):
+    va, vb = _ab(monkeypatch, tiny, "MOE_DEDUP", _run_verify)
+    assert np.array_equal(va.view(np.uint32), vb.view(np.uint32))

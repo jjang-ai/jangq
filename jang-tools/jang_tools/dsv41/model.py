@@ -52,6 +52,11 @@ ROUTER_GEMV = _env_on("VMLX_DSV41_ROUTER_GEMV")
 # MOE_GU/MOE_DN) instead of ~25. 1 row: bit-identical; 2-8 rows: each row exactly its 1-row decode.
 # VMLX_DSV41_FUSED_MOE=0 restores gather_qmm + qlinear.
 FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
+# With FUSED_MOE, VMLX_DSV41_MOE_DEDUP=1 makes 2-8 rows (DSpark verify) stream each distinct expert and
+# the shared expert once per weight tile for all rows using it (metal_decode.moe_decode_dedup, ds4
+# moe_dedup_plan). Bit-identical to the per-row fused path but slower on the M5 Ultra (repeats already
+# hit the caches there), so off by default.
+MOE_DEDUP = _env_on("VMLX_DSV41_MOE_DEDUP", "0")
 # Hyper-connection stage for <= 8 rows in three Metal dispatches per sublayer (metal_decode.hc_*:
 # mixes + collapse + RMSNorm, Sinkhorn split, expand) instead of ~14, each MLX op's order reproduced.
 # Bit-identical (checked once per process against the stock ops; a mismatch keeps the stock path).
@@ -966,8 +971,12 @@ class Block(nn.Module):
         sw = self.ffn.experts
         n = xf.shape[0]
         if FUSED_MOE and n <= GATHER_MAX_QUERIES and self.capture is None:
-            from jang_tools.dsv41.metal_decode import moe_decode
-            y = moe_decode(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
+            from jang_tools.dsv41.metal_decode import moe_decode, moe_decode_dedup
+            y = None
+            if MOE_DEDUP and n > 1:
+                y = moe_decode_dedup(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
+            if y is None:
+                y = moe_decode(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
             if y is not None:
                 return y.reshape(B, S, D)
         do_sort = n * self.topk >= 64

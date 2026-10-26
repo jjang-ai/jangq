@@ -82,7 +82,8 @@ def _flag(name):
     return set_
 
 
-FLAG_SETTERS.update(router_gemv=_flag("ROUTER_GEMV"), fused_moe=_flag("FUSED_MOE"), fused_hc=_flag("FUSED_HC"))
+FLAG_SETTERS.update(router_gemv=_flag("ROUTER_GEMV"), fused_moe=_flag("FUSED_MOE"), fused_hc=_flag("FUSED_HC"),
+                    moe_dedup=_flag("MOE_DEDUP"))
 
 
 def _chain(a, op):
