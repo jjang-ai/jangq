@@ -464,15 +464,19 @@ def load_dspark(source_dir, args, embed, head):
 
 
 # --------------------------------------------------------------------------- accept/reject loop
-def _accepts_lookahead(m) -> bool:
-    """True if the backbone's forward takes ``engram_lookahead`` (DSV41 does; test fakes may not)."""
+def _accepts_kw(m, name: str) -> bool:
+    """True if the backbone's forward takes keyword ``name`` (DSV41 does; test fakes may not)."""
     import inspect
 
     try:
         params = inspect.signature(m.forward).parameters
     except (TypeError, ValueError):
         return False
-    return "engram_lookahead" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _accepts_lookahead(m) -> bool:
+    return _accepts_kw(m, "engram_lookahead")
 
 
 def _session_arrays(sess):
@@ -651,6 +655,8 @@ class DSparkRunner:
             # are read from SSD while this chunk computes (DSV41.forward engram_lookahead).
             nxt = body[i + step:i + 2 * step] or ids[-1:]
             kw = {"engram_lookahead": nxt} if _accepts_lookahead(m) else {}
+            if _accepts_kw(m, "prompt_end"):
+                kw["prompt_end"] = end - 1  # the body ends at the N-1 boundary (suffix pruning)
             if p + len(piece) > seed_from:
                 logits, mh = m.forward(piece, sess, all_logits=False, return_hidden=True, **kw)
                 lo = max(0, seed_from - p)

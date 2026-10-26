@@ -408,7 +408,8 @@ class Model(nn.Module):
         (``images`` = jang_tools.dsv41.vision.ImageInput list, ``token_types``) splice vision features
         into the start_pos-0 prefill chunk; the runtime handles bias_vl routing + engram masking.
         ``engram_lookahead`` (list of token ids) is the next prefill chunk: its Engram rows are read
-        from SSD while this chunk computes."""
+        from SSD while this chunk computes. ``prompt_end`` (absolute position where the prompt ends) lets
+        the late layers skip prompt rows the prompt's last token no longer reads (DSV41.forward)."""
         rt = self.runtime
         ids = [int(t) for t in mx.array(input_ids).reshape(-1).tolist()]
         if cache and all(isinstance(c, DeepseekV41Cache) for c in cache):
@@ -421,8 +422,9 @@ class Model(nn.Module):
                             + ", ".join(sorted({type(c).__name__ for c in cache})) + ")")
         else:
             seq = rt.session  # no engine cache: the runtime's default session (standalone use)
+        extra = {"prompt_end": kwargs["prompt_end"]} if kwargs.get("prompt_end") is not None else {}
         logits = rt.forward(ids, seq, all_logits=all_logits, images=images, token_types=token_types,
-                            engram_lookahead=kwargs.get("engram_lookahead"))
+                            engram_lookahead=kwargs.get("engram_lookahead"), **extra)
         if all_logits:
             return logits[None]            # (1, len, V)
         return logits[None, None, :]       # (1, 1, V)

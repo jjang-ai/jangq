@@ -301,6 +301,10 @@ class Shared:
 GATHER_MAX_QUERIES = 8
 # Prefill wo_a in group-major layout (Attention.__call__); False keeps the token-major per-row products.
 WO_GROUP_MAJOR = True
+# Prompt-suffix pruning (Model.__call__ prompt_end): the layers after the last KV-source layer own no
+# cache but their 128-token windows, so each one only needs the prompt rows the last prompt token can
+# still reach through the windows above it. VMLX_DSV41_SUFFIX_PRUNE=0 runs every row through every layer.
+SUFFIX_PRUNE = os.environ.get("VMLX_DSV41_SUFFIX_PRUNE", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
@@ -957,6 +961,9 @@ class Model(nn.Module):
         self.vision_args = vision_args
         # dSpark/MTP reads the mean-over-hc hidden at the INPUT of these layers (release Transformer.forward)
         self.target_layer_ids = tuple(args.raw.get("dspark_target_layer_ids", ()))
+        # First layer prompt-suffix pruning may shorten: past the last KV-source (its compressor and index
+        # keys need every row) and past every Engram layer. Layers from here on keep only a window cache.
+        self.prune_from = max([*args.kv_source_layer_ids, *layout.layer_ids, args.candidate_source_layer_id]) + 1
         if vision_args is not None:
             from jang_tools.dsv41.vision import ViT, Aligner, IMAGE, IMAGE_START, IMAGE_END, IMAGE_NEW_LINE
             self.vision = ViT(vision_args)
@@ -991,14 +998,33 @@ class Model(nn.Module):
             h[0, s : s + len(types)] = span
         return h
 
+    def prune_rows(self, layer_id: int, seg_start: int, n: int, prompt_end: int) -> int:
+        """Trailing rows of an n-row forward starting at seg_start that layer ``layer_id`` must run so the
+        logits at ``prompt_end - 1`` and every layer's window cache at ``prompt_end`` are exact.
+
+        A pruned layer's 128-token window reaches 127 rows back, so its first 127 kept rows see a partial
+        window and only its last keep - 127 outputs are exact; the layer above must not read further
+        back than that. The last layer needs its window (128 rows), hence keep = 1 + (L - i) * 127 for L
+        layers (layer 39: 128, layer 21: 2414). At least one row always runs, so a forward that lies
+        entirely before the kept range still leaves a window row at the right position."""
+        win = self.args.sliding_window
+        keep = 1 + (len(self.layers) - layer_id) * (win - 1)
+        lo = max(seg_start, prompt_end - keep)
+        return max(1, min(n, seg_start + n - lo))
+
     def __call__(self, tokens: mx.array, segs: list, engram_rows: dict, all_logits: bool = False,
-                 images=None, image_mask: mx.array | None = None, return_hidden: bool = False):
+                 images=None, image_mask: mx.array | None = None, return_hidden: bool = False,
+                 prompt_end: int | None = None):
         """tokens [1,N]: the segments' tokens back to back. engram_rows: {layer_id: [1,N,cols,head_dim]}.
         images: list of ImageInput to splice into the prefill (start_pos 0). image_mask [1,N] bool,
         True inside image spans. Returns fp32 logits at each segment's last token (or every token).
         With return_hidden, also returns main_hidden [1,N,dim*len(target_layer_ids)] (bf16): the
         mean-over-hc hidden at the INPUT of each dSpark target layer, concatenated -- the MTP head's
-        input (release Transformer.forward collects h.mean(dim=2) at target_layer_ids)."""
+        input (release Transformer.forward collects h.mean(dim=2) at target_layer_ids).
+        prompt_end: absolute position where the prompt ends (this forward ends at or before it). The
+        layers from prune_from run only the trailing rows the last prompt token still depends on
+        (prune_rows); the returned logits are exact only when this forward ends at prompt_end, and
+        main_hidden only for the last 128 rows before prompt_end (rows before are zero)."""
         h = self.embed(tokens)
         if images:
             h = self.merge_image_embeddings(h, images)
@@ -1008,7 +1034,30 @@ class Model(nn.Module):
         pre_mix[..., 0] = 1.0
         text_mask = None if image_mask is None else (~image_mask).astype(mx.float32)
         main_hiddens = []
+        N = tokens.shape[1]
+        prune = (SUFFIX_PRUNE and prompt_end is not None and len(segs) == 1 and not all_logits and N > 1
+                 and prompt_end >= segs[0].start + N)
+        seg0, cur = segs[0], N
         for i, layer in enumerate(self.layers):
+            if prune and i >= self.prune_from:
+                n = min(cur, self.prune_rows(i, seg0.start, N, prompt_end))
+                if n < N:
+                    # Rows before the kept suffix never reach this layer: its window restarts at the
+                    # suffix (the stale rows would sit at the wrong positions; only rows whose outputs
+                    # nothing reads see the shortened window).
+                    seg0.caches[i].window = None
+                if n < cur:
+                    h, pre_mix = h[:, -n:], pre_mix[:, -n:]
+                    if image_mask is not None:
+                        image_mask = image_mask[:, -n:]
+                    sh = seg0.shared
+                    if sh.topk_idxs is not None:
+                        sh.topk_idxs = sh.topk_idxs[:, -n:]
+                    if sh.candidates is not None:
+                        sh.candidates = sh.candidates[-n:]
+                    seg = Seg(0, n, seg0.start + N - n, seg0.caches)
+                    seg.shared = sh
+                    segs, cur = [seg], n
             if i in engram_rows:
                 rows = engram_rows[i]
                 if callable(rows):  # still being read: start the layers so far on the GPU meanwhile
@@ -1016,7 +1065,10 @@ class Model(nn.Module):
                     rows = rows()
                 h = layer.engram(h, rows, text_mask)
             if return_hidden and i in self.target_layer_ids:
-                main_hiddens.append(mx.mean(h, axis=2))  # [1,N,dim] at this layer's input
+                mh = mx.mean(h, axis=2)  # [1,cur,dim] at this layer's input
+                if cur < N:  # pruned: rows before the suffix are not computed (zeros, never read)
+                    mh = mx.pad(mh, [(0, 0), (N - cur, 0), (0, 0)])
+                main_hiddens.append(mh)
             h, pre_mix = layer(h, segs, pre_mix, image_mask)
         if not all_logits:
             last = mx.array([sg.lo + sg.n - 1 for sg in segs])
@@ -1170,13 +1222,17 @@ class DSV41:
 
     def forward(self, ids: list[int], sess: "Session | None" = None, all_logits: bool = False,
                 images=None, token_types=None, return_hidden: bool = False,
-                engram_lookahead: list[int] | None = None, capture_verify: bool = False) -> mx.array:
+                engram_lookahead: list[int] | None = None, capture_verify: bool = False,
+                prompt_end: int | None = None) -> mx.array:
         """Append tokens to a session (prefill, continuation or one decode step).
         images/token_types carry VL inputs (image spans must be in a single start_pos-0 prefill).
         engram_lookahead: the next chunk of a chunked prefill; its Engram rows are read while this
         forward computes (text tokens only).
         capture_verify: keep references to this forward's per-token cache inputs so commit_prefix
         can later keep only a prefix of these tokens (DSpark partial accept, no second forward).
+        prompt_end: absolute position where the prompt being prefilled ends (Model.__call__): the late
+        layers then skip prompt rows the end of the prompt no longer depends on. Pass it only for
+        prefill chunks whose logits are discarded or that end exactly at prompt_end.
         Returns fp32 logits [vocab] at the last token ([len(ids), vocab] with all_logits).
         With return_hidden also returns main_hidden [len(ids), dim*n_targets] for the dSpark head."""
         sess = sess or self.session
@@ -1191,7 +1247,8 @@ class DSV41:
         seg = Seg(0, len(ids), sess.pos, sess.caches)
         seg.shared.capture = capture_verify
         out = self.model(mx.array(arr[None].astype(np.int32)), [seg], rows, all_logits=all_logits,
-                         images=images, image_mask=image_mask, return_hidden=return_hidden)
+                         images=images, image_mask=image_mask, return_hidden=return_hidden,
+                         prompt_end=None if capture_verify else prompt_end)
         sess.pos += len(ids)
         if engram_lookahead:
             self._start_lookahead(sess, engram_lookahead)
