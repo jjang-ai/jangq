@@ -78,9 +78,12 @@ indexer is the cost that grows with context. Two changes, both exact up to ties:
   it (100k keys: 164 -> 97 ms per index layer per 2048-token chunk). Query chunks keep the `[C, T]`
   fp32 block near 1 GB. Optional import; `VMLX_DSV41_FUSED_INDEX=0` or no vMLX keeps the bf16 path.
   Numerics vs bf16: prefill logits mean cos 0.9962, top-1 agreement 100%.
-- **Block top-k:** MLX's GPU `argpartition` sorts the whole row. For rows of 65536+ keys,
-  `topk_indices` picks the 512 blocks of 64 with the largest maxima (they hold the top-512 values)
-  and partitions only those entries. Identical selected values; 2.4x faster at 100k, 16x at 1M.
+- **Block top-k (prefill only):** MLX's GPU `argpartition` sorts the whole row. For prefill rows
+  (more than 8 queries) of 65536+ keys, `topk_indices` picks the 512 blocks of 64 with the largest
+  maxima (they hold the top-512 values) and partitions only those entries. Identical selected values;
+  2.4x faster at 2048 x 100k, 16x at 256 x 1M. Decode keeps the direct partition: for one row it is
+  cheaper (170k context: 25.1 vs 23.9 tok/s), and decode index scores take the bf16 path where exact
+  ties are common, so a different pick among tied values would change decode output.
 Remaining long-context cost: the per-layer attention input (window + whole pool, concatenated and
 cast to fp32) grows with context, pushing peak active memory to ~214 GiB at 1M, past the resident
 cliff below.
@@ -157,8 +160,9 @@ vmmap sample taken right before it):
 
 | metric | DSpark (default) | AR (`VMLX_DSV41_DSPARK=0`) |
 |---|---|---|
-| cold prefill 1.6k / 6.5k / 26.5k tokens | 822 / 933 / 872 pp/s (was 341* / 710 / 676 before the group-major `wo_a`) | 21k: 769 pp/s (before) |
-| decode code / code2 / structured / prose | 60.8–66.0 / 46.4–51.1 / 82.4–86.6 / 29.5–31.0 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
+| cold prefill 1.6k / 6.5k / 26.5k tokens | 822 / 955 / 940 pp/s (group-major `wo_a` + fused index scores; was 341* / 710 / 676) | 21k: 769 pp/s (before) |
+| decode code / code2 / structured / prose | 60.8–66.0 / 46.1–51.1 / 82.4–86.7 / 29.5–31.0 tok/s | 30.8 / 29.6 / 31.2 / 29.3 |
+| decode after a 170k-token context (AR) | 25.0 tok/s; tokens identical with/without the block top-k | |
 | TTFT, short prompt | 0.24–0.52 s | 0.19–0.59 s |
 | RAM prefix hit, 3.4k tokens | 5.18 s → 0.38 s | 6.45 s → 0.33 s |
 | SSD hit after restart, 3.4k tokens | 3394 cached, 0.38–0.42 s (same as a RAM hit) | |
