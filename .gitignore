@@ -105,8 +105,10 @@ jang-tools/jang_tools/turboquant/
 jang-tools/jang_tools/turboquant/*
 !jang-tools/jang_tools/turboquant/mpp_dense_kernel.py
 !jang-tools/jang_tools/turboquant/mpp_nax_kernel.py
+!jang-tools/jang_tools/turboquant/router_kernel.py
 !jang-tools/tests/test_turboquant_mpp_dense_kernel.py
 !jang-tools/tests/test_turboquant_mpp_nax_kernel.py
+!jang-tools/tests/test_turboquant_router_kernel.py
 
 # Vectors (experimental)
 vectors/
