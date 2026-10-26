@@ -335,10 +335,32 @@ def _attn_chunk(q, kv, sink, ix, scale):
     return _attn_core(q, kv, sink, ix, mx.array(scale, mx.float32))
 
 
+# Rows at least this long take the block top-k (topk_indices): MLX's GPU argpartition is a full sort of
+# the row, which at long context dominates the indexer (100k keys: 32.7 -> 13.5 ms, 1M: 51.9 -> 3.2 ms
+# for the selection).
+TOPK_BLOCK_MIN = 65536
+TOPK_BLOCK = 64
+
+
 def topk_indices(scores, k):
-    """Indices of the k largest along the last axis (unordered)."""
-    if k >= scores.shape[-1]:
-        return mx.broadcast_to(mx.arange(scores.shape[-1], dtype=mx.int32), scores.shape)
+    """Indices of the k largest along the last axis (unordered).
+
+    Long rows: the k largest values lie in the k blocks (of TOPK_BLOCK) with the largest maxima, so
+    select those blocks first and run the exact selection over their k*TOPK_BLOCK entries. Same
+    values selected; only the choice among exactly tied values can differ. Indices past the row end
+    (block padding) are -inf entries; callers mask indices past the visible length."""
+    T = scores.shape[-1]
+    if k >= T:
+        return mx.broadcast_to(mx.arange(T, dtype=mx.int32), scores.shape)
+    if scores.ndim == 2 and T >= TOPK_BLOCK_MIN and T // TOPK_BLOCK > k:
+        C, b = scores.shape[0], TOPK_BLOCK
+        pad = -T % b
+        s = mx.concatenate([scores, mx.full((C, pad), -mx.inf, dtype=scores.dtype)], axis=-1) if pad else scores
+        nb = s.shape[1] // b
+        top_b = mx.argpartition(-mx.max(s.reshape(C, nb, b), axis=-1), kth=k - 1, axis=-1)[:, :k]
+        cand = (top_b[:, :, None] * b + mx.arange(b)[None, None]).reshape(C, -1)
+        sel = mx.argpartition(-mx.take_along_axis(s, cand, axis=-1), kth=k - 1, axis=-1)[:, :k]
+        return mx.take_along_axis(cand, sel, axis=-1).astype(mx.int32)
     return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
 
 
