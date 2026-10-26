@@ -41,8 +41,8 @@ backbone logits predicting position `c+1`. Per step:
    groups → compressed / index pool rows with the same RoPE positions; history + position);
    `seed_windows(vmh[:k+1], …)`; `c += k+1`; `pending = vlog[k]`, so `truth[k]` is the next p0.
    **`k == 0`** keeps the old path: `emit = [p0, truth[0]]`, `restore(ck)`, `forward(emit)` (2 forwards,
-   but cheaper per token than a 1-token step). `VMLX_DSV41_DSPARK_REFEED=1` forces the refeed path for
-   every partial accept (A/B). Measured (256 tokens, chat prompts): code 44.9 → 57.5 tok/s, code2
+   but cheaper per token than a 1-token step). The refeed path for partial accepts (and its A/B switch) is
+   removed: it ran a second forward over the kept tokens every step. Measured (256 tokens, chat prompts): code 44.9 → 57.5 tok/s, code2
    41.3 → 48.7, Rust 50.9 → 59.1, prose unchanged. `tests/test_commit_prefix.py` proves the replay exact
    (`commit_prefix(W+1)` == the capture forward's own state, bit for bit).
 
@@ -87,16 +87,17 @@ identical to greedy on code (59/59) and structured (29/29) over those short runs
   page-cache warm. On unique text cold prefill is bound by Engram row reads; see
   `RUNTIME_SERVING.md`.
 
-## M4 — MLA decode attention kernel (`metal_decode_attn.py`, default OFF)
+## M4 — Removed: standalone decode attention kernel, MoE expert dedup
 
-Port of the engine's `glm5_mla_decode_attn` (= mlx-serve PR #911 fused decode): 64 heads × rank-512
-shared latent, bf16 rows read in place by index (no `mx.take` gather, no fp32 latent copy), fp32
-accumulation (bf16 over the 512-dim contraction drifts into repetition loops). V4.1 adds the learned
-per-head `attn_sink` into the **combine** pass only (extra `exp(sink−M)` denominator term, no value
-row; the partial pass is the GLM kernel verbatim). Equivalent to the stock gather path (cos 0.999999).
-**Default OFF — a wall-clock wash at decode** (attention is not the decode cost; see M3). Kept as a
-building block: the same in-place-indexed fp32-accumulate structure is what a head_dim-512 fused
-*prefill* attention kernel would use (not pursued — prefill already at parity).
+Both were measured and deleted so nothing dead stays in the runtime:
+- `metal_decode_attn.py` (port of the engine's `glm5_mla_decode_attn`: 64 heads x rank-512 latent, rows
+  read in place by index, fp32 accumulation, sink in the combine pass). Equivalent (cos 0.999999) but a
+  wall-clock wash (31.08 vs 31.42 tok/s): attention is one of ~150 dispatches per layer, and replacing
+  one dispatch with another does not move a dispatch-bound step. M5 fused the rest instead.
+- MoE expert dedup across verify rows (ds4 `moe_dedup_plan`): bit-identical, but slower than M5's fused
+  MoE at 2/4/8 rows (0.351/0.509/0.794 vs 0.330/0.433/0.668 ms per layer). The fused MoE is already bound
+  by the distinct experts' bytes (repeated tiles hit the GPU caches); the plan's pair loop only costs
+  parallelism.
 
 ## M5 — Fused decode / verify kernels (`metal_decode.py`, default ON)
 
@@ -110,7 +111,6 @@ RMSNorm), so greedy decode is bit-equal with each flag off or on.
 | router logits from the bf16 gate weight (MLX f32 GEMV order, no per-call f32 copy); only where MLX uses the same tiling (K < 16 E) | `VMLX_DSV41_ROUTER_GEMV` | 1 row 86 → 68 µs |
 | 6 routed + shared expert in 2 dispatches (mlx-serve `MOE_GU`/`MOE_DN`) instead of ~25 | `VMLX_DSV41_FUSED_MOE` | 1 row 0.279 → 0.226 ms |
 | hyper-connection collapse + mixes + Sinkhorn split + expand in 3 dispatches per sublayer instead of ~14; self-checks once against the stock path | `VMLX_DSV41_FUSED_HC` | 1 row 0.183 → 0.137 ms |
-| MoE expert dedup across verify rows (opt-in: slower, the fused MoE is already bound by distinct-expert bytes) | `VMLX_DSV41_MOE_DEDUP=1` | — |
 
 Real model (M5 Ultra, AR greedy, all four on vs off): 2k context 29.0–29.3 → 39.1–39.2 tok/s, 256 greedy
 tokens identical; 100k context 26.0–26.3 → 34.3 tok/s, 64 tokens identical. Verify rows (2–8) now each

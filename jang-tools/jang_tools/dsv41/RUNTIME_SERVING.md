@@ -5,6 +5,46 @@ pieces between the runtime and the vMLX engine: residency, prefill and Engram I/
 caching, multimodal, and how to measure all of it. Measured numbers come from an M5 Ultra
 (256 GB) serving the `DeepSeek-V4.1-Flash-1017-JANG-Q2Q3-IMATRIX` bundle.
 
+## Speed ledger: why it was slow, and what each piece does
+
+Every row was measured on the real model (M5 Ultra 256 GB) and is exact or bounded as noted. Read this first
+before touching a hot path: each fix removes one specific cause, and reverting any one of them brings that
+cause back. Details are in the linked sections.
+
+**Prefill** (unique-text cold prompts; the first version ran 68 pp/s at 1k tokens):
+
+| was slow because | fix (where) | measured |
+|---|---|---|
+| Engram rows (24 random 256-byte reads per position per Engram layer, ~98 GB tables) were gathered by one thread: one page fault in flight | 16 concurrent memmap gathers with `MADV_RANDOM` (`engram.DiskEngramTable._gather`); `np.take` releases the GIL so graph building continues | 8–11k → 110–146k cold rows/s; 1k prefill 68 → 598 pp/s |
+| every Engram read waited before any compute | layer 1's rows first, layer 14's rows resolved lazily after `mx.async_eval` of layers 0–13 (`DSV41._engram_rows(lazy=True)`) | reads overlap compute (bit-identical) |
+| the next chunk's reads started only when it ran | `engram_lookahead`: the next chunk's hashes and reads start while this one computes (engine passes it) | 4k 459 → 756 pp/s with the above |
+| (rule) each forward streams the routed experts once, ~0.14 s at prefill widths | one forward per chunk; never split a chunk to hide I/O | — |
+| the engine capped MLX's allocator cache at 4 GB, so every 2048-token chunk freed and re-created its Metal buffers | 16 GB per-family floor (vMLX `mlx_memory.model_cache_limit_floor_bytes`) | 21k 475 → 769 pp/s |
+| with the 8.3 GB draft resident, 2048-token chunks crossed Metal's recommended working set and the GPU slowed ~30% | 1024-token chunks while the draft is resident (`DSV41DSparkGenerator`) | 545 → 708 pp/s |
+| `wo_a` (block-diagonal over 8 groups) ran token-major: one 1-row product per token per group, a third of each layer | group-major for prefill, one matmul per group (`Attention.__call__`) | 18.6 → 2.1 ms per layer; 708 → 909 pp/s |
+| a pool shared by several layers was dequantized once per consumer | `Shared.view` memoizes the dequantized pool for one forward | one dequant per pool per forward |
+| index scores materialized `[C, heads, T]` and reduced it | fused `sum_h w * relu(q . k)` kernel (vMLX `dsa_pool_index_scores`) | 100k keys: 164 → 97 ms per index layer |
+| MLX's GPU `argpartition` sorts the whole row | block top-k for prefill rows >= 65536 keys (`topk_indices`), exact values | 2.4x at 100k, 16x at 1M |
+| the fused scorer ran on simdgroup fp32 (~27 TFLOPS ceiling) | same kernel on the M5 matrix units with bf16 operands (vMLX `dsa_index_scores_mpp`) | 4.3x; 100k avg 831 → 884 pp/s |
+| layers 21–39 computed every prompt row, though only the last rows reach the prompt end through their 128-token windows | prompt-suffix pruning, `1 + (40 - i) * 127` trailing rows per layer (`Model.prune_rows`), exact at the prompt end | 32k 938 → 1641, 100k 875 → 1584 pp/s |
+
+**Decode** (AR started at 29–31 tok/s; DSpark at 26.8 in the first live build):
+
+| was slow because | fix (where) | measured |
+|---|---|---|
+| bf16 logits tied every 50–100 tokens, so batched verify and 1-row decode broke ties differently and DSpark drifted | fp32 LM-head input, as the reference (`Model.__call__`) | correctness (enables the rows below) |
+| each DSpark step ran a verify forward and then a second forward to commit the accepted tokens | full accepts keep the verify's state; partial accepts replay only the kept tokens' cache updates (`DSV41.commit_prefix`) | code 44.9 → 57.5 tok/s |
+| speculation could run slower than AR on low-acceptance text | wall-clock governor: speculate only while faster than a measured AR step, re-measured as context grows (`dspark._Governor`) | never below AR |
+| decode/verify attention dequantized the whole 4-bit pool every step (~0.5–1 GB per layer per token at 1M) | gather only the selected rows from the 4-bit pool (`append_compressed_rows(gather=True)`) | bit-identical; flat in context |
+| a decode step was ~150 dispatches per layer, built for all 40 layers before the GPU started | per-layer `mx.async_eval`, bf16 router GEMV, 2-dispatch MoE, fused hyper-connection stage (`metal_decode.py`, M5 in DECODE_DSPARK_METHODS) | AR 29.0 → 39.2 tok/s (2k), 26.0 → 34.3 (100k); DSpark code 65.7 → 90.2 |
+
+**Memory**: compressed-KV and index pools are stored 4-bit (`QuantGrowBuffer`, the reference's FP4 footprint) and
+the window keeps 128 rows: 905 MiB resident at 1M tokens (vs ~3.3 KB/token before).
+
+Measured and removed (no gain): standalone decode attention kernel, MoE expert dedup across verify rows
+(DECODE_DSPARK_METHODS M4), 64-lane `os.pread` Engram reads, a scalar fused prefill sparse-attention kernel
+(14.4 vs 13.7 ms for the gather path at 2048 queries), bf16 gather in prefill attention (no gain at 256k).
+
 ## Components
 
 | piece | file |
@@ -44,11 +84,11 @@ Measured (unique text, 2048-token engine chunks, standalone runtime):
 
 Design, and the rules it encodes:
 
-1. **Concurrent reads.** `DiskEngramTable._pread` gathers from the memmap on 16 threads
+1. **Concurrent reads.** `DiskEngramTable._gather` gathers from the memmap on 16 threads
    (`np.take` releases the GIL), with `MADV_RANDOM` on the mapping: ~110–146k cold rows/s,
    against 8–11k for a single-thread gather. More than ~16 gather threads collapse on VM-map
-   contention. `DSV41_ENGRAM_IO=pread` selects 64-lane `os.pread` (~130k rows/s, but it holds
-   the GIL per row).
+   contention. 64-lane `os.pread` reached ~130k rows/s but held the GIL per row and slowed graph
+   building, so it was removed.
 2. **One forward per chunk.** Every forward streams the routed experts' weights, about 0.14 s
    of fixed cost at prefill batch sizes, so splitting a chunk into sub-chunks to hide reads
    costs more than it saves. Don't add forwards to overlap I/O.

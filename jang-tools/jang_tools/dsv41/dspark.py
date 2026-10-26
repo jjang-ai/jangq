@@ -27,7 +27,6 @@ relative to plain AR decode.
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 
@@ -37,9 +36,7 @@ import numpy as np
 
 from jang_tools.dsv41.model import (
     GROUP_SIZE,
-    HC_METAL,
     DenseLinear,
-    GrowBuffer,
     RMSNorm,
     Rope,
     SwitchProj,
@@ -60,7 +57,7 @@ def _hc_mixes(x, fn, scale, base, hc, iters, hc_eps, eps):
     xf = x.reshape(B, S, -1).astype(mx.float32)
     rs = mx.rsqrt(mx.mean(xf * xf, -1, keepdims=True) + eps)
     m = (xf @ fn.T) * rs
-    if hc == 4 and HC_METAL:
+    if hc == 4:
         return _hc_split_metal(m, scale, base, iters, hc_eps)
     return _hc_split(hc, iters, hc_eps)(m, scale, base)
 
@@ -70,7 +67,7 @@ class BoundedWindow:
     """The last ``cap`` rows of an append-only [1, T, D] sequence, oldest first.
 
     Functional updates (a new array per append, never an in-place slot write), so a (buf, n) ref
-    snapshot stays valid across later appends -- the same rollback contract as GrowBuffer. Each append
+    snapshot stays valid across later appends -- the same rollback contract as QuantGrowBuffer. Each append
     copies at most ``cap`` rows (128 x head_dim bf16 = 128 KB), independent of context length."""
 
     def __init__(self, cap: int):
@@ -565,7 +562,7 @@ class DSparkRunner:
     internal compression."""
 
     def __init__(self, dsv41, dspark, width=None, conf_gate=None,
-                 adaptive=False, latch_after=2, probe_every=16, ar_probe_every=64,
+                 adaptive=False, probe_every=16, ar_probe_every=64,
                  ema_alpha=0.3, clock=time.perf_counter):
         self.m = dsv41
         self.ds = dspark
@@ -578,17 +575,16 @@ class DSparkRunner:
         # only while it is faster than the measured AR step; otherwise AR steps, with a speculative
         # probe every ``probe_every`` AR tokens and an AR re-measure every ``ar_probe_every`` spec
         # steps (AR cost grows with context, so it is never measured once and trusted forever).
-        # ``latch_after`` is kept for API compatibility and no longer used.
         self.adaptive = adaptive
-        self.latch_after = latch_after
         self.probe_every = max(1, int(probe_every))
         self.ar_probe_every = max(1, int(ar_probe_every))
         self.ema_alpha = float(ema_alpha)
         self.clock = clock
-        # Partial accepts commit the verify's kept prefix in place (DSV41.commit_prefix) instead of
-        # restore + a second forward. VMLX_DSV41_DSPARK_REFEED=1 restores the refeed path (A/B).
-        refeed = os.environ.get("VMLX_DSV41_DSPARK_REFEED", "").strip().lower() in {"1", "true", "yes", "on"}
-        self._capture_kw = {} if refeed or not hasattr(dsv41, "commit_prefix") else {"capture_verify": True}
+        # Partial accepts commit the verify's kept prefix in place (DSV41.commit_prefix): no restore and
+        # no second forward over the kept tokens (each extra forward streams the routed experts again,
+        # ~0.14 s at prefill widths and a full decode step at verify widths). A backbone without
+        # commit_prefix (test doubles) takes the restore + re-forward commit.
+        self._capture_kw = {"capture_verify": True} if hasattr(dsv41, "commit_prefix") else {}
 
     def _greedy(self, logits):
         return int(mx.argmax(logits))

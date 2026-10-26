@@ -1,4 +1,4 @@
-"""Concurrent pread Engram reads == a memory-mapped gather, and pipelined lookup == lookup.
+"""Concurrent (16-lane) Engram gathers == a plain memory-mapped gather, and pipelined lookup == lookup.
 
 CPU only, on a small synthetic FP8 table written as a safetensors shard.
 
@@ -33,12 +33,12 @@ def _write_table(path: Path, n_rows: int, dim: int, sdim: int, rng) -> tuple[np.
     return w, s
 
 
-def test_pread_matches_memmap():
+def test_concurrent_gather_matches_memmap():
     rng = np.random.default_rng(0)
     with tempfile.TemporaryDirectory() as d:
         _write_table(Path(d) / "engram.safetensors", 20000, 256, 8, rng)
         t = E.DiskEngramTable(Shards(d, index_name="none"), 1)
-        for n in (1, 7, E._IO_TASK, E._IO_TASK + 1, 9000):  # one task, exact task, many tasks
+        for n in (1, 7, E._TAKE_LANES, E._TAKE_LANES + 1, 9000):  # fewer rows than lanes, exact, many
             ids = rng.integers(0, 20000, (n, 3))  # duplicates included
             inv, rr, ss = t.read(ids)
             uniq = np.unique(ids.reshape(-1))
@@ -51,5 +51,5 @@ def test_pread_matches_memmap():
 
 
 if __name__ == "__main__":
-    test_pread_matches_memmap()
+    test_concurrent_gather_matches_memmap()
     print("ok")

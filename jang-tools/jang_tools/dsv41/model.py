@@ -52,11 +52,6 @@ ROUTER_GEMV = _env_on("VMLX_DSV41_ROUTER_GEMV")
 # MOE_GU/MOE_DN) instead of ~25. 1 row: bit-identical; 2-8 rows: each row exactly its 1-row decode.
 # VMLX_DSV41_FUSED_MOE=0 restores gather_qmm + qlinear.
 FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
-# With FUSED_MOE, VMLX_DSV41_MOE_DEDUP=1 makes 2-8 rows (DSpark verify) stream each distinct expert and
-# the shared expert once per weight tile for all rows using it (metal_decode.moe_decode_dedup, ds4
-# moe_dedup_plan). Bit-identical to the per-row fused path but slower on the M5 Ultra (repeats already
-# hit the caches there), so off by default.
-MOE_DEDUP = _env_on("VMLX_DSV41_MOE_DEDUP", "0")
 # Hyper-connection stage for <= 8 rows in three Metal dispatches per sublayer (metal_decode.hc_*:
 # mixes + collapse + RMSNorm, Sinkhorn split, expand) instead of ~14, each MLX op's order reproduced.
 # Bit-identical (checked once per process against the stock ops; a mismatch keeps the stock path).
@@ -187,41 +182,6 @@ class DenseLinear(nn.Module):
         return (x if compute is None else x.astype(compute)) @ w.T
 
 
-class GrowBuffer:
-    """Append-only [1, T, D] buffer with amortized growth."""
-
-    STEP = 2048
-
-    def __init__(self):
-        self.buf = None
-        self.n = 0
-
-    def append(self, x: mx.array):
-        k = x.shape[1]
-        if k == 0:
-            return
-        if self.buf is None or self.n + k > self.buf.shape[1]:
-            cap = ((self.n + k + self.STEP - 1) // self.STEP) * self.STEP
-            new = mx.zeros((x.shape[0], cap, x.shape[2]), dtype=x.dtype)
-            if self.buf is not None:
-                new[:, : self.n] = self.buf[:, : self.n]
-            self.buf = new
-        self.buf[:, self.n : self.n + k] = x
-        self.n += k
-
-    def view(self, n=None):
-        n = self.n if n is None else n
-        if self.buf is None:
-            return None
-        return self.buf[:, :n]
-
-    def snapshot(self):
-        return (self.buf, self.n)
-
-    def load(self, s):
-        self.buf, self.n = s
-
-
 class QuantGrowBuffer:
     """Append-only [1, T, D] buffer whose rows are stored 4-bit (affine, group_size GROUP_SIZE) so the
     DSA compressed/index pools match the release's FP4 cache footprint (~4x smaller than bf16; a 1M-ctx
@@ -329,8 +289,6 @@ class Shared:
 # Queries per segment up to which attention gathers only its selected compressed rows from the 4-bit
 # pool instead of dequantizing the whole pool (decode = 1, DSpark verify <= bs + 1).
 GATHER_MAX_QUERIES = 8
-# Prefill wo_a in group-major layout (Attention.__call__); False keeps the token-major per-row products.
-WO_GROUP_MAJOR = True
 # Prompt-suffix pruning (Model.__call__ prompt_end): the layers after the last KV-source layer own no
 # cache but their 128-token windows, so each one only needs the prompt rows the last prompt token can
 # still reach through the windows above it. VMLX_DSV41_SUFFIX_PRUNE=0 runs every row through every layer.
@@ -339,12 +297,6 @@ SUFFIX_PRUNE = os.environ.get("VMLX_DSV41_SUFFIX_PRUNE", "1").strip().lower() no
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
     """q [1,S,H,D], kv [1,N,D] (keys == values), sink [H], idxs [1,S,K] int32 (-1 = none)."""
-    if q.shape[1] == 1:  # decode step: fused in-place indexed Metal kernel (mlx-serve PR#911 port)
-        from jang_tools.dsv41.metal_decode_attn import dsv41_decode_attn, decode_attn_requested
-        if decode_attn_requested():
-            out = dsv41_decode_attn(q, kv, sink, idxs, scale)  # (1,1,H,D), keeps kv bf16 (no fp32 copy)
-            if out is not None:
-                return out
     q, kv, idxs = q[0], kv[0].astype(mx.float32), idxs[0]
     S, H, D = q.shape
     outs = []
@@ -649,7 +601,7 @@ class Attention(nn.Module):
         w = wa.weight.reshape(self.n_groups, self.o_lora_rank, -1)
         sc = wa.scales.reshape(self.n_groups, self.o_lora_rank, -1)
         bi = wa.biases.reshape(self.n_groups, self.o_lora_rank, -1)
-        if WO_GROUP_MAJOR and B * N > GATHER_MAX_QUERIES:
+        if B * N > GATHER_MAX_QUERIES:
             # Prefill: group-major [G, tokens, K] so each group is one matrix multiply. The
             # token-major layout below runs one 1-row product per token per group (2048-token
             # chunk: 18.6 ms -> 2.1 ms per layer).
@@ -793,7 +745,6 @@ def _hc_post(x, residual, post, comb):
     return y.astype(x.dtype)
 
 
-HC_METAL = True
 _HC_KERNELS = {}
 
 _HC_SRC = """
@@ -936,7 +887,7 @@ class Block(nn.Module):
         xf = x.reshape(B, S, -1).astype(mx.float32)
         rs = mx.rsqrt(mx.mean(xf * xf, -1, keepdims=True) + self.eps)
         m = (xf @ fn.T) * rs  # [B,S,mix]
-        if self.hc == 4 and HC_METAL:
+        if self.hc == 4:
             return _hc_split_metal(m, scale, base, self.iters, self.hc_eps)
         return _hc_split(self.hc, self.iters, self.hc_eps)(m, scale, base)
 
@@ -971,12 +922,8 @@ class Block(nn.Module):
         sw = self.ffn.experts
         n = xf.shape[0]
         if FUSED_MOE and n <= GATHER_MAX_QUERIES and self.capture is None:
-            from jang_tools.dsv41.metal_decode import moe_decode, moe_decode_dedup
-            y = None
-            if MOE_DEDUP and n > 1:
-                y = moe_decode_dedup(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
-            if y is None:
-                y = moe_decode(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
+            from jang_tools.dsv41.metal_decode import moe_decode
+            y = moe_decode(xf, idx, w, sw, self.ffn.shared_experts, self.swiglu_limit)
             if y is not None:
                 return y.reshape(B, S, D)
         do_sort = n * self.topk >= 64
@@ -1426,7 +1373,7 @@ class Session:
         self.pos = 0
 
     def checkpoint(self):
-        """O(1) snapshot (refs only) for speculative verification. (Quant)GrowBuffer.append either
+        """O(1) snapshot (refs only) for speculative verification. QuantGrowBuffer.append either
         grows a fresh buffer or writes past `.n` in place, so saving each buffer's snapshot() and the
         window/pend refs is enough: bytes below `.n` are never mutated and view only reads [:n]."""
         caches = []

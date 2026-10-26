@@ -4,6 +4,21 @@
 # accumulation order. Copyright (c) 2023-2026 Apple Inc., MIT licensed.
 """Fused Metal kernels for DSV4.1 single-stream decode and DSpark verify (<= MAX_ROWS rows).
 
+Why decode was slow: a 1-row step is not limited by the 10.6 GB of weights it reads (~330 GB/s of
+~800) but by dispatch count. Stock MLX ops ran ~150 dispatches per layer -- the router's f32 recast of
+the 384 x 5120 gate every call, separate gate/up/down gather_qmm plus three shared-expert linears
+(~25), and ~14 small ops per hyper-connection sublayer -- each too short to fill the GPU, with the host
+encoding all 40 layers before the GPU started. These kernels collapse the per-layer work:
+
+  router_logits     bf16 gate weight read in place with MLX's f32 GEMV order (no per-call f32 copy)
+  moe_decode        6 routed + shared expert in 2 dispatches (gate+up+SwiGLU, then down+sum)
+  hc_stage_decode   hyper-connection collapse + mixes + RMSNorm + Sinkhorn split in 2 dispatches
+  hc_post_decode    the expand back into the 4 hc streams in 1 dispatch
+
+Together with per-layer mx.async_eval (model.LAYER_ASYNC) they take AR decode from 29.0 to 39.2 tok/s
+at 2k context (26.0 -> 34.3 at 100k), greedy tokens unchanged: every kernel reproduces MLX's
+accumulation order (and its TF32 rounding of f32 matmuls), so outputs are bit-equal to the stock ops.
+
 Each entry point returns None when its inputs are not eligible; the caller then takes the stock path.
 """
 
@@ -755,181 +770,3 @@ def hc_post_decode(h, residual, post, comb):
     return post_k(inputs=[h, residual, post.astype(mx.float32), comb.reshape(R, 16).astype(mx.float32)],
                   template=[("T", mx.bfloat16), ("D", D), ("TF32", _tf32())],
                   grid=(D, R, 1), threadgroup=(256, 1, 1), output_shapes=[(R, 4, D)], output_dtypes=[mx.bfloat16])[0]
-
-
-# ----------------------------------------------------------------------------- MoE expert dedup (verify)
-# For R >= 2 rows each (row, slot) pair above re-reads its expert, and the shared expert is read R times.
-# Here (ds4 kernel_dsv41_moe_dedup_plan, TensorFold v4 routed()) a one-thread plan lists the distinct
-# experts (entry 0 = the shared expert, used by every row; then routed experts in first-use order) with
-# their (row, slot) pairs, and each threadgroup streams one tile of one distinct expert once while it
-# runs the single-row lane walk for every pair of that expert. Per pair the arithmetic is exactly the
-# R = 1 kernel's, so the output is bit-identical to moe_decode's per-row path; only weight reads drop.
-# Measured on the M5 Ultra it is SLOWER than moe_decode (64 experts, 2/4/8 rows: 0.351/0.509/0.794 vs
-# 0.330/0.433/0.668 ms per layer): repeated tiles already hit the GPU caches in moe_decode, which is
-# bound by the distinct experts' bytes, while the per-threadgroup pair loop costs parallelism. Opt-in.
-#   moe_plan -> moe_gu_dd (h [R, TOPK+1, F]) -> moe_dn_dd (y_pairs [R, TOPK+1, D], bf16-rounded)
-#   -> moe_sum (slot-order f32 sum + shared, as moe_dn).
-
-_MOE_PLAN_SRC = r"""
-    if (thread_position_in_grid.x != 0) return;
-    // entry 0: shared expert, every row
-    uexp[0] = -1; ucnt[0] = R;
-    for (int r = 0; r < R; r++) upairs[r] = r * (TOPK + 1) + TOPK;
-    int n = 1;
-    for (int i = 0; i < R * TOPK; i++) {
-      int e = (int)idx[i];
-      int u = -1;
-      for (int k = 1; k < n; k++) if (uexp[k] == e) { u = k; break; }
-      if (u < 0) { u = n++; uexp[u] = e; ucnt[u] = 0; }
-      upairs[u * R + ucnt[u]] = (i / TOPK) * (TOPK + 1) + (i % TOPK);
-      ucnt[u] = ucnt[u] + 1;
-    }
-    for (int k = n; k < R * TOPK + 1; k++) { uexp[k] = -2; ucnt[k] = 0; }
-"""
-
-_MOE_GU_DD_SRC = r"""
-    const uint lane = thread_index_in_simdgroup;
-    const uint sg = simdgroup_index_in_threadgroup;
-    const uint u = threadgroup_position_in_grid.y;
-    const int cnt = ucnt[u];
-    if (cnt == 0) return;
-    const int e = uexp[u];
-    const uint out_row = threadgroup_position_in_grid.x * 8u + sg * 4u;
-    float acc[R * 8];
-    for (int i = 0; i < R * 8; i++) acc[i] = 0;
-    if (e >= 0) {
-      const size_t row0 = (size_t)e * F + out_row;
-      const int in_w = D * dsv_bytes_per_pack<BR>() / dsv_pack_factor<BR>();
-      const device uint8_t* w[2] = {(const device uint8_t*)gw + row0 * in_w, (const device uint8_t*)uw + row0 * in_w};
-      const device T* s[2] = {gs + row0 * (D / GS), us + row0 * (D / GS)};
-      const device T* b[2] = {gb + row0 * (D / GS), ub + row0 * (D / GS)};
-      for (int p = 0; p < cnt; p++) {
-        const int code = upairs[u * R + p];
-        dsv_qmv4<T, GS, BR, FAST_D, 2>(w, s, b, x + (size_t)(code / (TOPK + 1)) * D, D, lane, acc + p * 8);
-      }
-    } else {
-      const size_t row0 = out_row;
-      const int in_w = D * dsv_bytes_per_pack<BS>() / dsv_pack_factor<BS>();
-      const device uint8_t* w[2] = {(const device uint8_t*)w1 + row0 * in_w, (const device uint8_t*)w3 + row0 * in_w};
-      const device T* s[2] = {s1 + row0 * (D / GS), s3 + row0 * (D / GS)};
-      const device T* b[2] = {b1 + row0 * (D / GS), b3 + row0 * (D / GS)};
-      for (int p = 0; p < cnt; p++) {
-        const int code = upairs[u * R + p];
-        dsv_qmv4<T, GS, BS, FAST_DS, 2>(w, s, b, x + (size_t)(code / (TOPK + 1)) * D, D, lane, acc + p * 8);
-      }
-    }
-    for (int p = 0; p < cnt; p++) {
-      const int code = upairs[u * R + p];
-      const int r = code / (TOPK + 1), slot = code % (TOPK + 1);
-      for (int row = 0; row < 4; row++) {
-        float g = simd_sum(acc[p * 8 + row]);
-        float uu = simd_sum(acc[p * 8 + 4 + row]);
-        if (lane == 0) {
-          g = float(static_cast<T>(g));
-          uu = float(static_cast<T>(uu));
-          if (HAS_LIM) {
-            uu = dsv_minimum(dsv_maximum(uu, -LIM), LIM);
-            g = dsv_minimum(g, LIM);
-          }
-          float h = dsv_silu(g) * uu;
-          if (slot < TOPK) h = h * route_w[r * TOPK + slot];
-          out[((size_t)r * (TOPK + 1) + slot) * F + out_row + row] = static_cast<T>(h);
-        }
-      }
-    }
-"""
-
-_MOE_DN_DD_SRC = r"""
-    const uint lane = thread_index_in_simdgroup;
-    const uint sg = simdgroup_index_in_threadgroup;
-    const uint u = threadgroup_position_in_grid.y;
-    const int cnt = ucnt[u];
-    if (cnt == 0) return;
-    const int e = uexp[u];
-    const uint out_row = threadgroup_position_in_grid.x * 8u + sg * 4u;
-    float acc[R * 4];
-    for (int i = 0; i < R * 4; i++) acc[i] = 0;
-    if (e >= 0) {
-      const size_t row0 = (size_t)e * D + out_row;
-      const int in_w = F * dsv_bytes_per_pack<BD>() / dsv_pack_factor<BD>();
-      const device uint8_t* w[1] = {(const device uint8_t*)dw + row0 * in_w};
-      const device T* s[1] = {ds + row0 * (F / GS)};
-      const device T* b[1] = {db + row0 * (F / GS)};
-      for (int p = 0; p < cnt; p++)
-        dsv_qmv4<T, GS, BD, FAST_F, 1>(w, s, b, h + (size_t)upairs[u * R + p] * F, F, lane, acc + p * 4);
-    } else {
-      const size_t row0 = out_row;
-      const int in_w = F * dsv_bytes_per_pack<BS>() / dsv_pack_factor<BS>();
-      const device uint8_t* w[1] = {(const device uint8_t*)w2 + row0 * in_w};
-      const device T* s[1] = {s2 + row0 * (F / GS)};
-      const device T* b[1] = {b2 + row0 * (F / GS)};
-      for (int p = 0; p < cnt; p++)
-        dsv_qmv4<T, GS, BS, FAST_FS, 1>(w, s, b, h + (size_t)upairs[u * R + p] * F, F, lane, acc + p * 4);
-    }
-    for (int p = 0; p < cnt; p++) {
-      const int code = upairs[u * R + p];
-      for (int row = 0; row < 4; row++) {
-        float v = simd_sum(acc[p * 4 + row]);
-        if (lane == 0) yp[(size_t)code * D + out_row + row] = static_cast<T>(v);
-      }
-    }
-"""
-
-_MOE_SUM_SRC = r"""
-    const uint d = thread_position_in_grid.x;
-    const uint r = thread_position_in_grid.y;
-    if (d >= (uint)D) return;
-    const device T* yr = yp + (size_t)r * (TOPK + 1) * D + d;
-    float y = 0.0f;
-    for (int s = 0; s < TOPK; s++) y = float(yr[(size_t)s * D]) + y;
-    y = y + float(yr[(size_t)TOPK * D]);
-    out[(size_t)r * D + d] = static_cast<T>(y);
-"""
-
-
-@lru_cache(maxsize=None)
-def _moe_dd_kernels(lim: float):
-    has = lim > 0
-    gu_src = _MOE_GU_DD_SRC.replace("HAS_LIM", "true" if has else "false").replace("LIM", f"{lim if has else 0.0:.9e}f")
-    plan = mx.fast.metal_kernel(name="dsv41_moe_plan", input_names=["idx"], output_names=["uexp", "ucnt", "upairs"],
-                                source=_MOE_PLAN_SRC)
-    gu = mx.fast.metal_kernel(
-        name=f"dsv41_moe_gu_dd_{'lim' if has else 'nolim'}", header=_QHEADER, source=gu_src,
-        input_names=["x", "uexp", "ucnt", "upairs", "route_w", "gw", "gs", "gb", "uw", "us", "ub",
-                     "w1", "s1", "b1", "w3", "s3", "b3"], output_names=["out"])
-    dn = mx.fast.metal_kernel(
-        name="dsv41_moe_dn_dd", header=_QHEADER, source=_MOE_DN_DD_SRC,
-        input_names=["h", "uexp", "ucnt", "upairs", "dw", "ds", "db", "w2", "s2", "b2"], output_names=["yp"])
-    sm = mx.fast.metal_kernel(name="dsv41_moe_sum", input_names=["yp"], output_names=["out"], source=_MOE_SUM_SRC)
-    return plan, gu, dn, sm
-
-
-def moe_decode_dedup(x, idx, w, experts, shared, swiglu_limit: float, group_size: int = 64):
-    """moe_decode for 2..MAX_ROWS rows reading each distinct expert (and the shared expert) once per
-    weight tile. Bit-identical to moe_decode (same per-pair arithmetic). None if not eligible."""
-    if not _moe_eligible(x, idx, experts, shared, group_size) or x.shape[0] < 2:
-        return None
-    R, D = x.shape
-    topk = idx.shape[1]
-    g, u, d = experts.gate_proj, experts.up_proj, experts.down_proj
-    F = g.weight.shape[1]
-    lim = float(swiglu_limit)
-    plan, gu, dn, sm = _moe_dd_kernels(lim)
-    U = R * topk + 1
-    uexp, ucnt, upairs = plan(inputs=[idx.astype(mx.uint32)], template=[("R", R), ("TOPK", topk)],
-                              grid=(1, 1, 1), threadgroup=(1, 1, 1), output_shapes=[(U,), (U,), (U * R,)],
-                              output_dtypes=[mx.int32] * 3)
-    tmpl = [("T", mx.bfloat16), ("D", D), ("F", F), ("TOPK", topk), ("GS", group_size), ("BS", shared.w1.bits), ("R", R)]
-    h = gu(inputs=[x, uexp, ucnt, upairs, w.astype(mx.float32), g.weight, g.scales, g.biases, u.weight, u.scales,
-                   u.biases, shared.w1.weight, shared.w1.scales, shared.w1.biases,
-                   shared.w3.weight, shared.w3.scales, shared.w3.biases],
-           template=tmpl + [("BR", g.bits), ("FAST_D", _fast(g.bits, D)), ("FAST_DS", _fast(shared.w1.bits, D))],
-           grid=(F // 8 * 64, U, 1), threadgroup=(64, 1, 1),
-           output_shapes=[(R, topk + 1, F)], output_dtypes=[mx.bfloat16])[0]
-    yp = dn(inputs=[h, uexp, ucnt, upairs, d.weight, d.scales, d.biases, shared.w2.weight, shared.w2.scales,
-                    shared.w2.biases],
-            template=tmpl + [("BD", d.bits), ("FAST_F", _fast(d.bits, F)), ("FAST_FS", _fast(shared.w1.bits, F))],
-            grid=(D // 8 * 64, U, 1), threadgroup=(64, 1, 1),
-            output_shapes=[(R, topk + 1, D)], output_dtypes=[mx.bfloat16])[0]
-    return sm(inputs=[yp], template=[("T", mx.bfloat16), ("D", D), ("TOPK", topk)],
-              grid=(D, R, 1), threadgroup=(256, 1, 1), output_shapes=[(R, D)], output_dtypes=[mx.bfloat16])[0]

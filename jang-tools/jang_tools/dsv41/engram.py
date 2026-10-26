@@ -3,8 +3,8 @@
 Port of the release's inference/engram.py. The two tables are ~98 GB each
 (384M rows x 256 FP8 bytes + 8 E8M0 scale bytes per row). Each position needs
 only (max_ngram_size - 1) * n_heads = 24 rows per Engram layer, so the tables
-stay in their original safetensors shards and are read in place with concurrent
-pread calls: the OS page cache holds whatever is hot, and none of it is wired
+stay in their original safetensors shards and are read in place by 16 concurrent
+memmap gathers: the OS page cache holds whatever is hot, and none of it is wired
 GPU memory.
 """
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import mmap
-import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,14 +170,12 @@ class NgramHasher:
 # Cold rows are random 256-byte reads spread over ~98 GB per table, so throughput is set by how
 # many reads are in flight. Measured on cold rows: a single-thread memmap gather (one page fault
 # at a time) reads ~8-11k rows/s; 16 threads each gathering a slice of the memmap read ~110k
-# rows/s (more lanes contend on the VM map and slow down); 64 pread lanes read ~130k rows/s but
-# hold the GIL per row, which slows graph building on the main thread during a pipelined
-# prefill. The memmap gather is the default; DSV41_ENGRAM_IO=pread selects pread.
-_IO_MODE = os.environ.get("DSV41_ENGRAM_IO", "take")
+# rows/s (more lanes contend on the VM map and slow down). np.take releases the GIL, so the main
+# thread keeps building the MLX graph while the lanes fault rows in; 64-lane os.pread reached
+# ~130k rows/s but held the GIL per row and slowed graph building during a pipelined prefill.
+# This 16x concurrency is what took cold 1k-token prefill from 68 to ~600 pp/s.
 _TAKE_LANES = 16
 _TAKE_POOL = ThreadPoolExecutor(_TAKE_LANES, thread_name_prefix="engram-take")
-_IO_POOL = ThreadPoolExecutor(64, thread_name_prefix="engram-io")
-_IO_TASK = 256
 # Prefetch orchestration runs on its own pool so a waiting prefetch never holds an I/O lane.
 _PREFETCH_POOL = ThreadPoolExecutor(4, thread_name_prefix="engram-prefetch")
 
@@ -206,47 +203,30 @@ class DiskEngramTable:
                 mm._mmap.madvise(mmap.MADV_RANDOM)
             except (AttributeError, OSError, ValueError):
                 pass
-        self.fd = os.open(w.path, os.O_RDONLY)
-        self.w_off, self.s_off = w.offset, s.offset
         self.dim = w.shape[1]
         self.sdim = s.shape[1]
         self.block = w.shape[1] // s.shape[1]
 
-    def _pread(self, uniq: np.ndarray):
-        """Rows and scales for sorted unique row ids, read concurrently into preallocated
-        buffers: _TAKE_LANES slices gathered from the memmap, or pread tasks of _IO_TASK rows."""
+    def _gather(self, uniq: np.ndarray):
+        """Rows and scales for sorted unique row ids: _TAKE_LANES slices gathered from the memmap
+        concurrently into preallocated buffers (one page fault in flight per lane)."""
         n = len(uniq)
         rows = np.empty((n, self.dim), np.uint8)
         scales = np.empty((n, self.sdim), np.uint8)
-        fd, dim, sdim, w_off, s_off = self.fd, self.dim, self.sdim, self.w_off, self.s_off
-        ids = uniq.tolist()
+        step = max(1, -(-n // _TAKE_LANES))
 
-        def task(lo):
-            for i in range(lo, min(n, lo + _IO_TASK)):
-                r = ids[i]
-                rows[i] = np.frombuffer(os.pread(fd, dim, w_off + r * dim), np.uint8)
-                scales[i] = np.frombuffer(os.pread(fd, sdim, s_off + r * sdim), np.uint8)
+        def take(lo):
+            u = uniq[lo : lo + step]
+            np.take(self.rows, u, axis=0, out=rows[lo : lo + step])
+            np.take(self.scales, u, axis=0, out=scales[lo : lo + step])
 
-        if _IO_MODE == "take":
-            step = max(1, -(-n // _TAKE_LANES))
-
-            def take(lo):
-                u = uniq[lo : lo + step]
-                np.take(self.rows, u, axis=0, out=rows[lo : lo + step])
-                np.take(self.scales, u, axis=0, out=scales[lo : lo + step])
-
-            list(_TAKE_POOL.map(take, range(0, n, step)))
-            return rows, scales
-        if n <= _IO_TASK:
-            task(0)
-        else:
-            list(_IO_POOL.map(task, range(0, n, _IO_TASK)))
+        list(_TAKE_POOL.map(take, range(0, n, step)))
         return rows, scales
 
     def read(self, ids: np.ndarray):
         """Host-side half of lookup (thread-safe, no MLX calls): (inverse map, rows, scales)."""
         uniq, inv = np.unique(ids.reshape(-1), return_inverse=True)
-        rr, ss = self._pread(uniq)
+        rr, ss = self._gather(uniq)
         return inv, rr, ss
 
     def prefetch(self, ids: np.ndarray, after=None):
