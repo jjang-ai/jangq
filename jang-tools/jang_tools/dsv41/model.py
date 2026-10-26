@@ -770,7 +770,10 @@ class Gate(nn.Module):
 def jangt_fused_moe(xf, idx, w, experts, shared, limit):
     """vMLX's fused JANGT routed + mxfp8 shared-expert decode (4 dispatches instead of ~14, every row bit-identical to
     the stock path run alone; self-checked on first use), or None (not importable / not eligible / disabled)."""
-    if not FUSED_MOE or xf.shape[0] > GATHER_MAX_QUERIES:
+    # 1-row decode only. Measured in-process A/B (DeepSeek-V4.1 JANGHT, M5 Max, 4 interleaved probes): AR decode
+    # 29.5 -> 30.2 tok/s with it, but DSpark (5-row draft / up to 6-row verify) 45.9 -> 38.8: its shared slot reads the
+    # mxfp8 shared weights once per row, where the stock multi-row path (FP8_ROWS) reads them once for all rows.
+    if not FUSED_MOE or xf.shape[0] != 1:
         return None
     try:
         from vmlx_engine.jangt.fused_moe import jt_moe_decode
