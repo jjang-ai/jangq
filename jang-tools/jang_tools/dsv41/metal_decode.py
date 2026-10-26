@@ -68,7 +68,9 @@ def router_logits(x: mx.array, weight: mx.array):
         return None
     R, K = x.shape
     E = weight.shape[0]
-    if (R > MAX_ROWS or K != weight.shape[1] or K % 128 or E % 16
+    # MLX takes this GEMV tiling only while K < 16 * E (a split-K variant otherwise) and E < 4096
+    # (bm = 8 above); measured bit-equal for E 128..512 in that range (tests/dsv41_decode_fusion_test.py).
+    if (R > MAX_ROWS or K != weight.shape[1] or K % 128 or E % 16 or K >= 16 * E or E > 2048
             or x.dtype != mx.bfloat16 or weight.dtype != mx.bfloat16):
         return None
     return _router_kernel()(inputs=[x, weight], template=[("T", x.dtype), ("K", K), ("N", E)],

@@ -59,7 +59,16 @@ def test_layer_async_is_bit_exact(tiny, monkeypatch):
     assert np.array_equal(va.view(np.uint32), vb.view(np.uint32))
 
 
-def test_router_gemv_bit_exact_at_one_row():
+@pytest.mark.parametrize("E,K", [(384, 5120), (128, 1024), (512, 5120)])
+def test_router_gemv_bit_exact_at_one_row(E, K):
+    from jang_tools.dsv41.metal_decode import router_logits
+    w = (mx.random.normal((E, K), key=mx.random.key(1)) / 70).astype(mx.bfloat16)
+    for t in range(24):
+        x = (mx.random.normal((1, K), key=mx.random.key(t)) * (1 + t % 5)).astype(mx.bfloat16)
+        assert np.array_equal(_bits(router_logits(x, w)), _bits(x.astype(mx.float32) @ w.astype(mx.float32).T))
+
+
+def test_router_gemv_rows_equal_their_one_row_decode():
     from jang_tools.dsv41.metal_decode import router_logits
     w = (mx.random.normal((384, 5120), key=mx.random.key(1)) / 70).astype(mx.bfloat16)
     for R in (1, 2, 5, 8):
@@ -70,6 +79,8 @@ def test_router_gemv_bit_exact_at_one_row():
         stock = x.astype(mx.float32) @ w.astype(mx.float32).T
         assert float(mx.abs(out - stock).max()) < 1e-5
     assert router_logits(mx.zeros((9, 5120), mx.bfloat16), w) is None
+    # outside MLX's matching GEMV tiling (split-K when K >= 16 E): stock path
+    assert router_logits(mx.zeros((1, 5120), mx.bfloat16), w[:256]) is None
 
 
 def test_router_gemv_decode_is_bit_exact(tiny, monkeypatch):

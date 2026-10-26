@@ -35,7 +35,7 @@ def _base(**kw):
     return t
 
 
-def tiny_args(n_layers=6, n_experts=16, window=16):
+def tiny_args(n_layers=6, n_experts=128, window=16):
     ratios = ([0, 2, 2, 1, 1, 1] * 4)[:n_layers]
     return M.Args.from_config(_base(
         hidden_size=1024, moe_intermediate_size=768, num_hidden_layers=n_layers, num_attention_heads=4,
