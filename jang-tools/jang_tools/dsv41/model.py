@@ -65,6 +65,10 @@ HC_BOUNDARY = _env_on("VMLX_DSV41_HC_BOUNDARY")
 # compiled core. Reordered sums (checked once per process against sparse_attention).
 # VMLX_DSV41_ATTN_SPLIT=0 keeps the gather + core.
 ATTN_SPLIT = _env_on("VMLX_DSV41_ATTN_SPLIT")
+# Decode / verify rows' routing after the logits in one dispatch (metal_decode.route_decode: sqrt(softplus) + bias +
+# top-k + normalize + scale, a thread an expert) instead of ~8 ops. Same experts; weights summed in pick
+# order (checked once per process against the ops). VMLX_DSV41_ROUTE_TOPK=0 keeps the ops.
+ROUTE_TOPK = _env_on("VMLX_DSV41_ROUTE_TOPK")
 
 
 @dataclass
@@ -594,6 +598,39 @@ class Indexer(nn.Module):
 
 
 _ATTN_SPLIT_OK: list = []
+_ROUTE_TOPK_OK: dict = {}
+
+
+def _route_topk_ok(E: int, topk: int, route_scale: float, norm: bool) -> bool:
+    """Once per routing shape: route_decode picks the same experts as the ops path on random logits (per-row and
+    shared bias) and its weights agree to f32 rounding."""
+    key = (E, topk, route_scale, norm)
+    if key not in _ROUTE_TOPK_OK:
+        ok = False
+        try:
+            from jang_tools.dsv41.metal_decode import route_decode
+            logits = mx.random.normal((4, E), key=mx.random.key(21)) * 3
+            for bias in (mx.random.normal((E,), key=mx.random.key(22)) * 0.2,
+                         mx.random.normal((4, E), key=mx.random.key(23)) * 0.2):
+                got = route_decode(logits, bias, topk, route_scale, norm)
+                scores = mx.sqrt(nn.softplus(logits))
+                idx = mx.argpartition(-(scores + bias), kth=topk - 1, axis=-1)[:, :topk]
+                w = mx.take_along_axis(scores, idx, axis=-1)
+                if norm and topk > 1:
+                    w = w / (mx.sum(w, -1, keepdims=True) + 1e-20)
+                w = w * route_scale
+                if got is None:
+                    break
+                ga, gb = mx.argsort(got[0], -1), mx.argsort(idx.astype(mx.int32), -1)
+                same = mx.array_equal(mx.take_along_axis(got[0], ga, -1), mx.take_along_axis(idx.astype(mx.int32), gb, -1))
+                close = mx.allclose(mx.take_along_axis(got[1], ga, -1), mx.take_along_axis(w, gb, -1), rtol=1e-5, atol=1e-7)
+                ok = bool(same.item() and close.item())
+                if not ok:
+                    break
+        except (RuntimeError, ValueError, TypeError):  # kernel build / launch failed: ops
+            ok = False
+        _ROUTE_TOPK_OK[key] = ok
+    return _ROUTE_TOPK_OK[key]
 
 
 def _attn_split_ok() -> bool:
@@ -1104,14 +1141,22 @@ class Block(nn.Module):
             logits = router_logits(xf, g.weight)
         if logits is None:
             logits = xf.astype(mx.float32) @ g.weight.astype(mx.float32).T
-        scores = mx.sqrt(nn.softplus(logits))
         # VL routing: image tokens use the separately-trained bias_vl (release Gate.forward)
         bias = g.bias if image_mask is None else mx.where(image_mask.reshape(-1, 1), g.bias_vl, g.bias)
-        idx = mx.argpartition(-(scores + bias), kth=self.topk - 1, axis=-1)[:, : self.topk]
-        w = mx.take_along_axis(scores, idx, axis=-1)
-        if self.norm_topk and self.topk > 1:
-            w = w / (mx.sum(w, -1, keepdims=True) + 1e-20)
-        w = w * self.route_scale
+        routed = None
+        if ROUTE_TOPK and xf.shape[0] <= GATHER_MAX_QUERIES and self.capture is None \
+                and _route_topk_ok(logits.shape[-1], self.topk, float(self.route_scale), bool(self.norm_topk)):
+            from jang_tools.dsv41.metal_decode import route_decode
+            routed = route_decode(logits, bias, self.topk, float(self.route_scale), bool(self.norm_topk))
+        if routed is not None:
+            idx, w = routed
+        else:
+            scores = mx.sqrt(nn.softplus(logits))
+            idx = mx.argpartition(-(scores + bias), kth=self.topk - 1, axis=-1)[:, : self.topk]
+            w = mx.take_along_axis(scores, idx, axis=-1)
+            if self.norm_topk and self.topk > 1:
+                w = w / (mx.sum(w, -1, keepdims=True) + 1e-20)
+            w = w * self.route_scale
 
         sw = self.ffn.experts
         if getattr(sw, "is_jangt", False):

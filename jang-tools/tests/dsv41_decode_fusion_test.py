@@ -312,6 +312,51 @@ def test_hc_boundary_decode_close_to_stage(monkeypatch):
     _assert_close_forced(a, b)
 
 
+# ----------------------------------------------------------------------------- router top-k kernel
+
+@pytest.mark.parametrize("E,K,scale", [(384, 6, 1.5), (128, 6, 1.5), (16, 6, 2.5)])
+def test_route_decode_matches_ops(E, K, scale):
+    """route_decode vs sqrt(softplus) + bias + argpartition + take + normalize + scale: same experts per row (1-8 rows,
+    shared and per-row bias), weights within f32 rounding of the ops (compared in expert-id order)."""
+    from jang_tools.dsv41 import metal_decode as MD
+    for R in (1, 3, 8):
+        logits = mx.random.normal((R, E), key=mx.random.key(R)) * 3
+        for bias in (mx.random.normal((E,), key=mx.random.key(40 + R)) * 0.2,
+                     mx.random.normal((R, E), key=mx.random.key(80 + R)) * 0.2):
+            idx, w = MD.route_decode(logits, bias, K, scale, True)
+            scores = mx.sqrt(M.nn.softplus(logits))
+            ri = mx.argpartition(-(scores + bias), kth=K - 1, axis=-1)[:, :K].astype(mx.int32)
+            rw = mx.take_along_axis(scores, ri, -1)
+            rw = rw / (mx.sum(rw, -1, keepdims=True) + 1e-20) * scale
+            a, b = mx.argsort(idx, -1), mx.argsort(ri, -1)
+            assert np.array_equal(np.array(mx.take_along_axis(idx, a, -1)), np.array(mx.take_along_axis(ri, b, -1)))
+            assert mx.allclose(mx.take_along_axis(w, a, -1), mx.take_along_axis(rw, b, -1), rtol=1e-5, atol=1e-7).item()
+
+
+def test_route_topk_decode_close(tiny, monkeypatch):
+    """Whole decode with the routing kernel vs the ops: same greedy tokens, logits within the slot-order rounding;
+    the kernel ran."""
+    from jang_tools.dsv41 import metal_decode as MD
+    calls = []
+    orig = MD.route_decode
+
+    def counted(*a, **kw):
+        out = orig(*a, **kw)
+        calls.append(out is not None)
+        return out
+
+    monkeypatch.setattr(MD, "route_decode", counted)
+    monkeypatch.setattr(M, "ROUTE_TOPK", False)
+    ta, la = _run_greedy(tiny)
+    assert not calls
+    monkeypatch.setattr(M, "ROUTE_TOPK", True)
+    tb, lb = _run_greedy(tiny)
+    assert calls and all(calls)
+    assert ta == tb
+    cos = (la * lb).sum(-1) / (np.linalg.norm(la, axis=-1) * np.linalg.norm(lb, axis=-1))
+    assert cos.min() > 0.9999, cos.min()
+
+
 # ----------------------------------------------------------------------------- split sparse attention
 
 @pytest.mark.parametrize("S", [1, 3])
