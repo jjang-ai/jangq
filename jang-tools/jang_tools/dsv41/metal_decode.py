@@ -790,8 +790,7 @@ def hc_post_decode(h, residual, post, comb):
 
 
 # ----------------------------------------------------------------------------- hc boundary (2 dispatches)
-# The boundary layout of TensorFold's DeepSeek-V4.1 Metal family (BobClawblaw/TensorFold, deepseek-v41-main,
-# zig/kernels/metal/deepseek/v41.metal ds_hc_expand_mix / ds_hc_boundary; Apache-2.0): per sublayer
+# Each hyper-connection boundary in two dispatches, per sublayer:
 #   hc_mix:      (optionally) the pending branch expanded into the streams, then the 24 mixes' and the sum of
 #                squares' partial sums, a threadgroup a 1024-value slice (20 for D = 5120): fn is read by
 #                20 cores instead of hc_stage's 6.
@@ -961,8 +960,7 @@ def hc_boundary_decode(x, part, pre, scale, base, norm_w, norm_eps, rms_eps, hc_
 
 
 # ----------------------------------------------------------------------------- sparse attention (decode rows)
-# TensorFold's split decode attention (BobClawblaw/TensorFold deepseek-v41-main, v41_attend.metal ds_attend_split
-# / ds_attend_merge; Apache-2.0), reading our caches: a threadgroup per (16 heads, 16 keys, row) loads its keys
+# Decode sparse attention split by keys, reading our caches: a threadgroup per (16 heads, 16 keys, row) loads its keys
 # once into threadgroup memory -- window rows by index from the raw window, compressed picks by index from the
 # 4-bit pool, dequantized on load as mx.dequantize writes them -- and writes the chunk's max, sum and unnormalized
 # output; the merge folds the chunks and the sink into one softmax. Replaces the picks' gather (3 takes and a

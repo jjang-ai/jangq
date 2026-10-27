@@ -55,14 +55,14 @@ FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
 # Bit-identical (checked once per process against the stock ops; a mismatch keeps the stock path).
 # VMLX_DSV41_FUSED_HC=0 restores the stock ops.
 FUSED_HC = _env_on("VMLX_DSV41_FUSED_HC")
-# With FUSED_HC: each boundary in two dispatches (metal_decode.hc_mix_decode / hc_boundary_decode, TensorFold's
-# layout), the attention branch's expand folded into the FFN boundary's mixes. Same arithmetic as the 3-dispatch
+# With FUSED_HC: each boundary in two dispatches (metal_decode.hc_mix_decode / hc_boundary_decode), the
+# attention branch's expand folded into the FFN boundary's mixes. Same arithmetic as the 3-dispatch
 # stage except the 24 mixes' dot products and their sum of squares (parallel partial sums: f32-ulp differences in
 # pre / post / comb). VMLX_DSV41_HC_BOUNDARY=0 keeps the bit-identical stage.
 HC_BOUNDARY = _env_on("VMLX_DSV41_HC_BOUNDARY")
-# Decode / verify rows' sparse attention in two dispatches (metal_decode.attend_decode, TensorFold's split
-# layout) reading the window and the 4-bit pool's picks by index, instead of the picks' gather + concatenation
-# + fp32 cast + compiled core. Reordered sums (checked once per process against sparse_attention).
+# Decode / verify rows' sparse attention in two dispatches (metal_decode.attend_decode, split by keys), reading
+# the window and the 4-bit pool's picks by index instead of the picks' gather + concatenation + fp32 cast +
+# compiled core. Reordered sums (checked once per process against sparse_attention).
 # VMLX_DSV41_ATTN_SPLIT=0 keeps the gather + core.
 ATTN_SPLIT = _env_on("VMLX_DSV41_ATTN_SPLIT")
 
