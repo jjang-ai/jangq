@@ -38,6 +38,15 @@ cause back. Details are in the linked sections.
 | decode/verify attention dequantized the whole 4-bit pool every step (~0.5–1 GB per layer per token at 1M) | gather only the selected rows from the 4-bit pool (`append_compressed_rows(gather=True)`) | bit-identical; flat in context |
 | a decode step was ~150 dispatches per layer, built for all 40 layers before the GPU started | per-layer `mx.async_eval`, bf16 router GEMV, 2-dispatch MoE, fused hyper-connection stage (`metal_decode.py`, M5 in DECODE_DSPARK_METHODS) | AR 29.0 → 39.2 tok/s (2k), 26.0 → 34.3 (100k); DSpark code 65.7 → 90.2 |
 
+**Prefill and decode touch different parameter counts.** A decode token reads 6 of 384 routed experts per
+layer plus the shared expert (~10B parameters, a few GB at 2-3 bits): decode is bound by bytes and dispatches per
+token, hence the low-bit experts, the fused decode kernels, and DSpark, whose 6-row verify reads attention and
+shared weights once for 6 tokens at the cost of up to 36 experts (the governor speculates only while that is
+faster). A 2048-token prefill chunk routes ~12k token-expert pairs, so every expert is read once per chunk (~0.14 s)
+and shared by ~32 tokens: prefill amortizes the whole expert set per chunk, hence one forward per chunk and
+expert-sorted grouped matmuls; a larger chunk halves that per-token cost but it is ~10 % of a chunk's time, and with
+the draft resident the chunk is 1024 for memory.
+
 **Memory**: compressed-KV and index pools are stored 4-bit (`QuantGrowBuffer`, the reference's FP4 footprint) and
 the window keeps 128 rows: 905 MiB resident at 1M tokens (vs ~3.3 KB/token before).
 
@@ -279,15 +288,31 @@ to 1-row decode, weight fetched once) would flatten the dense part and make veri
 decode, but it is disabled on the installed MLX ("qmv traversal changed") and needs its kernel
 template regenerated for that MLX.
 
-## Known open items
+### Long-context retrieval (2026-10-27)
 
-- **Long-context retrieval is correct to 300k tokens and wrong from ~461k.** Needle probe: one "Doc line N: value V"
-  line per ~16 tokens with random 3-digit values (a formula value lets the model derive the answer instead of finding
-  it), question about the line at 54% depth, thinking off. Correct at 45k / 92k / 199k / 300k (618, 905, 508, 458);
-  wrong at 461k (833 vs 640) and 924k (292 vs 150). Identical answers with prompt-suffix pruning on and off (461k:
-  833 both) and with the fp32 or matrix-unit index kernel, and vmlx-swift misses too, so it is not pruning or the
-  index precision. Not yet separated: the 2-bit routed experts vs a path shared by both runtimes at high positions
-  (YaRN-scaled RoPE, compressed-position RoPE, indexer). Needs a source-model reference above 400k.
+Greedy, thinking off, question about a line at ~54 % depth, JANG_2K, `jang_tools` runtime (same answers through
+`vmlx serve`; vmlx-swift misses the same hard variant):
+
+| prompt | 300k | 461k | 844k–925k |
+|---|---|---|---|
+| one distinctive sentence in natural text (package sources) | | correct, p 0.994 | correct at 844k, p 0.986 |
+| `Doc line N: value V`, newline-joined, random 3-digit values | | correct, p 0.90 | correct at 925k, p 0.99 |
+| hard: `Doc line r1m-N: value V tag K.`, space-joined (two numbers per line) | correct, p 0.99 | wrong (402 / 833, p ≤ 0.06) | wrong |
+
+The hard miss is the same with cold, RAM-cached and SSD-cached prefixes, 512- or 2048-token chunks, bf16
+instead of 4-bit pools, prompt-suffix pruning on or off, fp32 index scores, and the release's in-place FP8/FP4
+activation rounding (index q/k FP4, window KV and `o` FP8, compressed latent FP4/e4m3). It is not the
+quantization either: attention, indexer and shared experts are 8-bit, and swapping the release's own MXFP4 routed
+experts into layers 0-19 (everything the layer-20 candidate selector depends on) ranks the target lower, not higher
+(candidate block 21,114 → 34,776 of 57,678; 2,048 kept). For the answer token at 300k the late index layers find
+the target (layer-20 candidate block rank 178; layers 28 / 32 / 36 rank it 39 / 32 / 2) while layers 2 / 8 / 14 do
+not (3,388 / 21,317 / 13,485); at 461k it is outside every top-512 and outside the layer-20 candidates. These
+final-token ranks show where selection is tight but do not decide the answer alone: on the easy prompts the target
+can be outside them and still be answered, because the question tokens inside the 128-token window did the lookup
+during prefill. Reading: a limit of the model's sparse attention on ~29k near-identical lines, not
+of the runtime, cache or quantization. A 1M context remains usable for retrieval of distinctive content.
+
+## Known open items
 
 - Prose decode ≈ AR (acceptance ~0.36; the governor keeps it at AR, not above).
 - Regenerate `row_exact_qmv` for the installed MLX and use it for DSpark verify rows (speed +
