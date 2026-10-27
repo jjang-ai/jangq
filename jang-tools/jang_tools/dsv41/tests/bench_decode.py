@@ -90,12 +90,12 @@ FLAG_SETTERS.update(router_gemv=_flag("ROUTER_GEMV"), fused_moe=_flag("FUSED_MOE
                     route_topk=_flag("ROUTE_TOPK"))
 
 
-def _tf_layout(on):
-    for name in ("HC_BOUNDARY", "ATTN_SPLIT"):
+def _decode_kernels(on):
+    for name in ("HC_BOUNDARY", "ATTN_SPLIT", "ROUTE_TOPK"):
         setattr(M, name, on)
 
 
-FLAG_SETTERS["tf_layout"] = _tf_layout
+FLAG_SETTERS["decode_kernels"] = _decode_kernels
 
 
 def _chain(a, op):
