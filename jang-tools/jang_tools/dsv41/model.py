@@ -203,9 +203,10 @@ FP8_ROWS = _fp8_rows_kernel()
 
 
 class MxLinear(nn.QuantizedLinear):
-    """mxfp8 Linear. 2..8 rows (DSpark verify / draft) go through FP8_ROWS: MLX switches mxfp8 kernels above a few rows
-    (DeepSeek-V4.1, 40 layers, 6 rows: wo_b 3.05 -> 7.04 ms, wq_b 2.48 -> 4.33 ms vs 1 row) although the rows need no
-    extra weight bytes; the multi-row kernel also makes each verify row equal its 1-row decode on these projections."""
+    """mxfp8 Linear. 2..8 rows (DSpark verify / draft) are offered to FP8_ROWS, which takes 3..7 rows: MLX switches
+    mxfp8 kernels above a few rows (DeepSeek-V4.1, 40 layers, 6 rows: wo_b 3.05 -> 7.04 ms, wq_b 2.48 -> 4.33 ms vs 1
+    row) although the rows need no extra weight bytes. Its rows equal their 1-row decode on these projections; 2- and
+    8-row calls keep MLX's kernels (as fast or faster there) and are not row-equal."""
 
     def __call__(self, x):
         rows = x.size // x.shape[-1]

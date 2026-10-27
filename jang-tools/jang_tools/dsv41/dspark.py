@@ -32,7 +32,6 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -51,7 +50,6 @@ from jang_tools.dsv41.model import (
     _hc_split_metal,
     grouped_qmm,
     jangt_experts,
-    jangt_fused_moe,
     qlinear,
     sparse_attention,
     yarn_inv_freq,
@@ -206,10 +204,7 @@ class DSparkMoE(nn.Module):
             w = w / (mx.sum(w, -1, keepdims=True) + 1e-20)
         w = w * self.route_scale
         lim = self.lim
-        if hasattr(self, "experts"):  # JANGT
-            y = jangt_fused_moe(xf, idx, w, self.experts, SimpleNamespace(w1=self.sw1, w3=self.sw3, w2=self.sw2), lim)
-            if y is not None:
-                return y.reshape(B, S, D)
+        if hasattr(self, "experts"):  # JANGT (the draft runs bs > 1 rows: the 1-row fused decode never applies)
             y = self.experts.routed(xf, idx, w).astype(mx.float32)
         else:
             y = self._routed_affine(xf, idx, w)
@@ -814,9 +809,9 @@ class DSparkRunner:
         while n_emitted < max_new:
             n_steps += 1
             G = None
-            if sampler is not None:                    # one fresh noise block for positions c+1 .. c+2+bs
+            if sampler is not None:                    # noise for c+1 now; c+2 .. c+2+bs only if the step speculates
                 vocab = vocab or int(pending.shape[-1])
-                G = sampler.noise(c + 1, 2 + int(self.ds.bs), vocab)
+                G = sampler.noise(c + 1, 1, vocab)     # (one key per position: the rows equal one 2+bs draw)
                 p0 = int(sampler.pick(pending.reshape(1, -1), G[0:1])[0])
             else:
                 p0 = self._greedy(pending)             # backbone truth for c+1 (syncs the previous step)
@@ -839,6 +834,7 @@ class DSparkRunner:
                 continue
             n_spec += 1
             if sampler is not None:                    # coupled draft: the target's noise at c+2 .. c+bs+1
+                G = mx.concatenate([G, sampler.noise(c + 2, 1 + int(self.ds.bs), vocab)], axis=0)
                 draft_ids, _ = self.ds.draft(p0, c, noise=G[1:1 + int(self.ds.bs)], temperature=sampler.temperature)
             else:
                 draft_ids, _ = self.ds.draft(p0, c)  # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
