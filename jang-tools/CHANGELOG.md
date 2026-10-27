@@ -1,3 +1,8 @@
+## 2.5.52 — 2026-10-27
+
+- Include the DeepSeek-V4.1 DSpark governor correction: compare averaged elapsed time with averaged emitted tokens, so a missed draft does not disproportionately favor ordinary decoding. Applies to compatible JANG affine and JANGHT runtimes.
+- Keep existing sampling, adaptive re-entry and cache contracts. Performance depends on bundle and workload.
+
 ## 2.5.51 — 2026-10-27
 
 - Include the DeepSeek-V4.1-Flash-1017 runtime for JANG affine and JANGHT bundles, with native Engram, image inputs, DSML tools, numeric reasoning effort, and adaptive DSpark decoding.
