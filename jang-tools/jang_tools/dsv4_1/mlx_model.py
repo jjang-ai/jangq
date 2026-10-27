@@ -406,7 +406,8 @@ class Model(nn.Module):
         (or every row with ``all_logits``). The engine's per-layer cache list is _SeqState.caches,
         which duck-types the runtime's Session, so DSV41.forward drives it directly. VL inputs
         (``images`` = jang_tools.dsv41.vision.ImageInput list, ``token_types``) splice vision features
-        into the start_pos-0 prefill chunk; the runtime handles bias_vl routing + engram masking.
+        into the prefill chunk that holds each image span (``start`` relative to the chunk, an image never
+        split across chunks); the runtime handles bias_vl routing + engram masking.
         ``engram_lookahead`` (list of token ids) is the next prefill chunk: its Engram rows are read
         from SSD while this chunk computes. ``prompt_end`` (absolute position where the prompt ends) lets
         the late layers skip prompt rows the prompt's last token no longer reads (DSV41.forward)."""
@@ -437,7 +438,9 @@ def load_deepseek_v41(model_path, *, engram_dir=None, skip_params_eval: bool = T
     """Load a DeepSeek-V4.1-Flash JANG bundle through the validated runtime and wrap it for the engine.
 
     Returns ``(model, tokenizer)``. The tokenizer is the bundle's ``tokenizers.Tokenizer``; the caller
-    (engine loader) wraps it as needed."""
+    (engine loader) wraps it as needed. ``skip_params_eval`` is accepted for the engine loaders' common
+    signature (vMLX ``load_jangtq_dsv41_model`` passes it) and has no effect: ``DSV41`` evaluates the
+    weights shard by shard while loading."""
     from jang_tools.dsv41.model import DSV41
 
     rt = DSV41(model_path, engram_dir=engram_dir, wired=wired)

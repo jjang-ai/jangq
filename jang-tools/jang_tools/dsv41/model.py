@@ -1,16 +1,14 @@
-"""DeepSeek-V4.1-Flash text model in MLX, for JANG affine bundles.
+"""DeepSeek-V4.1-Flash backbone in MLX, for JANG bundles (affine, or JANGHT mxfp8 / JANGT).
 
-A batch-1 port of the release's inference/model.py (autoregressive path only):
-hyper-connections (hc_mult=4, Sinkhorn mixing), latent attention over a
-128-token sliding window plus compressed KV picked by the two-level indexer,
-cross-layer KV / index / candidate sharing, Engram n-gram lookups at layers 1
-and 14, sqrtsoftplus-routed MoE with one shared expert.
+A batch-1 port of the release's inference/model.py: hyper-connections (hc_mult=4, Sinkhorn mixing),
+latent attention over a 128-token sliding window plus compressed KV picked by the two-level indexer,
+cross-layer KV / index / candidate sharing, Engram n-gram lookups at layers 1 and 14, sqrtsoftplus-routed
+MoE with one shared expert. The vision tower is in vision.py and is spliced in here
+(Model.merge_image_embeddings); the DSpark draft head and speculative loop are in dspark.py.
 
-Not ported: the vision tower (bundle tensors are present but unused here),
-DSpark speculative heads (not in the bundle), and the release's FP8/FP4
-activation round-trips (activations stay bf16/fp32 here). Prefill must be a
-single call starting at position 0, then one token per call -- the same
-contract as the release's generate.py.
+Not ported: the release's FP8/FP4 activation round-trips (activations stay bf16/fp32 here). A session
+takes any chunking: a prompt in one or more forwards from the session's position, then one token (or a
+DSpark verify block) per forward.
 """
 
 from __future__ import annotations
@@ -122,7 +120,7 @@ def yarn_inv_freq(dim, base, original_seq_len, factor, beta_fast, beta_slow) -> 
 # batch -- run through mx.fast.rope: one kernel instead of the angle / cos / sin / rotate graph (~8 dispatches per
 # call, 3-4 calls per layer per forward). Same fp32 angles (MLX scales the integer position, then divides by the
 # wavelength) and the same bf16 store. VMLX_DSV41_FAST_ROPE=0 keeps the compiled cos/sin path.
-FAST_ROPE = os.environ.get("VMLX_DSV41_FAST_ROPE", "1").strip().lower() not in {"0", "false", "off", "no"}
+FAST_ROPE = _env_on("VMLX_DSV41_FAST_ROPE")
 
 
 class Rope:
@@ -315,15 +313,6 @@ class QuantGrowBuffer:
     def load(self, s):
         self.wq, self.scales, self.biases, self.n, self.D = s
 
-    def load_dense(self, x):
-        """Replace the buffer with the 4-bit quantization of a dense [1,T,D] bf16 array (used to
-        restore from a bf16 prefix-cache state without changing the stored serialization format)."""
-        self.wq = self.scales = self.biases = None
-        self.n = 0
-        self.D = None
-        if x is not None and x.shape[1] > 0:
-            self.append(x)
-
 
 class LayerCache:
     def __init__(self):
@@ -364,7 +353,7 @@ GATHER_MAX_QUERIES = 8
 # Prompt-suffix pruning (Model.__call__ prompt_end): the layers after the last KV-source layer own no
 # cache but their 128-token windows, so each one only needs the prompt rows the last prompt token can
 # still reach through the windows above it. VMLX_DSV41_SUFFIX_PRUNE=0 runs every row through every layer.
-SUFFIX_PRUNE = os.environ.get("VMLX_DSV41_SUFFIX_PRUNE", "1").strip().lower() not in {"0", "false", "off", "no"}
+SUFFIX_PRUNE = _env_on("VMLX_DSV41_SUFFIX_PRUNE")
 
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
@@ -401,13 +390,13 @@ TOPK_BLOCK_MIN = 65536
 TOPK_BLOCK = 64
 # Fused index scores take the bf16 q / index keys / weights as is (the reference scores in bf16) on the
 # M5 matrix units when vMLX supports it; VMLX_DSV41_INDEX_BF16=0 keeps fp32 operands.
-FUSED_INDEX_BF16 = os.environ.get("VMLX_DSV41_INDEX_BF16", "1").strip().lower() not in {"0", "false", "off", "no"}
+FUSED_INDEX_BF16 = _env_on("VMLX_DSV41_INDEX_BF16")
 # Long-context prefill splits each index layer into query chunks of ~2**28 scores (2 chunks at 512k keys, 4 at 1M),
 # each with [C, T] score / mask / top-k temporaries in one lazy graph. Evaluating each chunk's indices before the
 # next chunk (same arithmetic) measured, 1M prefill at 1024-token chunks, interleaved per chunk on M5 Max: 786k-1M
 # transient median 8.4 -> 6.2 GiB, max 11.6 -> 8.3 GiB, 4-6 % faster from 262k on; unchanged below.
 # VMLX_DSV41_INDEX_CHUNK_EVAL=0 keeps the single graph.
-INDEX_CHUNK_EVAL = os.environ.get("VMLX_DSV41_INDEX_CHUNK_EVAL", "1").strip().lower() not in {"0", "false", "off", "no"}
+INDEX_CHUNK_EVAL = _env_on("VMLX_DSV41_INDEX_CHUNK_EVAL")
 
 
 def topk_indices(scores, k):
@@ -508,7 +497,7 @@ def _fused_index_scores():
     """vMLX's fused DSA index-score Metal kernel (`dsa_pool_index_scores`), or None when vMLX is not
     importable or VMLX_DSV41_FUSED_INDEX=0. The kernel returns None for shapes it does not admit, and
     the caller then takes the stock path."""
-    if os.environ.get("VMLX_DSV41_FUSED_INDEX", "1").strip().lower() in {"0", "false", "off", "no"}:
+    if not _env_on("VMLX_DSV41_FUSED_INDEX"):
         return None
     try:
         from vmlx_engine.metal.dsa_index_scores import dsa_pool_index_scores
@@ -1200,8 +1189,10 @@ class Model(nn.Module):
                  images=None, image_mask: mx.array | None = None, return_hidden: bool = False,
                  prompt_end: int | None = None):
         """tokens [1,N]: the segments' tokens back to back. engram_rows: {layer_id: [1,N,cols,head_dim]}.
-        images: list of ImageInput to splice into the prefill (start_pos 0). image_mask [1,N] bool,
-        True inside image spans. Returns fp32 logits at each segment's last token (or every token).
+        images: ImageInput list to splice into this forward; each ``start`` is relative to this forward's
+        tokens and its whole span lies inside them (the engine passes each image with the prefill chunk
+        that holds its span, chunk-relative, and never splits an image). image_mask [1,N] bool, True
+        inside image spans. Returns fp32 logits at each segment's last token (or every token).
         With return_hidden, also returns main_hidden [1,N,dim*len(target_layer_ids)] (bf16): the
         mean-over-hc hidden at the INPUT of each dSpark target layer, concatenated -- the MTP head's
         input (release Transformer.forward collects h.mean(dim=2) at target_layer_ids).
@@ -1488,7 +1479,8 @@ class DSV41:
                 engram_lookahead: list[int] | None = None, capture_verify: bool = False,
                 prompt_end: int | None = None) -> mx.array:
         """Append tokens to a session (prefill, continuation or one decode step).
-        images/token_types carry VL inputs (image spans must be in a single start_pos-0 prefill).
+        images/token_types carry VL inputs for these ids: each image's span lies inside them, ``start``
+        relative to ids[0] (any chunk of a chunked prefill; see Model.__call__).
         engram_lookahead: the next chunk of a chunked prefill; its Engram rows are read while this
         forward computes (text tokens only).
         capture_verify: keep references to this forward's per-token cache inputs so commit_prefix
