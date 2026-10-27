@@ -402,6 +402,12 @@ TOPK_BLOCK = 64
 # Fused index scores take the bf16 q / index keys / weights as is (the reference scores in bf16) on the
 # M5 matrix units when vMLX supports it; VMLX_DSV41_INDEX_BF16=0 keeps fp32 operands.
 FUSED_INDEX_BF16 = os.environ.get("VMLX_DSV41_INDEX_BF16", "1").strip().lower() not in {"0", "false", "off", "no"}
+# Long-context prefill splits each index layer into query chunks of ~2**28 scores (2 chunks at 512k keys, 4 at 1M),
+# each with [C, T] score / mask / top-k temporaries in one lazy graph. Evaluating each chunk's indices before the
+# next chunk (same arithmetic) measured, 1M prefill at 1024-token chunks, interleaved per chunk on M5 Max: 786k-1M
+# transient median 8.4 -> 6.2 GiB, max 11.6 -> 8.3 GiB, 4-6 % faster from 262k on; unchanged below.
+# VMLX_DSV41_INDEX_CHUNK_EVAL=0 keeps the single graph.
+INDEX_CHUNK_EVAL = os.environ.get("VMLX_DSV41_INDEX_CHUNK_EVAL", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 
 def topk_indices(scores, k):
@@ -580,6 +586,8 @@ class Indexer(nn.Module):
                 sc = mx.where(shared.candidates[c : c + chunk], sc, -mx.inf)
             idx = topk_indices(sc, k)
             out_idx.append(mx.where(idx < lens, idx, -1).astype(mx.int32))
+            if INDEX_CHUNK_EVAL and S > chunk:
+                mx.eval(out_idx[-1], *(out_cand[-1:] if self.is_candidate_source else ()))
         if self.is_candidate_source:
             shared.candidates = mx.concatenate(out_cand, axis=0)
         return mx.concatenate(out_idx, axis=0)[None]
