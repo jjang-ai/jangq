@@ -406,7 +406,8 @@ class Model(nn.Module):
         (or every row with ``all_logits``). The engine's per-layer cache list is _SeqState.caches,
         which duck-types the runtime's Session, so DSV41.forward drives it directly. VL inputs
         (``images`` = jang_tools.dsv41.vision.ImageInput list, ``token_types``) splice vision features
-        into the start_pos-0 prefill chunk; the runtime handles bias_vl routing + engram masking.
+        into the prefill chunk that holds each image span (``start`` relative to the chunk, an image never
+        split across chunks); the runtime handles bias_vl routing + engram masking.
         ``engram_lookahead`` (list of token ids) is the next prefill chunk: its Engram rows are read
         from SSD while this chunk computes. ``prompt_end`` (absolute position where the prompt ends) lets
         the late layers skip prompt rows the prompt's last token no longer reads (DSV41.forward)."""

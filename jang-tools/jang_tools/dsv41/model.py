@@ -1,16 +1,14 @@
-"""DeepSeek-V4.1-Flash text model in MLX, for JANG affine bundles.
+"""DeepSeek-V4.1-Flash backbone in MLX, for JANG bundles (affine, or JANGHT mxfp8 / JANGT).
 
-A batch-1 port of the release's inference/model.py (autoregressive path only):
-hyper-connections (hc_mult=4, Sinkhorn mixing), latent attention over a
-128-token sliding window plus compressed KV picked by the two-level indexer,
-cross-layer KV / index / candidate sharing, Engram n-gram lookups at layers 1
-and 14, sqrtsoftplus-routed MoE with one shared expert.
+A batch-1 port of the release's inference/model.py: hyper-connections (hc_mult=4, Sinkhorn mixing),
+latent attention over a 128-token sliding window plus compressed KV picked by the two-level indexer,
+cross-layer KV / index / candidate sharing, Engram n-gram lookups at layers 1 and 14, sqrtsoftplus-routed
+MoE with one shared expert. The vision tower is in vision.py and is spliced in here
+(Model.merge_image_embeddings); the DSpark draft head and speculative loop are in dspark.py.
 
-Not ported: the vision tower (bundle tensors are present but unused here),
-DSpark speculative heads (not in the bundle), and the release's FP8/FP4
-activation round-trips (activations stay bf16/fp32 here). Prefill must be a
-single call starting at position 0, then one token per call -- the same
-contract as the release's generate.py.
+Not ported: the release's FP8/FP4 activation round-trips (activations stay bf16/fp32 here). A session
+takes any chunking: a prompt in one or more forwards from the session's position, then one token (or a
+DSpark verify block) per forward.
 """
 
 from __future__ import annotations
@@ -1191,8 +1189,10 @@ class Model(nn.Module):
                  images=None, image_mask: mx.array | None = None, return_hidden: bool = False,
                  prompt_end: int | None = None):
         """tokens [1,N]: the segments' tokens back to back. engram_rows: {layer_id: [1,N,cols,head_dim]}.
-        images: list of ImageInput to splice into the prefill (start_pos 0). image_mask [1,N] bool,
-        True inside image spans. Returns fp32 logits at each segment's last token (or every token).
+        images: ImageInput list to splice into this forward; each ``start`` is relative to this forward's
+        tokens and its whole span lies inside them (the engine passes each image with the prefill chunk
+        that holds its span, chunk-relative, and never splits an image). image_mask [1,N] bool, True
+        inside image spans. Returns fp32 logits at each segment's last token (or every token).
         With return_hidden, also returns main_hidden [1,N,dim*len(target_layer_ids)] (bf16): the
         mean-over-hc hidden at the INPUT of each dSpark target layer, concatenated -- the MTP head's
         input (release Transformer.forward collects h.mean(dim=2) at target_layer_ids).
@@ -1479,7 +1479,8 @@ class DSV41:
                 engram_lookahead: list[int] | None = None, capture_verify: bool = False,
                 prompt_end: int | None = None) -> mx.array:
         """Append tokens to a session (prefill, continuation or one decode step).
-        images/token_types carry VL inputs (image spans must be in a single start_pos-0 prefill).
+        images/token_types carry VL inputs for these ids: each image's span lies inside them, ``start``
+        relative to ids[0] (any chunk of a chunked prefill; see Model.__call__).
         engram_lookahead: the next chunk of a chunked prefill; its Engram rows are read while this
         forward computes (text tokens only).
         capture_verify: keep references to this forward's per-token cache inputs so commit_prefix

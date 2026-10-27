@@ -16,13 +16,15 @@ backbone's target-layer hidden; the Markov head sharpens each step autoregressiv
 confidence head scores the block. The release ships only this forward -- the accept/reject loop that
 turns drafts into a speedup is built here (`DSparkRunner`).
 
-The draft is loaded at bf16 from the SOURCE model shards (the JANG bundle drops mtp.*), with the
-routed experts quantized to 4-bit in memory so the whole draft is ~8 GB on top of the backbone.
-Verification is greedy-exact (a draft is kept only if it equals the backbone's argmax), so draft
-precision only moves the acceptance rate (the speedup). The committed tokens are the backbone's own
-greedy tokens; the one caveat is floating point: the backbone scores a multi-token verify block in a
-differently shaped forward than a one-token decode step, so a near-tie argmax can in principle flip
-relative to plain AR decode.
+The draft loads from the bundle's self-contained ``dspark/dspark.safetensors`` (routed experts already
+stacked: 4-bit affine, or JANGT with mxfp8 projections in JANGHT bundles; ~8 GB on top of the backbone).
+A bundle without it falls back to the source model's ``mtp.*`` shards, quantizing the routed experts to
+4-bit on load (``load_dspark``). Verification is exact, so draft precision only moves the acceptance rate
+(the speedup): greedy keeps a draft only if it equals the backbone's argmax; sampled (``SpecSampler``,
+temperature > 0) only if it equals the backbone's own sample at that position, so committed tokens
+follow the AR sampler's distribution. The one caveat is floating point: the backbone scores a
+multi-token verify block in a differently shaped forward than a one-token decode step, so a near-tie
+can in principle flip relative to plain AR decode.
 """
 
 from __future__ import annotations
@@ -362,7 +364,7 @@ class DSpark(nn.Module):
             st.attn.window = BoundedWindow(st.attn.win)
         object.__setattr__(self, "_main_tail", None)
 
-    # --- draft one block (release forward_embed -> stages -> forward_head), greedy ---
+    # --- draft one block (release forward_embed -> stages -> forward_head), greedy or coupled-sampled ---
     def draft(self, seed_tok, start_pos, noise=None, temperature=1.0):
         """Draft from `seed_tok` (the backbone's token for position start_pos+1). Windows must hold
         committed KV for [0..start_pos]. Returns (output_ids[bs+1], confidence[bs]) where
@@ -672,10 +674,11 @@ class _Governor:
 
 
 class DSparkRunner:
-    """Speculative greedy decode: output is the backbone's greedy tokens, accepting a block of
-    dSpark drafts per backbone verify step. Rollback is checkpoint/restore of the (ref-based) caches
-    plus a re-feed of exactly the accepted tokens -- correct regardless of the backbone cache's
-    internal compression."""
+    """Speculative decode, accepting a block of dSpark drafts per backbone verify step. Greedy (the
+    backbone's greedy tokens) or, with a ``SpecSampler``, exact sampled speculation. Commit after a verify:
+    a full accept keeps the verify's cache state; a partial accept keeps its prefix in place
+    (``DSV41.commit_prefix``); a zero accept restores the (ref-based) checkpoint and re-feeds the two
+    committed tokens -- correct regardless of the backbone cache's internal compression."""
 
     def __init__(self, dsv41, dspark, width=None,
                  adaptive=False, probe_every=16, ar_probe_every=64,
@@ -705,8 +708,9 @@ class DSparkRunner:
         return int(mx.argmax(logits))
 
     def stream(self, prompt_ids, max_new, eos_ids=(), stats=None, session=None, sampler=None):
-        """Greedy speculative decode as a GENERATOR: yields committed backbone-greedy tokens one at a
-        time (so a server can stream and check stops between/within accepted blocks). The yielded
+        """Speculative decode as a GENERATOR: yields committed tokens (backbone-greedy, or the backbone's
+        samples with ``sampler``) one at a time (so a server can stream and check stops between/within
+        accepted blocks). The yielded
         sequence is identical to ``generate()['tokens']``. Owns its own runtime ``Session`` +
         checkpoint/restore. If ``stats`` (dict) is passed it is filled with steps/drafted/accepted/
         emitted. ``session`` lets the engine spec-decode generator drive its OWN cache (the engine
@@ -785,7 +789,7 @@ class DSparkRunner:
         return sess, logits, end - 1
 
     def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None, sampler=None):
-        """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
+        """Speculative decode generator from a prefilled (sess, pending, c). Greedy by default: yields committed
         backbone-greedy tokens one at a time (the same tokens as plain greedy decode, up to the usual
         floating-point caveat that a multi-token verify forward and a one-token decode forward are
         not bitwise identical, so a near-tie argmax can in principle differ); no-refeed fast path.
