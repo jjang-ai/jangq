@@ -226,9 +226,75 @@ def test_hc_stage_and_post_match_stock(dims):
                 assert np.array_equal(_bits(post), _bits(M._hc_post(h, x, out[2][None], out[3][None])[0]))
 
 
+@pytest.mark.parametrize("dims", ["tiny", "real"])
+def test_hc_boundary_matches_stage(dims):
+    """hc_mix + hc_boundary: hc_stage's normed input and hc_post's expand bit for bit; pre / post / comb (the
+    reordered mix sums) within f32 rounding; every row its own."""
+    from jang_tools.dsv41 import metal_decode as MD
+    args = S.tiny_args(1) if dims == "tiny" else S.real_args(1, 16)
+    blk = S.build(args).layers[0]
+    D = args.hidden_size
+    if D % 256:
+        assert MD.hc_mix_decode(mx.zeros((1, 4, D), mx.bfloat16), blk.hc_ffn_fn) is None
+        return
+    common = (blk.hc_ffn_scale, blk.hc_ffn_base, blk.ffn_norm.weight, blk.ffn_norm.eps, blk.eps, blk.hc_eps,
+              blk.iters)
+    worst = 0.0
+    for t in range(6):
+        for R in (1, 3):
+            x = (mx.random.normal((R, 4, D), key=mx.random.key(t)) * (0.3 + 2 * t)).astype(mx.bfloat16)
+            pre = mx.softmax(mx.random.normal((R, 4), key=mx.random.key(50 + t)), -1)
+            h = (mx.random.normal((R, D), key=mx.random.key(70 + t)) * 2).astype(mx.bfloat16)
+            ref = MD.hc_stage_decode(x, pre, blk.hc_ffn_fn, *common)
+            xs, part = MD.hc_mix_decode(x, blk.hc_ffn_fn)
+            assert xs is x and part.shape == (R, 4 * D // 1024, 25)
+            got = MD.hc_boundary_decode(xs, part, pre, *common)
+            assert np.array_equal(_bits(got[0]), _bits(ref[0]))
+            for a, b in zip(got[1:], ref[1:]):
+                worst = max(worst, float(mx.abs(a - b).max().item()))
+                assert mx.allclose(a, b, rtol=1e-5, atol=1e-6).item()
+            for i in range(R):  # a row alone gives the same
+                one = MD.hc_boundary_decode(x[i:i + 1], MD.hc_mix_decode(x[i:i + 1], blk.hc_ffn_fn)[1],
+                                            pre[i:i + 1], *common)
+                assert all(np.array_equal(_bits(a[0]), _bits(b[i])) for a, b in zip(one, got))
+            if MD._tf32():
+                xo, _ = MD.hc_mix_decode(x, blk.hc_ffn_fn, h, ref[2], ref[3])
+                assert np.array_equal(_bits(xo), _bits(MD.hc_post_decode(h, x, ref[2], ref[3])))
+    assert worst > 0.0 or dims == "tiny"  # the mixes really are summed in another order (not vacuous)
+
+
+def test_hc_boundary_decode_close_to_stage(monkeypatch):
+    """Whole decode with the 2-dispatch boundary vs the bit-identical stage: same greedy tokens, logits within
+    the reorder noise (real hidden size: the boundary needs D % 256 == 0)."""
+    from jang_tools.dsv41 import metal_decode as MD
+    if not MD._tf32():
+        pytest.skip("the fused hc path (and so the boundary) is off without TF32 GEMMs")
+    model = S.build(S.real_args(2, 16))
+    calls = []
+    orig = MD.hc_boundary_decode
+
+    def counted(*a, **k):
+        out = orig(*a, **k)
+        calls.append(out is not None)
+        return out
+
+    monkeypatch.setattr(MD, "hc_boundary_decode", counted)
+    M._HC_BOUNDARY_OK.clear()
+    monkeypatch.setattr(M, "HC_BOUNDARY", False)
+    ta, la = _run_greedy(model, 8)
+    assert not calls
+    monkeypatch.setattr(M, "HC_BOUNDARY", True)
+    tb, lb = _run_greedy(model, 8)
+    assert calls and all(calls) and all(M._HC_BOUNDARY_OK.values())
+    assert ta == tb
+    cos = (la * lb).sum(-1) / (np.linalg.norm(la, axis=-1) * np.linalg.norm(lb, axis=-1))
+    assert cos.min() > 0.9999, cos.min()
+
+
 def test_fused_hc_decode_is_bit_exact(tiny, monkeypatch):
     from jang_tools.dsv41 import metal_decode as MD
     M._HC_FUSED_OK.clear()
+    monkeypatch.setattr(M, "HC_BOUNDARY", False)  # the 3-dispatch stage (the 2-dispatch boundary reorders the mixes)
     if not MD._tf32():
         # This device's f32 GEMMs are not TF32 (or MLX_ENABLE_TF32=0): the fused hc path must stay off,
         # so decode with the flag on is the stock decode.
@@ -252,6 +318,7 @@ def test_fused_hc_decode_is_bit_exact(tiny, monkeypatch):
 
 
 def test_all_fusions_together_decode_bit_exact(tiny, monkeypatch):
+    monkeypatch.setattr(M, "HC_BOUNDARY", False)  # not bit-identical by design (test_hc_boundary_*)
     flags = ("ROUTER_GEMV", "FUSED_MOE", "FUSED_HC", "LAYER_ASYNC")
     for f in flags:
         monkeypatch.setattr(M, f, False)

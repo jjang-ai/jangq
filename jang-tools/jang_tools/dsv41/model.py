@@ -55,6 +55,11 @@ FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
 # Bit-identical (checked once per process against the stock ops; a mismatch keeps the stock path).
 # VMLX_DSV41_FUSED_HC=0 restores the stock ops.
 FUSED_HC = _env_on("VMLX_DSV41_FUSED_HC")
+# With FUSED_HC: each boundary in two dispatches (metal_decode.hc_mix_decode / hc_boundary_decode, TensorFold's
+# layout), the attention branch's expand folded into the FFN boundary's mixes. Same arithmetic as the 3-dispatch
+# stage except the 24 mixes' dot products and their sum of squares (parallel partial sums: f32-ulp differences in
+# pre / post / comb). VMLX_DSV41_HC_BOUNDARY=0 keeps the bit-identical stage.
+HC_BOUNDARY = _env_on("VMLX_DSV41_HC_BOUNDARY")
 
 
 @dataclass
@@ -966,6 +971,41 @@ def _hc_fused_ok(blk) -> bool:
     return ok
 
 
+_HC_BOUNDARY_OK: dict = {}
+
+
+def _hc_boundary_ok(blk) -> bool:
+    """Once per (D, eps) per process, on a random stream with this block's weights: hc_mix + hc_boundary give
+    hc_stage's normed input and hc_post's expanded streams bit for bit, and its pre / post / comb within f32
+    rounding of the stage's (their only reordered sums). Otherwise the stage path."""
+    D = blk.hc_attn_fn.shape[1] // blk.hc
+    key = (D, blk.eps, blk.attn_norm.eps, blk.hc_eps, blk.iters)
+    ok = _HC_BOUNDARY_OK.get(key)
+    if ok is None:
+        ok = False
+        try:
+            from jang_tools.dsv41.metal_decode import (hc_boundary_decode, hc_mix_decode, hc_post_decode,
+                                                       hc_stage_decode)
+            x = (mx.random.normal((2, blk.hc, D), key=mx.random.key(7)) * 3).astype(mx.bfloat16)
+            pre = mx.softmax(mx.random.normal((2, blk.hc), key=mx.random.key(8)), axis=-1)
+            h = (mx.random.normal((2, D), key=mx.random.key(9)) * 2).astype(mx.bfloat16)
+            args = (blk.hc_attn_scale, blk.hc_attn_base, blk.attn_norm.weight, blk.attn_norm.eps, blk.eps,
+                    blk.hc_eps, blk.iters)
+            ref = hc_stage_decode(x, pre, blk.hc_attn_fn, *args)
+            mixed = hc_mix_decode(x, blk.hc_attn_fn)
+            got = hc_boundary_decode(mixed[0], mixed[1], pre, *args) if mixed is not None else None
+            if ref is not None and got is not None:
+                ok = mx.array_equal(got[0], ref[0]).item() and all(
+                    mx.allclose(a, b, rtol=1e-5, atol=1e-6).item() for a, b in zip(got[1:], ref[1:]))
+                expanded = hc_mix_decode(x, blk.hc_attn_fn, h, ref[2], ref[3])
+                ok = ok and expanded is not None and mx.array_equal(
+                    expanded[0], hc_post_decode(h, x, ref[2], ref[3])).item()
+        except (RuntimeError, ValueError, TypeError):  # kernel build / launch failed: stage path
+            ok = False
+        _HC_BOUNDARY_OK[key] = ok
+    return ok
+
+
 class Block(nn.Module):
     def __init__(self, args: Args, layer_id: int, layout: EngramLayout, qbits: dict):
         super().__init__()
@@ -1093,9 +1133,36 @@ class Block(nn.Module):
         out = hc_post_decode(h, xs, post, comb)
         return out if out is not None else _hc_post(h[None], xs[None], post[None], comb[None])[0]
 
+    def _boundary(self, xs, pre, p, branch=None):
+        """hc_mix (with branch = (h, post, comb): that branch expanded first) + hc_boundary for sublayer p:
+        (streams, xin, pre', post', comb')."""
+        from jang_tools.dsv41.metal_decode import hc_boundary_decode, hc_mix_decode
+        mixed = hc_mix_decode(xs, getattr(self, f"hc_{p}_fn"), *(branch or ()))
+        if mixed is None:
+            return None
+        norm = getattr(self, f"{p}_norm")
+        st = hc_boundary_decode(mixed[0], mixed[1], pre, getattr(self, f"hc_{p}_scale"), getattr(self, f"hc_{p}_base"),
+                                norm.weight, norm.eps, self.eps, self.hc_eps, self.iters)
+        return None if st is None else (mixed[0], *st)
+
+    def _call_hc_boundary(self, xs, segs, pre_mix, image_mask):
+        S = xs.shape[0]
+        st = self._boundary(xs, pre_mix.reshape(S, self.hc), "attn")
+        if st is None:
+            return None
+        xs, xin, a_pre, a_post, a_comb = st
+        h = self.attn(xin[None], segs)[0]
+        xs, xin, f_pre, f_post, f_comb = self._boundary(xs, a_pre, "ffn", (h, a_post, a_comb))
+        xs = self._post(self.moe(xin[None], image_mask)[0], xs, f_post, f_comb)
+        return xs[None], f_pre[None]
+
     def _call_fused_hc(self, x, segs, pre_mix, image_mask):
         S = x.shape[1]
         xs = x[0]
+        if HC_BOUNDARY and _hc_boundary_ok(self):
+            out = self._call_hc_boundary(xs, segs, pre_mix, image_mask)
+            if out is not None:
+                return out
         st = self._stage(xs, pre_mix.reshape(S, self.hc), "attn")
         if st is None:
             return None

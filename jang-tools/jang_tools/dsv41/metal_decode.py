@@ -513,16 +513,9 @@ def moe_decode(x, idx, w, experts, shared, swiglu_limit: float, group_size: int 
 # Each row (decode or verify) is computed as its own 1-row decode. Bit-identity with the stock ops is
 # checked once at first use (hc_selfcheck); any mismatch (another MLX, TF32 off) disables the path.
 
-_HC_STAGE_SRC = r"""
-    const uint tg = threadgroup_position_in_grid.x;
-    const uint r = threadgroup_position_in_grid.y;
-    const uint lid = thread_position_in_threadgroup.x;
-    const uint lane = thread_index_in_simdgroup;
-    const uint sg = simdgroup_index_in_threadgroup;
-    const device T* xr = x + (size_t)r * (HC * D);
-    threadgroup float tmem[1024];
-    if (tg == 0) {
-      // hc_pre: s = sum_j pre_j * x_j in f32 (sequential axis reduction), cast to T; then RMSNorm.
+# Collapse with the previous pre + RMSNorm of one row (1024 threads; x, pre, nw, xin, tmem, lid, lane, sg in
+# scope): shared by hc_stage (threadgroup 0) and hc_boundary.
+_HC_COLLAPSE_NORM_SRC = r"""      // hc_pre: s = sum_j pre_j * x_j in f32 (sequential axis reduction), cast to T; then RMSNorm.
       float p[HC];
       for (int j = 0; j < HC; j++) p[j] = pre[r * HC + j];
       float acc = 0;
@@ -577,7 +570,18 @@ _HC_STAGE_SRC = r"""
         T xv = static_cast<T>(s);
         xin[(size_t)r * D + d] = nw[d] * static_cast<T>(xv * inv);
       }
-    } else if (tg == 1) {
+"""
+
+_HC_STAGE_SRC = r"""
+    const uint tg = threadgroup_position_in_grid.x;
+    const uint r = threadgroup_position_in_grid.y;
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const device T* xr = x + (size_t)r * (HC * D);
+    threadgroup float tmem[1024];
+    if (tg == 0) {
+""" + _HC_COLLAPSE_NORM_SRC + r"""    } else if (tg == 1) {
       // sum(x^2) over the HC * D values: MLX row_reduce_looped, one threadgroup of RED_TGS threads.
       float total = 0.0f;
       if (lid < (uint)RED_TGS) {
@@ -783,3 +787,174 @@ def hc_post_decode(h, residual, post, comb):
     return post_k(inputs=[h, residual, post.astype(mx.float32), comb.reshape(R, 16).astype(mx.float32)],
                   template=[("T", mx.bfloat16), ("D", D), ("TF32", _tf32())],
                   grid=(D, R, 1), threadgroup=(256, 1, 1), output_shapes=[(R, 4, D)], output_dtypes=[mx.bfloat16])[0]
+
+
+# ----------------------------------------------------------------------------- hc boundary (2 dispatches)
+# The boundary layout of TensorFold's DeepSeek-V4.1 Metal family (BobClawblaw/TensorFold, deepseek-v41-main,
+# zig/kernels/metal/deepseek/v41.metal ds_hc_expand_mix / ds_hc_boundary; Apache-2.0): per sublayer
+#   hc_mix:      (optionally) the pending branch expanded into the streams, then the 24 mixes' and the sum of
+#                squares' partial sums, a threadgroup a 1024-value slice (20 for D = 5120): fn is read by
+#                20 cores instead of hc_stage's 6.
+#   hc_boundary: one threadgroup of 1024 a row: the partials' totals; the collapse with the previous pre and
+#                its RMSNorm (_HC_COLLAPSE_NORM_SRC, as hc_stage); the split (pre, post, Sinkhorn comb) on
+#                simdgroup 0, a comb cell a lane.
+# Bit-identical to hc_stage + hc_split + hc_post except the 24 mix dot products and the sum of squares,
+# whose partial sums run in another order (MLX's gemv / row reduction cannot be split across cores):
+# the expand is hc_post's arithmetic, the collapse + norm is hc_stage's code, and the split sums every row
+# and column of the Sinkhorn in _HC_SPLIT2_SRC's order (shuffles feed each lane its row / column in order).
+
+# The pending branch expanded into the streams (hc_post's arithmetic: comb TF32-truncated, products summed
+# pairwise, post * h added, cast to T), its values kept for the mixes; or the streams as they are.
+_HC_MIX_EXPAND = r"""
+    {
+      const uint k = col / (uint)D, d0 = col % (uint)D;
+      float c[4];
+      for (int jj = 0; jj < 4; jj++) c[jj] = TF32 ? as_type<float>(as_type<uint>(comb[r * 16 + jj * 4 + k]) & 0xFFFFE000u)
+                                                  : comb[r * 16 + jj * 4 + k];
+      const float pk = post[r * 4 + k];
+      for (int i = 0; i < 4; i++) {
+        const uint d = d0 + i;
+        const float hv = float(h[(size_t)r * D + d]);
+        float rv[4];
+        for (int jj = 0; jj < 4; jj++) rv[jj] = float(x[((size_t)r * 4 + jj) * D + d]);
+        float p0 = c[0] * rv[0], p1 = c[1] * rv[1], p2 = c[2] * rv[2], p3 = c[3] * rv[3];
+        float e = (p0 + p1) + (p2 + p3);
+        float tt = pk * hv;
+        const T o = static_cast<T>(tt + e);
+        xo[(size_t)r * (4 * D) + col + i] = o;
+        v[i] = float(o);
+      }
+    }
+"""
+_HC_MIX_LOAD = r"""
+    for (int i = 0; i < 4; i++) v[i] = float(x[(size_t)r * (4 * D) + col + i]);
+"""
+
+_HC_MIX_SRC = r"""
+    const uint j = threadgroup_position_in_grid.x, r = threadgroup_position_in_grid.y;
+    const uint t = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
+    threadgroup float red[8][MIX + 1];
+    const uint col = 1024u * j + 4u * t;
+    float v[4];
+""" + "{BRANCH}" + r"""
+    float acc[MIX + 1];
+    acc[MIX] = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
+    for (int m = 0; m < MIX; m++) {
+      const device float* f = fn + (size_t)m * (4 * D) + col;
+      acc[m] = f[0] * v[0] + f[1] * v[1] + f[2] * v[2] + f[3] * v[3];
+    }
+    for (int m = 0; m <= MIX; m++) {
+      const float s = simd_sum(acc[m]);
+      if (lane == 0) red[sg][m] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t <= (uint)MIX) {
+      float s = 0.0f;
+      for (int q = 0; q < 8; q++) s += red[q][t];
+      part[((size_t)r * SLICES + j) * (MIX + 1) + t] = s;
+    }
+"""
+
+_HC_BOUNDARY_SRC = r"""
+    const uint r = threadgroup_position_in_grid.y;
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const device T* xr = x + (size_t)r * (HC * D);
+    threadgroup float tmem[1024];
+    threadgroup float tot[MIX + 1];
+    if (lid <= (uint)MIX) {
+      float s = 0.0f;
+      for (int j = 0; j < SLICES; j++) s += part[((size_t)r * SLICES + j) * (MIX + 1) + lid];
+      tot[lid] = s;
+    }
+""" + _HC_COLLAPSE_NORM_SRC + r"""
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+      const float rs = metal::precise::rsqrt(tot[MIX] * INV_N + RMS_EPS);
+      const float s0 = scale[0], s1 = scale[1], s2 = scale[2];
+      if (lane < 4u) {
+        pre_out[r * 4 + lane] = 1.0f / (1.0f + metal::precise::exp(-((tot[lane] * rs) * s0 + base[lane]))) + EPS;
+        post_out[r * 4 + lane] = 2.0f / (1.0f + metal::precise::exp(-((tot[4 + lane] * rs) * s1 + base[4 + lane])));
+      }
+      const ushort cell = ushort(lane & 15u), row = cell & ~ushort(3), colk = cell & ushort(3);
+      float c = (tot[8 + cell] * rs) * s2 + base[8 + cell];
+      // row softmax: max and sum over the row in order
+      float mx_ = simd_shuffle(c, row);
+      for (ushort k = 1; k < 4; k++) mx_ = metal::max(mx_, simd_shuffle(c, ushort(row + k)));
+      c = metal::precise::exp(c - mx_);
+      float sum = 0.0f;
+      for (ushort k = 0; k < 4; k++) sum += simd_shuffle(c, ushort(row + k));
+      c = c / sum + EPS;
+      float cs = simd_shuffle(c, colk);
+      for (ushort k = 1; k < 4; k++) cs = cs + simd_shuffle(c, ushort(colk + 4 * k));
+      c = c / (cs + EPS);
+      for (int it = 0; it < ITERS - 1; it++) {
+        float rsum = simd_shuffle(c, row);
+        for (ushort k = 1; k < 4; k++) rsum = rsum + simd_shuffle(c, ushort(row + k));
+        c = c / (rsum + EPS);
+        cs = simd_shuffle(c, colk);
+        for (ushort k = 1; k < 4; k++) cs = cs + simd_shuffle(c, ushort(colk + 4 * k));
+        c = c / (cs + EPS);
+      }
+      if (lane < 16u) comb[r * 16 + lane] = c;
+    }
+"""
+
+
+@lru_cache(maxsize=None)
+def _hc_boundary_kernels(norm_eps: float, rms_eps: float, hc_eps: float, iters: int, n: int):
+    lit = lambda v: f"{float(v):.9e}f"  # noqa: E731
+    mix = {b: mx.fast.metal_kernel(name=f"dsv41_hc_mix_{int(b)}",
+                                   input_names=["x", "fn", "h", "post", "comb"] if b else ["x", "fn"],
+                                   output_names=["xo", "part"] if b else ["part"],
+                                   source=_HC_MIX_SRC.replace("{BRANCH}", _HC_MIX_EXPAND if b else _HC_MIX_LOAD))
+           for b in (False, True)}
+    src = (_HC_BOUNDARY_SRC.replace("NORM_EPS", lit(norm_eps)).replace("INV_N", lit(1.0 / n))
+           .replace("RMS_EPS", lit(rms_eps)).replace("ITERS", str(int(iters))).replace("EPS", lit(hc_eps)))
+    boundary = mx.fast.metal_kernel(name=f"dsv41_hc_boundary_{iters}",
+                                    input_names=["x", "part", "pre", "scale", "base", "nw"],
+                                    output_names=["xin", "pre_out", "post_out", "comb"], source=src)
+    return mix, boundary
+
+
+def hc_mix_decode(x, fn, h=None, post=None, comb=None):
+    """x [R, 4, D] bf16 streams (with h [R, D], post [R, 4], comb [R, 4, 4]: the pending branch expanded into
+    them first, hc_post_decode's arithmetic). Returns (streams, part [R, slices, 25]) or None if not eligible."""
+    if x.ndim != 3 or x.shape[1] != 4 or x.dtype != mx.bfloat16 or not _gpu():
+        return None
+    R, hc, D = x.shape
+    n = hc * D
+    if R > MAX_ROWS or D % 256 or fn.shape != (24, n) or fn.dtype != mx.float32:
+        return None
+    if h is not None and (h.shape != (R, D) or h.dtype != mx.bfloat16):
+        return None
+    mix, _ = _hc_boundary_kernels(0.0, 0.0, 0.0, 1, n)
+    slices = n // 1024
+    tmpl = [("T", mx.bfloat16), ("D", D), ("MIX", 24), ("SLICES", slices), ("TF32", _tf32())]
+    shapes, dtypes = [(R, slices, 25)], [mx.float32]
+    if h is None:
+        return x, mix[False](inputs=[x, fn], template=tmpl, grid=(256 * slices, R, 1), threadgroup=(256, 1, 1),
+                             output_shapes=shapes, output_dtypes=dtypes)[0]
+    xo, part = mix[True](inputs=[x, fn, h, post.astype(mx.float32), comb.reshape(R, 16).astype(mx.float32)],
+                         template=tmpl, grid=(256 * slices, R, 1), threadgroup=(256, 1, 1),
+                         output_shapes=[(R, 4, D)] + shapes, output_dtypes=[mx.bfloat16] + dtypes)
+    return xo, part
+
+
+def hc_boundary_decode(x, part, pre, scale, base, norm_w, norm_eps, rms_eps, hc_eps, iters):
+    """x [R, 4, D] bf16 streams, part from hc_mix_decode, pre [R, 4] the previous sublayer's pre. Returns
+    (xin [R, D] = RMSNorm(hc_pre(x, pre)), pre', post', comb' [R, 4, 4]) as hc_stage_decode does."""
+    R, hc, D = x.shape
+    n = hc * D
+    if norm_w.shape != (D,) or norm_w.dtype != mx.bfloat16:
+        return None
+    _, boundary = _hc_boundary_kernels(float(norm_eps), float(rms_eps), float(hc_eps), int(iters), n)
+    xin, p, po, cb = boundary(
+        inputs=[x, part, pre.astype(mx.float32), scale.astype(mx.float32), base.astype(mx.float32), norm_w],
+        template=[("T", mx.bfloat16), ("D", D), ("HC", hc), ("MIX", 24), ("SLICES", n // 1024),
+                  ("NORM_LOOPED", D > 4096)],
+        grid=(1024, R, 1), threadgroup=(1024, 1, 1),
+        output_shapes=[(R, D), (R, 4), (R, 4), (R, 16)], output_dtypes=[mx.bfloat16] + [mx.float32] * 3)
+    return xin, p, po, cb.reshape(R, 4, 4)
