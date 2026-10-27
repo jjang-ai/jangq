@@ -1,11 +1,13 @@
 """DSpark MTP vs plain autoregressive (AR): across diverse prompts (easy/structured/low-accept),
-measure greedy tok/s and speculative tok/s, report the spec/AR ratio. Verifies speculative never
-drops below AR (ratio >= 1.0). Tests fixed width and a confidence-gated/adaptive runner (conf_gate
-truncates the proposed block where draft confidence drops, protecting the AR floor under low accept)."""
-import argparse, sys, time
+measure greedy tok/s and speculative tok/s, report the spec/AR ratio. Checks speculation never drops
+below AR (ratio >= 1.0) for a fixed-width runner and the adaptive one (acceptance-tracked width plus
+the wall-clock _Governor: AR steps while speculation is slower, with periodic speculative probes).
+
+  python -m jang_tools.dsv41.eval_mtp_ar --bundle <bundle dir>
+"""
+import argparse, time
 from pathlib import Path
 import mlx.core as mx
-sys.path.insert(0, str(Path.home() / "jang/jang-tools"))
 from jang_tools.dsv41.model import DSV41
 from jang_tools.dsv41.dspark import load_dspark, DSparkRunner
 from jang_tools.dsv41.generate import load_encoding
@@ -30,7 +32,7 @@ def main():
     eos_tok = m.tokenizer.token_to_id("<｜end▁of▁sentence｜>")
     eos = {e for e in (eos_tok, m.eos_id) if e is not None}
     fixed = DSparkRunner(m, ds)                       # width = bs (5)
-    adaptive = DSparkRunner(m, ds, adaptive=True)     # EMA width-shrink + LATCH to bare AR after 2 zero-accept drafts
+    adaptive = DSparkRunner(m, ds, adaptive=True)     # acceptance-tracked width + wall-clock AR/spec governor
 
     prompts = {
         "code": "Write a Python function to compute fibonacci(n) iteratively. Return only code.",

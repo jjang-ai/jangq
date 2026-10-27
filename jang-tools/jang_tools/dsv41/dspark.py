@@ -16,13 +16,15 @@ backbone's target-layer hidden; the Markov head sharpens each step autoregressiv
 confidence head scores the block. The release ships only this forward -- the accept/reject loop that
 turns drafts into a speedup is built here (`DSparkRunner`).
 
-The draft is loaded at bf16 from the SOURCE model shards (the JANG bundle drops mtp.*), with the
-routed experts quantized to 4-bit in memory so the whole draft is ~8 GB on top of the backbone.
-Verification is greedy-exact (a draft is kept only if it equals the backbone's argmax), so draft
-precision only moves the acceptance rate (the speedup). The committed tokens are the backbone's own
-greedy tokens; the one caveat is floating point: the backbone scores a multi-token verify block in a
-differently shaped forward than a one-token decode step, so a near-tie argmax can in principle flip
-relative to plain AR decode.
+The draft loads from the bundle's self-contained ``dspark/dspark.safetensors`` (routed experts already
+stacked: 4-bit affine, or JANGT with mxfp8 projections in JANGHT bundles; ~8 GB on top of the backbone).
+A bundle without it falls back to the source model's ``mtp.*`` shards, quantizing the routed experts to
+4-bit on load (``load_dspark``). Verification is exact, so draft precision only moves the acceptance rate
+(the speedup): greedy keeps a draft only if it equals the backbone's argmax; sampled (``SpecSampler``,
+temperature > 0) only if it equals the backbone's own sample at that position, so committed tokens
+follow the AR sampler's distribution. The one caveat is floating point: the backbone scores a
+multi-token verify block in a differently shaped forward than a one-token decode step, so a near-tie
+can in principle flip relative to plain AR decode.
 """
 
 from __future__ import annotations
@@ -357,14 +359,7 @@ class DSpark(nn.Module):
             st.attn.window = BoundedWindow(st.attn.win)
         object.__setattr__(self, "_main_tail", None)
 
-    def window_checkpoint(self):
-        return [(st.attn.window.buf, st.attn.window.n) for st in self.stages]
-
-    def window_restore(self, ck):
-        for st, (buf, n) in zip(self.stages, ck):
-            st.attn.window.buf, st.attn.window.n = buf, n
-
-    # --- draft one block (release forward_embed -> stages -> forward_head), greedy ---
+    # --- draft one block (release forward_embed -> stages -> forward_head), greedy or coupled-sampled ---
     def draft(self, seed_tok, start_pos, noise=None, temperature=1.0):
         """Draft from `seed_tok` (the backbone's token for position start_pos+1). Windows must hold
         committed KV for [0..start_pos]. Returns (output_ids[bs+1], confidence[bs]) where
@@ -674,18 +669,18 @@ class _Governor:
 
 
 class DSparkRunner:
-    """Speculative greedy decode: output is the backbone's greedy tokens, accepting a block of
-    dSpark drafts per backbone verify step. Rollback is checkpoint/restore of the (ref-based) caches
-    plus a re-feed of exactly the accepted tokens -- correct regardless of the backbone cache's
-    internal compression."""
+    """Speculative decode, accepting a block of dSpark drafts per backbone verify step. Greedy (the
+    backbone's greedy tokens) or, with a ``SpecSampler``, exact sampled speculation. Commit after a verify:
+    a full accept keeps the verify's cache state; a partial accept keeps its prefix in place
+    (``DSV41.commit_prefix``); a zero accept restores the (ref-based) checkpoint and re-feeds the two
+    committed tokens -- correct regardless of the backbone cache's internal compression."""
 
-    def __init__(self, dsv41, dspark, width=None, conf_gate=None,
+    def __init__(self, dsv41, dspark, width=None,
                  adaptive=False, probe_every=16, ar_probe_every=64,
                  ema_alpha=0.3, clock=time.perf_counter):
         self.m = dsv41
         self.ds = dspark
         self.width = width or dspark.bs
-        self.conf_gate = conf_gate  # if set, truncate the proposed block where confidence drops below it
         # Adaptive mode = a WALL-CLOCK governor plus acceptance-tracked width; never a fixed depth and
         # never a permanent latch (see _Governor). Width W = clamp(round(bs * accept_ema), 1, bs)
         # shrinks AND grows with acceptance inside the draft head's physical size ``bs``. Whether a
@@ -707,30 +702,30 @@ class DSparkRunner:
     def _greedy(self, logits):
         return int(mx.argmax(logits))
 
-    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None, session=None, start_offset=0, sampler=None):
-        """Greedy speculative decode as a GENERATOR: yields committed backbone-greedy tokens one at a
-        time (so a server can stream and check stops between/within accepted blocks). The yielded
+    def stream(self, prompt_ids, max_new, eos_ids=(), stats=None, session=None, sampler=None):
+        """Speculative decode as a GENERATOR: yields committed tokens (backbone-greedy, or the backbone's
+        samples with ``sampler``) one at a time (so a server can stream and check stops between/within
+        accepted blocks). The yielded
         sequence is identical to ``generate()['tokens']``. Owns its own runtime ``Session`` +
         checkpoint/restore. If ``stats`` (dict) is passed it is filled with steps/drafted/accepted/
         emitted. ``session`` lets the engine spec-decode generator drive its OWN cache (the engine
         DeepseekV41Cache list, duck-typing the runtime Session) so DSpark output populates the prefix
-        cache; with a restored prefix, ``start_offset`` skips the cached prompt and prefills only the
-        tail. (See DECODE_DSPARK_METHODS.md M1.)"""
-        sess, pending, c = self.prefill(prompt_ids, session=session, start_offset=start_offset)
+        cache; on a restored prefix pass only the uncached tail as ``prompt_ids`` (see ``prefill``).
+        (See DECODE_DSPARK_METHODS.md M1.)"""
+        sess, pending, c = self.prefill(prompt_ids, session=session)
         yield from self.decode_stream(sess, pending, c, max_new, eos_ids=eos_ids, stats=stats, sampler=sampler)
 
     # Prefill chunk size (tokens per backbone forward). Matches the engine's default prefill_step_size;
     # the engine passes its configured value explicitly.
     PREFILL_CHUNK = 2048
 
-    def prefill(self, prompt_ids, session=None, start_offset=0, on_boundary=None, chunk_size=None,
+    def prefill(self, prompt_ids, session=None, on_boundary=None, chunk_size=None,
                 clear_cache=True):
         """Forward ``prompt_ids`` into ``session`` (a runtime Session or the engine's _SeqState duck
         type) and seed the draft windows, returning (session, pending_logits, c), c = last prompt pos.
 
         ``prompt_ids`` is forwarded AS GIVEN from the session's current absolute position ``sess.pos``:
         on a prefix HIT the scheduler already restored the cache and passes only the UNCACHED TAIL.
-        ``start_offset`` is accepted for back-compat but ignored -- the session position is authoritative.
 
         Shape of the prefill (same as the engine's AR SingleBatchGenerator, so AR and DSpark produce the
         same cache and a prefix hit continues either):
@@ -789,7 +784,7 @@ class DSparkRunner:
         return sess, logits, end - 1
 
     def decode_stream(self, sess, pending, c, max_new, eos_ids=(), stats=None, sampler=None):
-        """Greedy speculative decode generator from a prefilled (sess, pending, c). Yields committed
+        """Speculative decode generator from a prefilled (sess, pending, c). Greedy by default: yields committed
         backbone-greedy tokens one at a time (the same tokens as plain greedy decode, up to the usual
         floating-point caveat that a multi-token verify forward and a one-token decode forward are
         not bitwise identical, so a near-tie argmax can in principle differ); no-refeed fast path.
@@ -840,17 +835,12 @@ class DSparkRunner:
             n_spec += 1
             if sampler is not None:                    # coupled draft: the target's noise at c+2 .. c+bs+1
                 G = mx.concatenate([G, sampler.noise(c + 2, 1 + int(self.ds.bs), vocab)], axis=0)
-                draft_ids, conf = self.ds.draft(p0, c, noise=G[1:1 + int(self.ds.bs)], temperature=sampler.temperature)
+                draft_ids, _ = self.ds.draft(p0, c, noise=G[1:1 + int(self.ds.bs)], temperature=sampler.temperature)
             else:
-                draft_ids, conf = self.ds.draft(p0, c)  # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
+                draft_ids, _ = self.ds.draft(p0, c)  # output_ids[0]=p0; [1..bs] draft c+2..c+bs+1
             W = self.width                             # number of draft tokens to verify (1..bs)
             if self.adaptive:                          # depth tracks acceptance (shrinks AND grows)
                 W = max(1, min(self.width, round(self.width * accept_ema)))
-            if self.conf_gate is not None:
-                cg = (conf >= self.conf_gate).tolist()
-                W = 1
-                while W < self.width and cg[W - 1]:
-                    W += 1
             feed = [p0] + draft_ids[1 : 1 + W]         # [p0,d1..dW] at positions c+1..c+1+W
             n_drafted += W
             ck = sess.checkpoint()

@@ -16,6 +16,15 @@ margin is below ~0.05. Measured (256 tokens, fp32 logits): structured identical;
 prose first diverge at AR margins 0.0056 / 0.0045 / 0.040. With bf16 logits the top-2 tied exactly
 every ~50-100 tokens, so the head now produces fp32 logits as the reference does.
 
+**Sampled (temperature > 0): exact too, on by default in vMLX** (`dspark.SpecSampler`). The token at
+each position is `argmax(f(logprobs) / T + g_pos)`: f is mlx_lm's top_p, min_p, top_k filters in the
+sampler's order, and `g_pos` is Gumbel noise keyed by the request seed and the ABSOLUTE position, so it
+is a draw from the AR sampler's distribution and a re-sampled rejected position replays the same draw.
+The drafter's Markov chain uses the same noise (coupled drafting), and a draft is kept only when it
+equals that sample; steps 1, 4 and 5 below use `sampler.pick` in place of argmax.
+`tests/test_spec_sampler.py` checks the sequence distribution against exact sequential sampling over
+the real `decode_stream`. vMLX: `VMLX_DSV41_DSPARK_SAMPLED=0` sends sampled requests to the AR path.
+
 State: `c` = frontier (last position whose hidden is committed to the draft windows); `pending` =
 backbone logits predicting position `c+1`. Per step:
 
@@ -133,19 +142,23 @@ V4.1 DSpark speculative decode is wired into the engine serving path and verifie
   `SingleBatchGenerator`; overrides `_start_request`/`_yield_current_and_schedule_next` to drive
   `DSparkRunner.stream()` on `model.runtime` (its own runtime `Session` + checkpoint/restore + the
   no-refeed fast path), yielding one committed token per scheduler step and reusing the inherited
-  finish-reason/Response/stop machinery. Greedy text only: requests with images still to prefill, a
-  non-greedy sampler, logits processors or logprobs take the inherited AR path. A VL prefix-cache hit
-  that covers every image leaves a text-only tail, which DSpark serves.
+  finish-reason/Response/stop machinery. Text requests, greedy or sampled (temperature > 0 runs
+  `SpecSampler`, M1); requests with images still to prefill, logits processors (repetition / frequency /
+  presence penalty, logit_bias) or logprobs take the inherited AR path. A VL prefix-cache hit that
+  covers every image leaves a text-only tail, which DSpark serves.
 - **Selection** (`scheduler.py::_create_batch_generator`): a branch before the SBG fallback returns
   `DSV41DSparkGenerator` iff `model._dspark` is attached — so the default AR path is never affected.
 - **Verified live** (`vmlx serve`, warmed, thinking-off code request): coherent output, `finish=stop`,
   **decode-only ~65.9 tok/s vs AR ~31** (2x+); generator selection confirmed in logs; output
   greedy by construction (identical except at near-ties, M1).
 - Note: the engine's older `vmlx_engine/dspark/` (drafter/generate/session) is Qwen3/MiniCPM DSpark,
-  unrelated to V4.1. Future: the engine's `DeepseekV41Cache` exposes `trim`, so a later version can do
-  M1-step-7 no-refeed for *partial* accept too (the standalone runtime skips it).
+  unrelated to V4.1. Partial accepts already commit in place in the engine too (M1 step 7: the
+  generator drives `DSparkRunner` on the engine's `_SeqState`, and `DSV41.commit_prefix` replays the
+  kept tokens). Rollback never goes through `DeepseekV41Cache.trim`, which is a no-op
+  (`is_trimmable()` is False: window rows and the compressor's pending group cannot be rebuilt).
 
 ### vmlx-swift mirror (Libraries/MLXLMCommon/SpecDec)
 Same shape: load the bundle `dspark/` draft, keep a draft-windows + backbone `Session` per sequence,
-and in the decode step run M1 (draft → verify forward → accept → fast-path|commit) + M2 (adaptive
-width + AR latch, **plus** the re-entry hysteresis the Python reference lacks).
+and in the decode step run M1 (draft → verify forward → accept → fast-path|commit, greedy or
+`SpecSampler`) + M2 (acceptance-tracked width + the wall-clock governor: AR steps while speculation is
+slower, a speculative probe every 16 AR tokens, an AR re-measure every 64 spec steps; no permanent latch).
