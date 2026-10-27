@@ -56,6 +56,31 @@ Measured and removed (no gain): standalone decode attention kernel, MoE expert d
 | engine model wrapper + per-layer cache | `jang_tools/dsv4_1/mlx_model.py` (`Model`, `DeepseekV41Cache`, `_SeqState`) |
 | engine loader / generator / scheduler | vMLX `vmlx_engine/loaders/load_jangtq_dsv41.py`, `utils/dsv41_dspark_generator.py`, `utils/single_batch_generator.py`, `scheduler.py` |
 
+## Environment flags
+
+Read by this package. Every `VMLX_DSV41_*` flag defaults to on and is turned off by `0`, `false`, `off` or
+`no` (any case, `model._env_on`); all but `VMLX_DSV41_FUSED_INDEX` are read once at import. Turning one off
+restores the slower path it replaced; numerics are described in the sections above (bit-identical except
+the index-score kernels and suffix pruning, which is exact at the prompt end).
+
+| flag | default | effect when on | where |
+|---|---|---|---|
+| `VMLX_DSV41_LAYER_ASYNC` | on | forwards of <= 16 rows submit each layer to the GPU as it is built (`mx.async_eval`); bit-identical | `model.py:43` |
+| `VMLX_DSV41_ROUTER_GEMV` | on | router logits for <= 8 rows from the bf16 gate weight in MLX's f32 GEMV order (`metal_decode.router_logits`) | `model.py:48` |
+| `VMLX_DSV41_FUSED_MOE` | on | routed + shared experts for <= 8 rows in two Metal dispatches (`metal_decode.moe_decode`); 1-row JANGT decode through vMLX `jt_moe_decode` | `model.py:52` |
+| `VMLX_DSV41_FUSED_HC` | on | hyper-connection stage for <= 8 rows in three dispatches per sublayer; self-checked once per process, only where f32 GEMMs round to TF32 | `model.py:57` |
+| `VMLX_DSV41_FAST_ROPE` | on | `(start, step)` positions through `mx.fast.rope` instead of the compiled cos/sin graph | `model.py:123` |
+| `VMLX_DSV41_SUFFIX_PRUNE` | on | prompt-suffix pruning of layers 21–39 when `prompt_end` is passed (Prompt-suffix pruning above) | `model.py:356` |
+| `VMLX_DSV41_INDEX_BF16` | on | fused index scores with bf16 operands on the M5 matrix units; off or older vMLX: fp32 operands | `model.py:393` |
+| `VMLX_DSV41_INDEX_CHUNK_EVAL` | on | long-context prefill evaluates each index query chunk's top-k before the next chunk (lower transient memory) | `model.py:399` |
+| `VMLX_DSV41_FUSED_INDEX` | on | prefill index scores through vMLX `dsa_pool_index_scores` (read per call); off or no vMLX: stock bf16 path | `model.py:500` |
+| `MLX_ENABLE_TF32` | on (MLX's flag) | read only to decide whether f32 GEMMs round to TF32 (`metal_decode._tf32`), which gates `VMLX_DSV41_FUSED_HC`; `0` / `false` / `False` keeps the stock hc ops | `metal_decode.py:750` |
+
+Read by vMLX, not here: `VMLX_FP8_ROWS_QMV` (the multi-row mxfp8 QMV behind `model.FP8_ROWS`, per call),
+`VMLX_DSV41_DSPARK` (load the draft), `VMLX_DSV41_DSPARK_ADAPTIVE` (governor), `VMLX_DSV41_DSPARK_SAMPLED`
+(sampled requests through `SpecSampler`), `VMLX_DSV41_DSPARK_PREFILL_STEP` (prefill chunk with the draft
+resident).
+
 ## Residency
 
 - Backbone weights (main bundle dir, ~197 GB) are loaded into owned, wired memory. No mmap
@@ -213,8 +238,11 @@ The standalone numbers above only hold in `vmlx serve` with two settings, both n
 - VL requests run through the DSpark generator subclass of `SingleBatchGenerator`. The
   scheduler must detect the generator with `isinstance`, not a class-name comparison, or
   images are silently dropped.
-- Image spans must be in a single start_pos-0 prefill forward. Image tokens take no part in
-  n-grams (`engram_mask = ~image_mask`), and image prefills don't use the lookahead path.
+- Images may sit anywhere in the prompt. The engine's chunked prefill (`SingleBatchGenerator._model_call`)
+  passes each image with the chunk that holds its span, `ImageInput.start` made chunk-relative, and
+  `token_types` sliced to the chunk; `_dsv41_vl_chunk_len` shortens or extends a chunk so no image is
+  split. `DSV41.forward` / `Model.__call__` take any chunk this way. Image tokens take no part in n-grams
+  (`engram_mask = ~image_mask`), and chunks with image tokens don't use a lookahead record.
 
 ## Measuring
 
@@ -266,6 +294,7 @@ template regenerated for that MLX.
   exact greedy identity).
 - `tests/test_chunking.py` assumes 32-dim index heads, which don't fit the 64-wide groups of the
   4-bit pools; it needs real-geometry heads.
-- Logits top-2 are often exactly tied (bf16 head output), so chunk boundaries flip first
-  tokens; compare head precision with the reference.
+- Chunk boundaries can still flip a near-tied first token: the head is fp32 now (fp32 input, fp32 logits,
+  as the reference), which removed the exact bf16 ties, but chunking changes the bf16 hidden states
+  slightly (cosine ~0.999), enough to flip a top-2 margin below ~0.05 (DECODE_DSPARK_METHODS M1).
 - `iogpu.wired_limit_mb` raise not tested.
