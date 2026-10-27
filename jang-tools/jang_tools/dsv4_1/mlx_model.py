@@ -437,7 +437,9 @@ def load_deepseek_v41(model_path, *, engram_dir=None, skip_params_eval: bool = T
     """Load a DeepSeek-V4.1-Flash JANG bundle through the validated runtime and wrap it for the engine.
 
     Returns ``(model, tokenizer)``. The tokenizer is the bundle's ``tokenizers.Tokenizer``; the caller
-    (engine loader) wraps it as needed."""
+    (engine loader) wraps it as needed. ``skip_params_eval`` is accepted for the engine loaders' common
+    signature (vMLX ``load_jangtq_dsv41_model`` passes it) and has no effect: ``DSV41`` evaluates the
+    weights shard by shard while loading."""
     from jang_tools.dsv41.model import DSV41
 
     rt = DSV41(model_path, engram_dir=engram_dir, wired=wired)
