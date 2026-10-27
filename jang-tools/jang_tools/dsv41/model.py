@@ -122,7 +122,7 @@ def yarn_inv_freq(dim, base, original_seq_len, factor, beta_fast, beta_slow) -> 
 # batch -- run through mx.fast.rope: one kernel instead of the angle / cos / sin / rotate graph (~8 dispatches per
 # call, 3-4 calls per layer per forward). Same fp32 angles (MLX scales the integer position, then divides by the
 # wavelength) and the same bf16 store. VMLX_DSV41_FAST_ROPE=0 keeps the compiled cos/sin path.
-FAST_ROPE = os.environ.get("VMLX_DSV41_FAST_ROPE", "1").strip().lower() not in {"0", "false", "off", "no"}
+FAST_ROPE = _env_on("VMLX_DSV41_FAST_ROPE")
 
 
 class Rope:
@@ -364,7 +364,7 @@ GATHER_MAX_QUERIES = 8
 # Prompt-suffix pruning (Model.__call__ prompt_end): the layers after the last KV-source layer own no
 # cache but their 128-token windows, so each one only needs the prompt rows the last prompt token can
 # still reach through the windows above it. VMLX_DSV41_SUFFIX_PRUNE=0 runs every row through every layer.
-SUFFIX_PRUNE = os.environ.get("VMLX_DSV41_SUFFIX_PRUNE", "1").strip().lower() not in {"0", "false", "off", "no"}
+SUFFIX_PRUNE = _env_on("VMLX_DSV41_SUFFIX_PRUNE")
 
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
@@ -401,13 +401,13 @@ TOPK_BLOCK_MIN = 65536
 TOPK_BLOCK = 64
 # Fused index scores take the bf16 q / index keys / weights as is (the reference scores in bf16) on the
 # M5 matrix units when vMLX supports it; VMLX_DSV41_INDEX_BF16=0 keeps fp32 operands.
-FUSED_INDEX_BF16 = os.environ.get("VMLX_DSV41_INDEX_BF16", "1").strip().lower() not in {"0", "false", "off", "no"}
+FUSED_INDEX_BF16 = _env_on("VMLX_DSV41_INDEX_BF16")
 # Long-context prefill splits each index layer into query chunks of ~2**28 scores (2 chunks at 512k keys, 4 at 1M),
 # each with [C, T] score / mask / top-k temporaries in one lazy graph. Evaluating each chunk's indices before the
 # next chunk (same arithmetic) measured, 1M prefill at 1024-token chunks, interleaved per chunk on M5 Max: 786k-1M
 # transient median 8.4 -> 6.2 GiB, max 11.6 -> 8.3 GiB, 4-6 % faster from 262k on; unchanged below.
 # VMLX_DSV41_INDEX_CHUNK_EVAL=0 keeps the single graph.
-INDEX_CHUNK_EVAL = os.environ.get("VMLX_DSV41_INDEX_CHUNK_EVAL", "1").strip().lower() not in {"0", "false", "off", "no"}
+INDEX_CHUNK_EVAL = _env_on("VMLX_DSV41_INDEX_CHUNK_EVAL")
 
 
 def topk_indices(scores, k):
@@ -508,7 +508,7 @@ def _fused_index_scores():
     """vMLX's fused DSA index-score Metal kernel (`dsa_pool_index_scores`), or None when vMLX is not
     importable or VMLX_DSV41_FUSED_INDEX=0. The kernel returns None for shapes it does not admit, and
     the caller then takes the stock path."""
-    if os.environ.get("VMLX_DSV41_FUSED_INDEX", "1").strip().lower() in {"0", "false", "off", "no"}:
+    if not _env_on("VMLX_DSV41_FUSED_INDEX"):
         return None
     try:
         from vmlx_engine.metal.dsa_index_scores import dsa_pool_index_scores
