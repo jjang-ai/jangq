@@ -86,7 +86,15 @@ def _all(on):
 
 FLAG_SETTERS["all"] = _all
 FLAG_SETTERS.update(router_gemv=_flag("ROUTER_GEMV"), fused_moe=_flag("FUSED_MOE"), fused_hc=_flag("FUSED_HC"),
-                    hc_boundary=_flag("HC_BOUNDARY"))
+                    hc_boundary=_flag("HC_BOUNDARY"), attn_split=_flag("ATTN_SPLIT"))
+
+
+def _tf_layout(on):
+    for name in ("HC_BOUNDARY", "ATTN_SPLIT"):
+        setattr(M, name, on)
+
+
+FLAG_SETTERS["tf_layout"] = _tf_layout
 
 
 def _chain(a, op):

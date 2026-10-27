@@ -291,10 +291,92 @@ def test_hc_boundary_decode_close_to_stage(monkeypatch):
     assert cos.min() > 0.9999, cos.min()
 
 
+# ----------------------------------------------------------------------------- split sparse attention
+
+@pytest.mark.parametrize("S", [1, 3])
+def test_attend_decode_matches_sparse_attention(S):
+    """attend_decode (window rows + 4-bit pool picks read by index) vs the gather + sparse_attention path, with
+    masked window and pick slots: equal to the reordered sums' rounding; window-only rows too."""
+    from jang_tools.dsv41 import metal_decode as MD
+    k = mx.random.key
+    H, D, L, T, KC = 64, 512, 128 + S, 1500, 512
+    q = (mx.random.normal((1, S, H, D), key=k(11)) * 0.5).astype(mx.bfloat16)
+    raw = (mx.random.normal((1, L, D), key=k(12)) * 0.5).astype(mx.bfloat16)
+    pool = M.QuantGrowBuffer()
+    pool.append((mx.random.normal((1, T, D), key=k(13)) * 0.5).astype(mx.bfloat16))
+    widx = (mx.arange(S)[:, None] + mx.arange(128)[None] + (L - 128 - S + 1))[None].astype(mx.int32)
+    widx = mx.where(mx.arange(128)[None, None] < 2, -1, widx)  # the window's first slots empty
+    cidx = mx.random.randint(0, T, (1, S, KC), key=k(14)).astype(mx.int32)
+    cidx = mx.where(mx.arange(KC)[None, None] % 97 == 0, -1, cidx)
+    sink = mx.random.normal((H,), key=k(15))
+    for c in (cidx, None):
+        got = MD.attend_decode(q[0], raw[0], widx[0], None if c is None else c[0],
+                               None if c is None else (pool.wq[0], pool.scales[0], pool.biases[0]), sink,
+                               D ** -0.5, M.GROUP_SIZE)
+        kv, idxs = (raw, widx) if c is None else M.append_compressed_rows(raw, widx, c, pool, T, None, gather=True)
+        ref = M.sparse_attention(q, kv, sink, idxs, D ** -0.5)[0]
+        rel = float((mx.abs(got - ref).max() / mx.abs(ref).max()).item())
+        assert got.shape == (S, H, D) and got.dtype == mx.float32
+        assert 0.0 < rel < 2e-3, rel  # not vacuous: the sums do run in another order
+
+
+def _run_forced(model, tokens):
+    """Prefill PROMPT, then feed `tokens` one forward each: the last-row logits of every forward (teacher-forced)."""
+    caches = S.new_caches(model.args)
+    out = [np.array(S.forward(model, PROMPT, caches, 0).astype(mx.float32)).reshape(-1, model.args.vocab_size)[-1]]
+    for i, t in enumerate(tokens):
+        out.append(np.array(S.forward(model, [t], caches, len(PROMPT) + i).astype(mx.float32)).reshape(-1))
+    return np.stack(out)
+
+
+def test_attn_split_decode_close_to_gather(monkeypatch):
+    """Whole decode (real attention width, compressed and indexed layers), teacher-forced: the split attention vs
+    the gather + core with the core's matmuls in full fp32 (on the CPU stream). On M5 GPUs MLX's fp32 matmuls
+    round to TF32 (MLX_ENABLE_TF32=1) and the split kernel does not, so against the GPU core the difference is the
+    core's TF32 rounding, which a random synthetic model's near-tied routing then amplifies (measured: cos 0.87-0.97
+    at three of 12 steps with TF32, >= 0.99987 at every step without). Every step close; the kernel really ran."""
+    from jang_tools.dsv41 import metal_decode as MD
+    model = S.build(S.real_args(6, 16))
+    tokens = [587, 573, 358, 967, 685, 461, 787, 89, 12, 400, 33, 777]
+    calls = []
+    orig = MD.attend_decode
+
+    def counted(*a, **kw):
+        out = orig(*a, **kw)
+        calls.append(out is not None)
+        return out
+
+    monkeypatch.setattr(MD, "attend_decode", counted)
+    monkeypatch.setattr(M, "_attn_core", lambda *a: _core_cpu(*a))
+    monkeypatch.setattr(M, "ATTN_SPLIT", False)
+    a = _run_forced(model, tokens)
+    assert not calls
+    monkeypatch.setattr(M, "ATTN_SPLIT", True)
+    b = _run_forced(model, tokens)
+    assert calls and all(calls) and M._ATTN_SPLIT_OK == [True]
+    cos = (a * b).sum(-1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1))
+    assert cos.min() > 0.9998, cos
+    assert (a.argmax(-1) == b.argmax(-1)).all()
+
+
+def _core_cpu(q, kv, sink, ix, scale):
+    """sparse_attention's core (model._attn_core's arithmetic) on the CPU stream: fp32 matmuls without TF32."""
+    with mx.stream(mx.cpu):
+        valid = ix >= 0
+        g = mx.take(kv, mx.where(valid, ix, 0), axis=0)
+        s = (q.astype(mx.float32) @ g.transpose(0, 2, 1)) * scale
+        s = mx.where(valid[:, None, :], s, -mx.inf)
+        m = mx.maximum(mx.max(s, axis=-1, keepdims=True), sink[None, :, None])
+        p = mx.exp(s - m)
+        denom = mx.sum(p, axis=-1, keepdims=True) + mx.exp(sink[None, :, None] - m)
+        return (p @ g) / denom
+
+
 def test_fused_hc_decode_is_bit_exact(tiny, monkeypatch):
     from jang_tools.dsv41 import metal_decode as MD
     M._HC_FUSED_OK.clear()
     monkeypatch.setattr(M, "HC_BOUNDARY", False)  # the 3-dispatch stage (the 2-dispatch boundary reorders the mixes)
+    monkeypatch.setattr(M, "ATTN_SPLIT", False)
     if not MD._tf32():
         # This device's f32 GEMMs are not TF32 (or MLX_ENABLE_TF32=0): the fused hc path must stay off,
         # so decode with the flag on is the stock decode.
@@ -319,6 +401,7 @@ def test_fused_hc_decode_is_bit_exact(tiny, monkeypatch):
 
 def test_all_fusions_together_decode_bit_exact(tiny, monkeypatch):
     monkeypatch.setattr(M, "HC_BOUNDARY", False)  # not bit-identical by design (test_hc_boundary_*)
+    monkeypatch.setattr(M, "ATTN_SPLIT", False)
     flags = ("ROUTER_GEMV", "FUSED_MOE", "FUSED_HC", "LAYER_ASYNC")
     for f in flags:
         monkeypatch.setattr(M, f, False)

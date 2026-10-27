@@ -60,6 +60,11 @@ FUSED_HC = _env_on("VMLX_DSV41_FUSED_HC")
 # stage except the 24 mixes' dot products and their sum of squares (parallel partial sums: f32-ulp differences in
 # pre / post / comb). VMLX_DSV41_HC_BOUNDARY=0 keeps the bit-identical stage.
 HC_BOUNDARY = _env_on("VMLX_DSV41_HC_BOUNDARY")
+# Decode / verify rows' sparse attention in two dispatches (metal_decode.attend_decode, TensorFold's split
+# layout) reading the window and the 4-bit pool's picks by index, instead of the picks' gather + concatenation
+# + fp32 cast + compiled core. Reordered sums (checked once per process against sparse_attention).
+# VMLX_DSV41_ATTN_SPLIT=0 keeps the gather + core.
+ATTN_SPLIT = _env_on("VMLX_DSV41_ATTN_SPLIT")
 
 
 @dataclass
@@ -588,6 +593,38 @@ class Indexer(nn.Module):
         return mx.concatenate(out_idx, axis=0)[None]
 
 
+_ATTN_SPLIT_OK: list = []
+
+
+def _attn_split_ok() -> bool:
+    """Once per process: attend_decode agrees with the gather + sparse_attention path (window rows with a masked
+    slot, 4-bit pool picks with an empty one) to within the reordered sums' rounding."""
+    if not _ATTN_SPLIT_OK:
+        ok = False
+        try:
+            from jang_tools.dsv41.metal_decode import attend_decode
+            k = lambda i: mx.random.key(i)  # noqa: E731
+            S, H, D, L, T = 2, 64, 512, 40, 96
+            q = (mx.random.normal((1, S, H, D), key=k(1)) * 0.3).astype(mx.bfloat16)
+            raw = (mx.random.normal((1, L, D), key=k(2)) * 0.3).astype(mx.bfloat16)
+            pool = QuantGrowBuffer()
+            pool.append((mx.random.normal((1, T, D), key=k(3)) * 0.3).astype(mx.bfloat16))
+            widx = mx.broadcast_to(mx.arange(L, dtype=mx.int32), (1, S, L))
+            widx = mx.where(mx.arange(L)[None, None] == 3, -1, widx)
+            cidx = mx.random.randint(0, T, (1, S, 24), key=k(4)).astype(mx.int32)
+            cidx = mx.where(mx.arange(24)[None, None] == 5, -1, cidx)
+            sink = mx.random.normal((H,), key=k(5))
+            got = attend_decode(q[0], raw[0], widx[0], cidx[0], (pool.wq[0], pool.scales[0], pool.biases[0]),
+                                sink, D ** -0.5, GROUP_SIZE)
+            kv, idxs = append_compressed_rows(raw, widx, cidx, pool, T, None, gather=True)
+            ref = sparse_attention(q, kv, sink, idxs, D ** -0.5)[0]
+            ok = got is not None and float(mx.abs(got - ref).max().item()) <= 2e-3 * float(mx.abs(ref).max().item())
+        except (RuntimeError, ValueError, TypeError):  # kernel build / launch failed: gather + core
+            ok = False
+        _ATTN_SPLIT_OK.append(ok)
+    return _ATTN_SPLIT_OK[0]
+
+
 def append_compressed_rows(raw, widx, cidx, pool, T, shared, gather=False):
     """Append the compressed-pool rows the queries attend to after the window rows.
 
@@ -698,11 +735,21 @@ class Attention(nn.Module):
         if shared.capture:
             cache.verify_kv = (start, kv)
 
+        T = 0
         if self.ratio:
             T, cidx = self._compressed(x, qr, start, cache, shared)
-            if T:
-                raw, widx = append_compressed_rows(raw, widx, cidx, shared.compress_kv, T, shared,
-                                                   gather=S <= GATHER_MAX_QUERIES)
+        if ATTN_SPLIT and S <= GATHER_MAX_QUERIES and (not T or isinstance(shared.compress_kv, QuantGrowBuffer)) \
+                and _attn_split_ok():
+            from jang_tools.dsv41.metal_decode import attend_decode
+            pool = shared.compress_kv
+            o = attend_decode(q[0], raw[0], widx[0], cidx[0] if T else None,
+                              (pool.wq[0], pool.scales[0], pool.biases[0]) if T else None,
+                              self.attn_sink, self.scale, GROUP_SIZE)
+            if o is not None:
+                return o[None]
+        if T:
+            raw, widx = append_compressed_rows(raw, widx, cidx, shared.compress_kv, T, shared,
+                                               gather=S <= GATHER_MAX_QUERIES)
         return sparse_attention(q, raw, self.attn_sink, widx, self.scale)
 
     def _compressed(self, x, qr, start_pos, cache: LayerCache, shared: Shared):

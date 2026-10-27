@@ -958,3 +958,145 @@ def hc_boundary_decode(x, part, pre, scale, base, norm_w, norm_eps, rms_eps, hc_
         grid=(1024, R, 1), threadgroup=(1024, 1, 1),
         output_shapes=[(R, D), (R, 4), (R, 4), (R, 16)], output_dtypes=[mx.bfloat16] + [mx.float32] * 3)
     return xin, p, po, cb.reshape(R, 4, 4)
+
+
+# ----------------------------------------------------------------------------- sparse attention (decode rows)
+# TensorFold's split decode attention (BobClawblaw/TensorFold deepseek-v41-main, v41_attend.metal ds_attend_split
+# / ds_attend_merge; Apache-2.0), reading our caches: a threadgroup per (16 heads, 16 keys, row) loads its keys
+# once into threadgroup memory -- window rows by index from the raw window, compressed picks by index from the
+# 4-bit pool, dequantized on load as mx.dequantize writes them -- and writes the chunk's max, sum and unnormalized
+# output; the merge folds the chunks and the sink into one softmax. Replaces the picks' gather (3 takes and a
+# dequantize), the concatenation, the fp32 cast and the compiled core (gather, 2 matmuls, reductions). The sums
+# run in another order than the core's (and in full fp32 where MLX's fp32 matmuls round to TF32).
+
+_ATTN_SPLIT_SRC = r"""
+    const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
+    const uint t = thread_position_in_threadgroup.x;
+    const int h = int(threadgroup_position_in_grid.x) * 16 + int(sg);
+    const int chunk = int(threadgroup_position_in_grid.y), s = int(threadgroup_position_in_grid.z);
+    const int W = dims[0], KC = dims[1], NK = W + KC, CH = (NK + 15) / 16;
+    const int k0 = chunk * 16, k1 = metal::min(NK, k0 + 16);
+    threadgroup T ks[16][HD];
+    threadgroup float sc[16][16];
+    threadgroup bool ok[16];
+    for (int i = int(t); i < 16 * (HD / 8); i += 512) {
+      const int kk = i / (HD / 8), c8 = i % (HD / 8), j = k0 + kk;
+      uint4 v = uint4(0);
+      bool valid = false;
+      if (j < k1) {
+        if (j < W) {
+          const int ix = widx[s * W + j];
+          valid = ix >= 0;
+          if (valid) v = ((const device uint4*)(raw + (size_t)ix * HD))[c8];
+        } else {
+          const int c = cidx[s * KC + (j - W)];
+          valid = c >= 0;
+          if (valid) {
+            const uint w32 = wq[(size_t)c * (HD / 8) + c8];
+            const size_t g = (size_t)c * (HD / GS) + (c8 * 8) / GS;
+            const T scale = scales[g], bias = biases[g];
+            thread T e8[8];
+            for (int e = 0; e < 8; e++) e8[e] = static_cast<T>((w32 >> (4 * e)) & 0xFu) * scale + bias;
+            v = *(thread uint4*)e8;
+          }
+        }
+      }
+      ((threadgroup uint4*)ks[kk])[c8] = v;
+      if (c8 == 0) ok[kk] = valid;
+    }
+    float q[16];
+    const device T* qr = Q + ((size_t)s * NH + h) * HD;
+    for (int i = 0; i < 16; i++) q[i] = float(qr[lane * 16 + i]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int kk = 0; kk < k1 - k0; kk++) {
+      float d = 0.0f;
+      for (int i = 0; i < 16; i++) d += q[i] * float(ks[kk][lane * 16 + i]);
+      d = simd_sum(d);
+      if (lane == 0) sc[sg][kk] = ok[kk] ? d * scl[0] : -INFINITY;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float m = -1e30f;
+    for (int j = int(lane); j < k1 - k0; j += 32) m = metal::max(m, sc[sg][j]);
+    m = simd_max(m);
+    float l = 0.0f;
+    for (int j = int(lane); j < k1 - k0; j += 32) {
+      const float p = metal::precise::exp(sc[sg][j] - m);
+      sc[sg][j] = p;
+      l += p;
+    }
+    l = simd_sum(l);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float o[16];
+    for (int i = 0; i < 16; i++) o[i] = 0.0f;
+    for (int kk = 0; kk < k1 - k0; kk++) {
+      const float p = sc[sg][kk];
+      for (int i = 0; i < 16; i++) o[i] += p * float(ks[kk][lane * 16 + i]);
+    }
+    const size_t part = ((size_t)s * NH + h) * CHMAX + chunk;
+    for (int i = 0; i < 16; i++) po[part * HD + lane * 16 + i] = o[i];
+    if (lane == 0) { pml[part * 2] = m; pml[part * 2 + 1] = l; }
+"""
+
+_ATTN_MERGE_SRC = r"""
+    const uint t = thread_position_in_threadgroup.x;
+    const int h = int(threadgroup_position_in_grid.y), s = int(threadgroup_position_in_grid.z);
+    const int CH = (dims[0] + dims[1] + 15) / 16;
+    threadgroup float wgt[CHMAX];
+    threadgroup float lsum[CHMAX];
+    const size_t base = ((size_t)s * NH + h) * CHMAX;
+    float m = sink[h];
+    for (int c = 0; c < CH; c++) m = metal::max(m, pml[(base + c) * 2]);
+    for (int c = int(t); c < CH; c += HD) {
+      wgt[c] = metal::precise::exp(pml[(base + c) * 2] - m);
+      lsum[c] = pml[(base + c) * 2 + 1];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float denom = metal::precise::exp(sink[h] - m);
+    for (int c = 0; c < CH; c++) denom += lsum[c] * wgt[c];
+    float acc = 0.0f;
+    for (int c = 0; c < CH; c++) acc += po[(base + c) * HD + t] * wgt[c];
+    out[((size_t)s * NH + h) * HD + t] = acc / denom;
+"""
+
+_ATTN_CHMAX = (128 + 512 + 15) // 16  # the window and the indexer's picks
+
+
+@lru_cache(maxsize=None)
+def _attn_kernels():
+    split = mx.fast.metal_kernel(
+        name="dsv41_attend_split",
+        input_names=["Q", "raw", "widx", "cidx", "wq", "scales", "biases", "dims", "scl"],
+        output_names=["po", "pml"], source=_ATTN_SPLIT_SRC)
+    merge = mx.fast.metal_kernel(name="dsv41_attend_merge", input_names=["po", "pml", "sink", "dims"],
+                                 output_names=["out"], source=_ATTN_MERGE_SRC)
+    return split, merge
+
+
+def attend_decode(q, raw, widx, cidx, pool, sink, scale, group_size: int):
+    """Sparse attention for decode / verify rows. q [S, H, D] bf16 (RoPE applied), raw [L, D] bf16 window keys,
+    widx [S, W] int32 into raw, cidx [S, K] int32 into the 4-bit pool (wq [T, D/8], scales, biases; -1 = none) or
+    None, sink [H] -> [S, H, D] float32 as sparse_attention's core; None if not eligible."""
+    S, H, D = q.shape
+    W = widx.shape[1]
+    KC = 0 if cidx is None else cidx.shape[1]
+    if (not _gpu() or S > MAX_ROWS or D != 512 or H % 16 or q.dtype != mx.bfloat16 or raw.dtype != mx.bfloat16
+            or W + KC > 16 * _ATTN_CHMAX or W + KC == 0):
+        return None
+    if KC:
+        wq, scales, biases = pool
+        if wq.dtype != mx.uint32 or wq.shape[-1] * 8 != D or scales.dtype != mx.bfloat16 or D % group_size:
+            return None
+    else:
+        wq = mx.zeros((1, D // 8), mx.uint32)
+        scales = biases = mx.zeros((1, D // group_size), mx.bfloat16)
+        cidx = mx.zeros((S, 1), mx.int32)
+    split, merge = _attn_kernels()
+    dims = mx.array([W, KC], mx.int32)
+    tmpl = [("T", mx.bfloat16), ("HD", D), ("NH", H), ("GS", group_size), ("CHMAX", _ATTN_CHMAX)]
+    po, pml = split(inputs=[q, raw, widx.astype(mx.int32), cidx.astype(mx.int32), wq, scales, biases, dims,
+                            mx.array([scale], mx.float32)],
+                    template=tmpl, grid=(512 * (H // 16), (W + KC + 15) // 16, S), threadgroup=(512, 1, 1),
+                    output_shapes=[(S * H * _ATTN_CHMAX, D), (S * H * _ATTN_CHMAX, 2)],
+                    output_dtypes=[mx.float32, mx.float32])
+    return merge(inputs=[po, pml, sink.astype(mx.float32), dims], template=tmpl, grid=(D, H, S),
+                 threadgroup=(D, 1, 1), output_shapes=[(S, H, D)], output_dtypes=[mx.float32])[0]
