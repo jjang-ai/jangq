@@ -1098,3 +1098,89 @@ def attend_decode(q, raw, widx, cidx, pool, sink, scale, group_size: int):
                     output_dtypes=[mx.float32, mx.float32])
     return merge(inputs=[po, pml, sink.astype(mx.float32), dims], template=tmpl, grid=(D, H, S),
                  threadgroup=(D, 1, 1), output_shapes=[(S, H, D)], output_dtypes=[mx.float32])[0]
+
+
+# ----------------------------------------------------------------------------- router top-k (decode rows)
+# Routing after the router logits in one dispatch: one threadgroup a row with a thread an expert computes
+# sqrt(softplus(logit)) (MLX's logaddexp(x, 0)
+# and log1p bodies), adds the row's bias, and picks the top-k in k rounds of a simd-shuffle argmax (lower id on ties);
+# thread 0 normalizes the picked scores in pick order and applies the route scale. Replaces sqrt / softplus / add /
+# argpartition / take_along_axis / sum / divide / multiply. Same experts as argpartition (bar exact ties); the
+# weights' sum runs in pick order (f32 rounding).
+
+_ROUTE_SRC = r"""
+    const uint t = thread_position_in_threadgroup.x, lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup, r = threadgroup_position_in_grid.y;
+    threadgroup float best_v[32];
+    threadgroup int best_i[32];
+    threadgroup int sel[16];
+    threadgroup float wsel[16];
+    constexpr int NSG = (E + 31) / 32;
+    float score = 0.0f, key = -INFINITY;
+    if (t < uint(E)) {
+      const float x = logits[r * E + t];
+      // MLX LogAddExp(x, 0) with MLX's log1p, then Sqrt
+      const float mxv = metal::max(x, 0.0f), mnv = metal::min(x, 0.0f);
+      float sp;
+      if (metal::isnan(x)) sp = x;
+      else if (mnv == -INFINITY || mxv == INFINITY) sp = mxv;
+      else {
+        const float e = metal::exp(mnv - mxv);
+        const float xp1 = 1.0f + e;
+        sp = mxv + (xp1 == 1.0f ? e : e * (metal::log(xp1) / (xp1 - 1.0f)));
+      }
+      score = metal::precise::sqrt(sp);
+      key = score + bias[(BIAS_ROWS ? r * E : 0) + t];
+    }
+    for (int k = 0; k < K; k++) {
+      float v = key;
+      int id = t < uint(E) ? int(t) : INT_MAX;
+      for (ushort o = 16; o > 0; o >>= 1) {
+        const float ov = simd_shuffle_down(v, o);
+        const int oi = simd_shuffle_down(id, o);
+        if (ov > v || (ov == v && oi < id)) { v = ov; id = oi; }
+      }
+      if (lane == 0) { best_v[sg] = v; best_i[sg] = id; }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (t == 0) {
+        float bv = best_v[0];
+        int bi = best_i[0];
+        for (int s = 1; s < NSG; s++)
+          if (best_v[s] > bv || (best_v[s] == bv && best_i[s] < bi)) { bv = best_v[s]; bi = best_i[s]; }
+        sel[k] = bi;
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (int(t) == sel[k]) { wsel[k] = score; key = -INFINITY; }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (t == 0) {
+      float sum = 0.0f;
+      if (NORM) for (int k = 0; k < K; k++) sum += wsel[k];
+      for (int k = 0; k < K; k++) {
+        idx[r * K + k] = sel[k];
+        w[r * K + k] = (NORM ? wsel[k] / (sum + 1e-20f) : wsel[k]) * scale[0];
+      }
+    }
+"""
+
+
+@lru_cache(maxsize=None)
+def _route_kernel():
+    return mx.fast.metal_kernel(name="dsv41_route_topk", input_names=["logits", "bias", "scale"],
+                                output_names=["idx", "w"], source=_ROUTE_SRC)
+
+
+def route_decode(logits, bias, topk: int, route_scale: float, norm: bool):
+    """logits [R, E] f32, bias [E] or [R, E] -> (idx [R, k] int32 in pick order, w [R, k] f32 normalized and scaled),
+    or None if not eligible."""
+    if logits.ndim != 2 or logits.dtype != mx.float32 or not _gpu():
+        return None
+    R, E = logits.shape
+    if R > MAX_ROWS or E > 1024 or not 0 < topk <= 16 or bias.shape not in ((E,), (R, E)):
+        return None
+    threads = (E + 31) // 32 * 32
+    return _route_kernel()(
+        inputs=[logits, bias.astype(mx.float32), mx.array([route_scale], mx.float32)],
+        template=[("E", E), ("K", topk), ("NORM", bool(norm and topk > 1)), ("BIAS_ROWS", bias.ndim == 2)],
+        grid=(threads, R, 1), threadgroup=(threads, 1, 1),
+        output_shapes=[(R, topk), (R, topk)], output_dtypes=[mx.int32, mx.float32])
