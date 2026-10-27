@@ -152,6 +152,23 @@ def test_recovers_when_acceptance_returns():
     assert stats["spec_steps"] > 60
 
 
+def test_governor_cost_is_ratio_of_means():
+    # speculation alternates a 6-token and a 1-token step of 50 ms (14.3 ms/token); AR costs 21 ms/token.
+    # A mean of per-step ratios reads 29 ms/token and spends most steps in AR stretches.
+    g = _Governor()
+    spec = ar = 0
+    for _ in range(400):
+        if g.choose() == "spec":
+            g.record("spec", 0.050, 6 if spec % 2 == 0 else 1)
+            spec += 1
+        else:
+            g.record("ar", 0.021, 1)
+            ar += 1
+    assert not g.ar_mode
+    assert ar < 12, (ar, spec)
+    assert abs(g.spec - 0.050 / 3.5) < 0.004, g.spec
+
+
 def test_governor_has_no_terminal_state():
     g = _Governor(probe_every=4, ar_probe_every=8)
     seq = []
