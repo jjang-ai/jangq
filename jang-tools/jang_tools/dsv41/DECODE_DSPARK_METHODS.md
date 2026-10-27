@@ -70,9 +70,12 @@ identical to greedy on code (59/59) and structured (29/29) over those short runs
   it recovers, always within the draft head's physical size `bs` (a capacity bound, not a policy depth).
 - **Wall-clock governor (replaces the zero-accept streak trigger, 2026-10-25 audit).** Acceptance
   alone cannot keep speculation at or above AR speed: a step that accepts 1 of 5 drafts resets any
-  zero-accept streak yet still pays draft + verify + commit forwards. `_Governor` keeps an EMA of
-  seconds per emitted token for speculative steps and for AR steps (step start to next step start,
-  every sync included) and speculates only while that is cheaper than AR. AR mode issues a
+  zero-accept streak yet still pays draft + verify + commit forwards. `_Governor` keeps EMAs of
+  step seconds and of tokens emitted per step for speculative steps and for AR steps (step start to
+  next step start, every sync included) and speculates only while their ratio, seconds per emitted
+  token, is cheaper than AR. (Until 2026-10-27 it averaged per-step ratios; one-token missed drafts
+  then dominated the estimate, and once the decode kernels made AR faster a single miss on code text
+  flipped speculation that was winning into a 16-token AR stretch.) AR mode issues a
   speculative probe every `probe_every = 16` AR tokens (a probe replaces the stale estimate, so one
   good probe switches back); spec mode re-measures AR every `ar_probe_every = 64` steps (AR cost
   grows with context). Neither mode is terminal. Synthetic-timing test:

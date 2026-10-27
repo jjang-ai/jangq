@@ -608,9 +608,12 @@ class SpecSampler:
 class _Governor:
     """Wall-clock AR/speculation governor for DSparkRunner (adaptive mode).
 
-    Tracks an EMA of seconds per EMITTED token for speculative steps and for AR steps, each measured
-    from step start to the next step start (i.e. including every sync, draft, verify and commit
-    forward, and the consumer's time between yields, which is the same per token for both modes).
+    Tracks, for speculative steps and for AR steps, an EMA of step seconds and an EMA of tokens EMITTED
+    per step, each step measured from its start to the next step start (i.e. including every sync, draft,
+    verify and commit forward, and the consumer's time between yields, which is the same per token for
+    both modes). The cost per token is their ratio. A mean of per-step ratios over-weights the one-token
+    steps of a missed draft (a 6-token and a 1-token step of 50 ms each average 29 ms/token, not the
+    14 ms/token they cost), so one miss could flip speculation that was winning into an AR stretch.
 
       - speculate while spec s/token < AR s/token; otherwise take AR steps;
       - in AR mode, one speculative PROBE every ``probe_every`` AR tokens re-measures speculation
@@ -624,26 +627,39 @@ class _Governor:
     def __init__(self, probe_every=16, ar_probe_every=64, alpha=0.3, warmup_spec=2):
         self.probe_every, self.ar_probe_every = int(probe_every), int(ar_probe_every)
         self.alpha, self.warmup_spec = float(alpha), int(warmup_spec)
-        self.spec = None          # EMA seconds / emitted token, speculative steps
-        self.ar = None            # EMA seconds / emitted token, AR steps
+        self._spec = None         # EMA (seconds, emitted tokens) per speculative step
+        self._ar = None           # EMA (seconds, emitted tokens) per AR step
         self.ar_mode = False      # currently preferring AR
         self.since_probe = 0      # AR tokens since the last speculative probe (AR mode)
         self.since_ar = 0         # spec steps since the last AR measurement (spec mode)
         self.spec_stale = False   # next spec measurement replaces the estimate
         self.n_spec = 0
 
-    def _ema(self, old, x, replace=False):
-        return x if (old is None or replace) else (1 - self.alpha) * old + self.alpha * x
+    @property
+    def spec(self):
+        """Seconds per emitted token of speculative steps (None until measured)."""
+        return None if self._spec is None else self._spec[0] / self._spec[1]
+
+    @property
+    def ar(self):
+        """Seconds per emitted token of AR steps (None until measured)."""
+        return None if self._ar is None else self._ar[0] / self._ar[1]
+
+    def _ema(self, old, seconds, tokens, replace=False):
+        if old is None or replace:
+            return seconds, tokens
+        a = self.alpha
+        return (1 - a) * old[0] + a * seconds, (1 - a) * old[1] + a * tokens
 
     def record(self, mode, seconds, emitted):
-        per = float(seconds) / max(1, int(emitted))
+        seconds, tokens = float(seconds), float(max(1, int(emitted)))
         if mode == "spec":
-            self.spec = self._ema(self.spec, per, self.spec_stale)
+            self._spec = self._ema(self._spec, seconds, tokens, self.spec_stale)
             self.spec_stale = False
             self.n_spec += 1
             self.since_ar += 1
         else:
-            self.ar = self._ema(self.ar, per)
+            self._ar = self._ema(self._ar, seconds, tokens)
             self.since_ar = 0
             if self.ar_mode:
                 self.since_probe += 1
