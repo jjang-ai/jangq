@@ -513,16 +513,9 @@ def moe_decode(x, idx, w, experts, shared, swiglu_limit: float, group_size: int 
 # Each row (decode or verify) is computed as its own 1-row decode. Bit-identity with the stock ops is
 # checked once at first use (hc_selfcheck); any mismatch (another MLX, TF32 off) disables the path.
 
-_HC_STAGE_SRC = r"""
-    const uint tg = threadgroup_position_in_grid.x;
-    const uint r = threadgroup_position_in_grid.y;
-    const uint lid = thread_position_in_threadgroup.x;
-    const uint lane = thread_index_in_simdgroup;
-    const uint sg = simdgroup_index_in_threadgroup;
-    const device T* xr = x + (size_t)r * (HC * D);
-    threadgroup float tmem[1024];
-    if (tg == 0) {
-      // hc_pre: s = sum_j pre_j * x_j in f32 (sequential axis reduction), cast to T; then RMSNorm.
+# Collapse with the previous pre + RMSNorm of one row (1024 threads; x, pre, nw, xin, tmem, lid, lane, sg in
+# scope): shared by hc_stage (threadgroup 0) and hc_boundary.
+_HC_COLLAPSE_NORM_SRC = r"""      // hc_pre: s = sum_j pre_j * x_j in f32 (sequential axis reduction), cast to T; then RMSNorm.
       float p[HC];
       for (int j = 0; j < HC; j++) p[j] = pre[r * HC + j];
       float acc = 0;
@@ -577,7 +570,18 @@ _HC_STAGE_SRC = r"""
         T xv = static_cast<T>(s);
         xin[(size_t)r * D + d] = nw[d] * static_cast<T>(xv * inv);
       }
-    } else if (tg == 1) {
+"""
+
+_HC_STAGE_SRC = r"""
+    const uint tg = threadgroup_position_in_grid.x;
+    const uint r = threadgroup_position_in_grid.y;
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const device T* xr = x + (size_t)r * (HC * D);
+    threadgroup float tmem[1024];
+    if (tg == 0) {
+""" + _HC_COLLAPSE_NORM_SRC + r"""    } else if (tg == 1) {
       // sum(x^2) over the HC * D values: MLX row_reduce_looped, one threadgroup of RED_TGS threads.
       float total = 0.0f;
       if (lid < (uint)RED_TGS) {
@@ -783,3 +787,314 @@ def hc_post_decode(h, residual, post, comb):
     return post_k(inputs=[h, residual, post.astype(mx.float32), comb.reshape(R, 16).astype(mx.float32)],
                   template=[("T", mx.bfloat16), ("D", D), ("TF32", _tf32())],
                   grid=(D, R, 1), threadgroup=(256, 1, 1), output_shapes=[(R, 4, D)], output_dtypes=[mx.bfloat16])[0]
+
+
+# ----------------------------------------------------------------------------- hc boundary (2 dispatches)
+# Each hyper-connection boundary in two dispatches, per sublayer:
+#   hc_mix:      (optionally) the pending branch expanded into the streams, then the 24 mixes' and the sum of
+#                squares' partial sums, a threadgroup a 1024-value slice (20 for D = 5120): fn is read by
+#                20 cores instead of hc_stage's 6.
+#   hc_boundary: one threadgroup of 1024 a row: the partials' totals; the collapse with the previous pre and
+#                its RMSNorm (_HC_COLLAPSE_NORM_SRC, as hc_stage); the split (pre, post, Sinkhorn comb) on
+#                simdgroup 0, a comb cell a lane.
+# Bit-identical to hc_stage + hc_split + hc_post except the 24 mix dot products and the sum of squares,
+# whose partial sums run in another order (MLX's gemv / row reduction cannot be split across cores):
+# the expand is hc_post's arithmetic, the collapse + norm is hc_stage's code, and the split sums every row
+# and column of the Sinkhorn in _HC_SPLIT2_SRC's order (shuffles feed each lane its row / column in order).
+
+# The pending branch expanded into the streams (hc_post's arithmetic: comb TF32-truncated, products summed
+# pairwise, post * h added, cast to T), its values kept for the mixes; or the streams as they are.
+_HC_MIX_EXPAND = r"""
+    {
+      const uint k = col / (uint)D, d0 = col % (uint)D;
+      float c[4];
+      for (int jj = 0; jj < 4; jj++) c[jj] = TF32 ? as_type<float>(as_type<uint>(comb[r * 16 + jj * 4 + k]) & 0xFFFFE000u)
+                                                  : comb[r * 16 + jj * 4 + k];
+      const float pk = post[r * 4 + k];
+      for (int i = 0; i < 4; i++) {
+        const uint d = d0 + i;
+        const float hv = float(h[(size_t)r * D + d]);
+        float rv[4];
+        for (int jj = 0; jj < 4; jj++) rv[jj] = float(x[((size_t)r * 4 + jj) * D + d]);
+        float p0 = c[0] * rv[0], p1 = c[1] * rv[1], p2 = c[2] * rv[2], p3 = c[3] * rv[3];
+        float e = (p0 + p1) + (p2 + p3);
+        float tt = pk * hv;
+        const T o = static_cast<T>(tt + e);
+        xo[(size_t)r * (4 * D) + col + i] = o;
+        v[i] = float(o);
+      }
+    }
+"""
+_HC_MIX_LOAD = r"""
+    for (int i = 0; i < 4; i++) v[i] = float(x[(size_t)r * (4 * D) + col + i]);
+"""
+
+_HC_MIX_SRC = r"""
+    const uint j = threadgroup_position_in_grid.x, r = threadgroup_position_in_grid.y;
+    const uint t = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
+    threadgroup float red[8][MIX + 1];
+    const uint col = 1024u * j + 4u * t;
+    float v[4];
+""" + "{BRANCH}" + r"""
+    float acc[MIX + 1];
+    acc[MIX] = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
+    for (int m = 0; m < MIX; m++) {
+      const device float* f = fn + (size_t)m * (4 * D) + col;
+      acc[m] = f[0] * v[0] + f[1] * v[1] + f[2] * v[2] + f[3] * v[3];
+    }
+    for (int m = 0; m <= MIX; m++) {
+      const float s = simd_sum(acc[m]);
+      if (lane == 0) red[sg][m] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t <= (uint)MIX) {
+      float s = 0.0f;
+      for (int q = 0; q < 8; q++) s += red[q][t];
+      part[((size_t)r * SLICES + j) * (MIX + 1) + t] = s;
+    }
+"""
+
+_HC_BOUNDARY_SRC = r"""
+    const uint r = threadgroup_position_in_grid.y;
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const device T* xr = x + (size_t)r * (HC * D);
+    threadgroup float tmem[1024];
+    threadgroup float tot[MIX + 1];
+    if (lid <= (uint)MIX) {
+      float s = 0.0f;
+      for (int j = 0; j < SLICES; j++) s += part[((size_t)r * SLICES + j) * (MIX + 1) + lid];
+      tot[lid] = s;
+    }
+""" + _HC_COLLAPSE_NORM_SRC + r"""
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+      const float rs = metal::precise::rsqrt(tot[MIX] * INV_N + RMS_EPS);
+      const float s0 = scale[0], s1 = scale[1], s2 = scale[2];
+      if (lane < 4u) {
+        pre_out[r * 4 + lane] = 1.0f / (1.0f + metal::precise::exp(-((tot[lane] * rs) * s0 + base[lane]))) + EPS;
+        post_out[r * 4 + lane] = 2.0f / (1.0f + metal::precise::exp(-((tot[4 + lane] * rs) * s1 + base[4 + lane])));
+      }
+      const ushort cell = ushort(lane & 15u), row = cell & ~ushort(3), colk = cell & ushort(3);
+      float c = (tot[8 + cell] * rs) * s2 + base[8 + cell];
+      // row softmax: max and sum over the row in order
+      float mx_ = simd_shuffle(c, row);
+      for (ushort k = 1; k < 4; k++) mx_ = metal::max(mx_, simd_shuffle(c, ushort(row + k)));
+      c = metal::precise::exp(c - mx_);
+      float sum = 0.0f;
+      for (ushort k = 0; k < 4; k++) sum += simd_shuffle(c, ushort(row + k));
+      c = c / sum + EPS;
+      float cs = simd_shuffle(c, colk);
+      for (ushort k = 1; k < 4; k++) cs = cs + simd_shuffle(c, ushort(colk + 4 * k));
+      c = c / (cs + EPS);
+      for (int it = 0; it < ITERS - 1; it++) {
+        float rsum = simd_shuffle(c, row);
+        for (ushort k = 1; k < 4; k++) rsum = rsum + simd_shuffle(c, ushort(row + k));
+        c = c / (rsum + EPS);
+        cs = simd_shuffle(c, colk);
+        for (ushort k = 1; k < 4; k++) cs = cs + simd_shuffle(c, ushort(colk + 4 * k));
+        c = c / (cs + EPS);
+      }
+      if (lane < 16u) comb[r * 16 + lane] = c;
+    }
+"""
+
+
+@lru_cache(maxsize=None)
+def _hc_boundary_kernels(norm_eps: float, rms_eps: float, hc_eps: float, iters: int, n: int):
+    lit = lambda v: f"{float(v):.9e}f"  # noqa: E731
+    mix = {b: mx.fast.metal_kernel(name=f"dsv41_hc_mix_{int(b)}",
+                                   input_names=["x", "fn", "h", "post", "comb"] if b else ["x", "fn"],
+                                   output_names=["xo", "part"] if b else ["part"],
+                                   source=_HC_MIX_SRC.replace("{BRANCH}", _HC_MIX_EXPAND if b else _HC_MIX_LOAD))
+           for b in (False, True)}
+    src = (_HC_BOUNDARY_SRC.replace("NORM_EPS", lit(norm_eps)).replace("INV_N", lit(1.0 / n))
+           .replace("RMS_EPS", lit(rms_eps)).replace("ITERS", str(int(iters))).replace("EPS", lit(hc_eps)))
+    boundary = mx.fast.metal_kernel(name=f"dsv41_hc_boundary_{iters}",
+                                    input_names=["x", "part", "pre", "scale", "base", "nw"],
+                                    output_names=["xin", "pre_out", "post_out", "comb"], source=src)
+    return mix, boundary
+
+
+def hc_mix_decode(x, fn, h=None, post=None, comb=None):
+    """x [R, 4, D] bf16 streams (with h [R, D], post [R, 4], comb [R, 4, 4]: the pending branch expanded into
+    them first, hc_post_decode's arithmetic). Returns (streams, part [R, slices, 25]) or None if not eligible."""
+    if x.ndim != 3 or x.shape[1] != 4 or x.dtype != mx.bfloat16 or not _gpu():
+        return None
+    R, hc, D = x.shape
+    n = hc * D
+    if R > MAX_ROWS or D % 256 or fn.shape != (24, n) or fn.dtype != mx.float32:
+        return None
+    if h is not None and (h.shape != (R, D) or h.dtype != mx.bfloat16):
+        return None
+    mix, _ = _hc_boundary_kernels(0.0, 0.0, 0.0, 1, n)
+    slices = n // 1024
+    tmpl = [("T", mx.bfloat16), ("D", D), ("MIX", 24), ("SLICES", slices), ("TF32", _tf32())]
+    shapes, dtypes = [(R, slices, 25)], [mx.float32]
+    if h is None:
+        return x, mix[False](inputs=[x, fn], template=tmpl, grid=(256 * slices, R, 1), threadgroup=(256, 1, 1),
+                             output_shapes=shapes, output_dtypes=dtypes)[0]
+    xo, part = mix[True](inputs=[x, fn, h, post.astype(mx.float32), comb.reshape(R, 16).astype(mx.float32)],
+                         template=tmpl, grid=(256 * slices, R, 1), threadgroup=(256, 1, 1),
+                         output_shapes=[(R, 4, D)] + shapes, output_dtypes=[mx.bfloat16] + dtypes)
+    return xo, part
+
+
+def hc_boundary_decode(x, part, pre, scale, base, norm_w, norm_eps, rms_eps, hc_eps, iters):
+    """x [R, 4, D] bf16 streams, part from hc_mix_decode, pre [R, 4] the previous sublayer's pre. Returns
+    (xin [R, D] = RMSNorm(hc_pre(x, pre)), pre', post', comb' [R, 4, 4]) as hc_stage_decode does."""
+    R, hc, D = x.shape
+    n = hc * D
+    if norm_w.shape != (D,) or norm_w.dtype != mx.bfloat16:
+        return None
+    _, boundary = _hc_boundary_kernels(float(norm_eps), float(rms_eps), float(hc_eps), int(iters), n)
+    xin, p, po, cb = boundary(
+        inputs=[x, part, pre.astype(mx.float32), scale.astype(mx.float32), base.astype(mx.float32), norm_w],
+        template=[("T", mx.bfloat16), ("D", D), ("HC", hc), ("MIX", 24), ("SLICES", n // 1024),
+                  ("NORM_LOOPED", D > 4096)],
+        grid=(1024, R, 1), threadgroup=(1024, 1, 1),
+        output_shapes=[(R, D), (R, 4), (R, 4), (R, 16)], output_dtypes=[mx.bfloat16] + [mx.float32] * 3)
+    return xin, p, po, cb.reshape(R, 4, 4)
+
+
+# ----------------------------------------------------------------------------- sparse attention (decode rows)
+# Decode sparse attention split by keys, reading our caches: a threadgroup per (16 heads, 16 keys, row) loads its keys
+# once into threadgroup memory -- window rows by index from the raw window, compressed picks by index from the
+# 4-bit pool, dequantized on load as mx.dequantize writes them -- and writes the chunk's max, sum and unnormalized
+# output; the merge folds the chunks and the sink into one softmax. Replaces the picks' gather (3 takes and a
+# dequantize), the concatenation, the fp32 cast and the compiled core (gather, 2 matmuls, reductions). The sums
+# run in another order than the core's (and in full fp32 where MLX's fp32 matmuls round to TF32).
+
+_ATTN_SPLIT_SRC = r"""
+    const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
+    const uint t = thread_position_in_threadgroup.x;
+    const int h = int(threadgroup_position_in_grid.x) * 16 + int(sg);
+    const int chunk = int(threadgroup_position_in_grid.y), s = int(threadgroup_position_in_grid.z);
+    const int W = dims[0], KC = dims[1], NK = W + KC, CH = (NK + 15) / 16;
+    const int k0 = chunk * 16, k1 = metal::min(NK, k0 + 16);
+    threadgroup T ks[16][HD];
+    threadgroup float sc[16][16];
+    threadgroup bool ok[16];
+    for (int i = int(t); i < 16 * (HD / 8); i += 512) {
+      const int kk = i / (HD / 8), c8 = i % (HD / 8), j = k0 + kk;
+      uint4 v = uint4(0);
+      bool valid = false;
+      if (j < k1) {
+        if (j < W) {
+          const int ix = widx[s * W + j];
+          valid = ix >= 0;
+          if (valid) v = ((const device uint4*)(raw + (size_t)ix * HD))[c8];
+        } else {
+          const int c = cidx[s * KC + (j - W)];
+          valid = c >= 0;
+          if (valid) {
+            const uint w32 = wq[(size_t)c * (HD / 8) + c8];
+            const size_t g = (size_t)c * (HD / GS) + (c8 * 8) / GS;
+            const T scale = scales[g], bias = biases[g];
+            thread T e8[8];
+            for (int e = 0; e < 8; e++) e8[e] = static_cast<T>((w32 >> (4 * e)) & 0xFu) * scale + bias;
+            v = *(thread uint4*)e8;
+          }
+        }
+      }
+      ((threadgroup uint4*)ks[kk])[c8] = v;
+      if (c8 == 0) ok[kk] = valid;
+    }
+    float q[16];
+    const device T* qr = Q + ((size_t)s * NH + h) * HD;
+    for (int i = 0; i < 16; i++) q[i] = float(qr[lane * 16 + i]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int kk = 0; kk < k1 - k0; kk++) {
+      float d = 0.0f;
+      for (int i = 0; i < 16; i++) d += q[i] * float(ks[kk][lane * 16 + i]);
+      d = simd_sum(d);
+      if (lane == 0) sc[sg][kk] = ok[kk] ? d * scl[0] : -INFINITY;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float m = -1e30f;
+    for (int j = int(lane); j < k1 - k0; j += 32) m = metal::max(m, sc[sg][j]);
+    m = simd_max(m);
+    float l = 0.0f;
+    for (int j = int(lane); j < k1 - k0; j += 32) {
+      const float p = metal::precise::exp(sc[sg][j] - m);
+      sc[sg][j] = p;
+      l += p;
+    }
+    l = simd_sum(l);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float o[16];
+    for (int i = 0; i < 16; i++) o[i] = 0.0f;
+    for (int kk = 0; kk < k1 - k0; kk++) {
+      const float p = sc[sg][kk];
+      for (int i = 0; i < 16; i++) o[i] += p * float(ks[kk][lane * 16 + i]);
+    }
+    const size_t part = ((size_t)s * NH + h) * CHMAX + chunk;
+    for (int i = 0; i < 16; i++) po[part * HD + lane * 16 + i] = o[i];
+    if (lane == 0) { pml[part * 2] = m; pml[part * 2 + 1] = l; }
+"""
+
+_ATTN_MERGE_SRC = r"""
+    const uint t = thread_position_in_threadgroup.x;
+    const int h = int(threadgroup_position_in_grid.y), s = int(threadgroup_position_in_grid.z);
+    const int CH = (dims[0] + dims[1] + 15) / 16;
+    threadgroup float wgt[CHMAX];
+    threadgroup float lsum[CHMAX];
+    const size_t base = ((size_t)s * NH + h) * CHMAX;
+    float m = sink[h];
+    for (int c = 0; c < CH; c++) m = metal::max(m, pml[(base + c) * 2]);
+    for (int c = int(t); c < CH; c += HD) {
+      wgt[c] = metal::precise::exp(pml[(base + c) * 2] - m);
+      lsum[c] = pml[(base + c) * 2 + 1];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float denom = metal::precise::exp(sink[h] - m);
+    for (int c = 0; c < CH; c++) denom += lsum[c] * wgt[c];
+    float acc = 0.0f;
+    for (int c = 0; c < CH; c++) acc += po[(base + c) * HD + t] * wgt[c];
+    out[((size_t)s * NH + h) * HD + t] = acc / denom;
+"""
+
+_ATTN_CHMAX = (128 + 512 + 15) // 16  # the window and the indexer's picks
+
+
+@lru_cache(maxsize=None)
+def _attn_kernels():
+    split = mx.fast.metal_kernel(
+        name="dsv41_attend_split",
+        input_names=["Q", "raw", "widx", "cidx", "wq", "scales", "biases", "dims", "scl"],
+        output_names=["po", "pml"], source=_ATTN_SPLIT_SRC)
+    merge = mx.fast.metal_kernel(name="dsv41_attend_merge", input_names=["po", "pml", "sink", "dims"],
+                                 output_names=["out"], source=_ATTN_MERGE_SRC)
+    return split, merge
+
+
+def attend_decode(q, raw, widx, cidx, pool, sink, scale, group_size: int):
+    """Sparse attention for decode / verify rows. q [S, H, D] bf16 (RoPE applied), raw [L, D] bf16 window keys,
+    widx [S, W] int32 into raw, cidx [S, K] int32 into the 4-bit pool (wq [T, D/8], scales, biases; -1 = none) or
+    None, sink [H] -> [S, H, D] float32 as sparse_attention's core; None if not eligible."""
+    S, H, D = q.shape
+    W = widx.shape[1]
+    KC = 0 if cidx is None else cidx.shape[1]
+    if (not _gpu() or S > MAX_ROWS or D != 512 or H % 16 or q.dtype != mx.bfloat16 or raw.dtype != mx.bfloat16
+            or W + KC > 16 * _ATTN_CHMAX or W + KC == 0):
+        return None
+    if KC:
+        wq, scales, biases = pool
+        if wq.dtype != mx.uint32 or wq.shape[-1] * 8 != D or scales.dtype != mx.bfloat16 or D % group_size:
+            return None
+    else:
+        wq = mx.zeros((1, D // 8), mx.uint32)
+        scales = biases = mx.zeros((1, D // group_size), mx.bfloat16)
+        cidx = mx.zeros((S, 1), mx.int32)
+    split, merge = _attn_kernels()
+    dims = mx.array([W, KC], mx.int32)
+    tmpl = [("T", mx.bfloat16), ("HD", D), ("NH", H), ("GS", group_size), ("CHMAX", _ATTN_CHMAX)]
+    po, pml = split(inputs=[q, raw, widx.astype(mx.int32), cidx.astype(mx.int32), wq, scales, biases, dims,
+                            mx.array([scale], mx.float32)],
+                    template=tmpl, grid=(512 * (H // 16), (W + KC + 15) // 16, S), threadgroup=(512, 1, 1),
+                    output_shapes=[(S * H * _ATTN_CHMAX, D), (S * H * _ATTN_CHMAX, 2)],
+                    output_dtypes=[mx.float32, mx.float32])
+    return merge(inputs=[po, pml, sink.astype(mx.float32), dims], template=tmpl, grid=(D, H, S),
+                 threadgroup=(D, 1, 1), output_shapes=[(S, H, D)], output_dtypes=[mx.float32])[0]

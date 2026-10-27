@@ -55,6 +55,16 @@ FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
 # Bit-identical (checked once per process against the stock ops; a mismatch keeps the stock path).
 # VMLX_DSV41_FUSED_HC=0 restores the stock ops.
 FUSED_HC = _env_on("VMLX_DSV41_FUSED_HC")
+# With FUSED_HC: each boundary in two dispatches (metal_decode.hc_mix_decode / hc_boundary_decode), the
+# attention branch's expand folded into the FFN boundary's mixes. Same arithmetic as the 3-dispatch
+# stage except the 24 mixes' dot products and their sum of squares (parallel partial sums: f32-ulp differences in
+# pre / post / comb). VMLX_DSV41_HC_BOUNDARY=0 keeps the bit-identical stage.
+HC_BOUNDARY = _env_on("VMLX_DSV41_HC_BOUNDARY")
+# Decode / verify rows' sparse attention in two dispatches (metal_decode.attend_decode, split by keys), reading
+# the window and the 4-bit pool's picks by index instead of the picks' gather + concatenation + fp32 cast +
+# compiled core. Reordered sums (checked once per process against sparse_attention).
+# VMLX_DSV41_ATTN_SPLIT=0 keeps the gather + core.
+ATTN_SPLIT = _env_on("VMLX_DSV41_ATTN_SPLIT")
 
 
 @dataclass
@@ -583,6 +593,38 @@ class Indexer(nn.Module):
         return mx.concatenate(out_idx, axis=0)[None]
 
 
+_ATTN_SPLIT_OK: list = []
+
+
+def _attn_split_ok() -> bool:
+    """Once per process: attend_decode agrees with the gather + sparse_attention path (window rows with a masked
+    slot, 4-bit pool picks with an empty one) to within the reordered sums' rounding."""
+    if not _ATTN_SPLIT_OK:
+        ok = False
+        try:
+            from jang_tools.dsv41.metal_decode import attend_decode
+            k = lambda i: mx.random.key(i)  # noqa: E731
+            S, H, D, L, T = 2, 64, 512, 40, 96
+            q = (mx.random.normal((1, S, H, D), key=k(1)) * 0.3).astype(mx.bfloat16)
+            raw = (mx.random.normal((1, L, D), key=k(2)) * 0.3).astype(mx.bfloat16)
+            pool = QuantGrowBuffer()
+            pool.append((mx.random.normal((1, T, D), key=k(3)) * 0.3).astype(mx.bfloat16))
+            widx = mx.broadcast_to(mx.arange(L, dtype=mx.int32), (1, S, L))
+            widx = mx.where(mx.arange(L)[None, None] == 3, -1, widx)
+            cidx = mx.random.randint(0, T, (1, S, 24), key=k(4)).astype(mx.int32)
+            cidx = mx.where(mx.arange(24)[None, None] == 5, -1, cidx)
+            sink = mx.random.normal((H,), key=k(5))
+            got = attend_decode(q[0], raw[0], widx[0], cidx[0], (pool.wq[0], pool.scales[0], pool.biases[0]),
+                                sink, D ** -0.5, GROUP_SIZE)
+            kv, idxs = append_compressed_rows(raw, widx, cidx, pool, T, None, gather=True)
+            ref = sparse_attention(q, kv, sink, idxs, D ** -0.5)[0]
+            ok = got is not None and float(mx.abs(got - ref).max().item()) <= 2e-3 * float(mx.abs(ref).max().item())
+        except (RuntimeError, ValueError, TypeError):  # kernel build / launch failed: gather + core
+            ok = False
+        _ATTN_SPLIT_OK.append(ok)
+    return _ATTN_SPLIT_OK[0]
+
+
 def append_compressed_rows(raw, widx, cidx, pool, T, shared, gather=False):
     """Append the compressed-pool rows the queries attend to after the window rows.
 
@@ -693,11 +735,21 @@ class Attention(nn.Module):
         if shared.capture:
             cache.verify_kv = (start, kv)
 
+        T = 0
         if self.ratio:
             T, cidx = self._compressed(x, qr, start, cache, shared)
-            if T:
-                raw, widx = append_compressed_rows(raw, widx, cidx, shared.compress_kv, T, shared,
-                                                   gather=S <= GATHER_MAX_QUERIES)
+        if ATTN_SPLIT and S <= GATHER_MAX_QUERIES and (not T or isinstance(shared.compress_kv, QuantGrowBuffer)) \
+                and _attn_split_ok():
+            from jang_tools.dsv41.metal_decode import attend_decode
+            pool = shared.compress_kv
+            o = attend_decode(q[0], raw[0], widx[0], cidx[0] if T else None,
+                              (pool.wq[0], pool.scales[0], pool.biases[0]) if T else None,
+                              self.attn_sink, self.scale, GROUP_SIZE)
+            if o is not None:
+                return o[None]
+        if T:
+            raw, widx = append_compressed_rows(raw, widx, cidx, shared.compress_kv, T, shared,
+                                               gather=S <= GATHER_MAX_QUERIES)
         return sparse_attention(q, raw, self.attn_sink, widx, self.scale)
 
     def _compressed(self, x, qr, start_pos, cache: LayerCache, shared: Shared):
@@ -966,6 +1018,41 @@ def _hc_fused_ok(blk) -> bool:
     return ok
 
 
+_HC_BOUNDARY_OK: dict = {}
+
+
+def _hc_boundary_ok(blk) -> bool:
+    """Once per (D, eps) per process, on a random stream with this block's weights: hc_mix + hc_boundary give
+    hc_stage's normed input and hc_post's expanded streams bit for bit, and its pre / post / comb within f32
+    rounding of the stage's (their only reordered sums). Otherwise the stage path."""
+    D = blk.hc_attn_fn.shape[1] // blk.hc
+    key = (D, blk.eps, blk.attn_norm.eps, blk.hc_eps, blk.iters)
+    ok = _HC_BOUNDARY_OK.get(key)
+    if ok is None:
+        ok = False
+        try:
+            from jang_tools.dsv41.metal_decode import (hc_boundary_decode, hc_mix_decode, hc_post_decode,
+                                                       hc_stage_decode)
+            x = (mx.random.normal((2, blk.hc, D), key=mx.random.key(7)) * 3).astype(mx.bfloat16)
+            pre = mx.softmax(mx.random.normal((2, blk.hc), key=mx.random.key(8)), axis=-1)
+            h = (mx.random.normal((2, D), key=mx.random.key(9)) * 2).astype(mx.bfloat16)
+            args = (blk.hc_attn_scale, blk.hc_attn_base, blk.attn_norm.weight, blk.attn_norm.eps, blk.eps,
+                    blk.hc_eps, blk.iters)
+            ref = hc_stage_decode(x, pre, blk.hc_attn_fn, *args)
+            mixed = hc_mix_decode(x, blk.hc_attn_fn)
+            got = hc_boundary_decode(mixed[0], mixed[1], pre, *args) if mixed is not None else None
+            if ref is not None and got is not None:
+                ok = mx.array_equal(got[0], ref[0]).item() and all(
+                    mx.allclose(a, b, rtol=1e-5, atol=1e-6).item() for a, b in zip(got[1:], ref[1:]))
+                expanded = hc_mix_decode(x, blk.hc_attn_fn, h, ref[2], ref[3])
+                ok = ok and expanded is not None and mx.array_equal(
+                    expanded[0], hc_post_decode(h, x, ref[2], ref[3])).item()
+        except (RuntimeError, ValueError, TypeError):  # kernel build / launch failed: stage path
+            ok = False
+        _HC_BOUNDARY_OK[key] = ok
+    return ok
+
+
 class Block(nn.Module):
     def __init__(self, args: Args, layer_id: int, layout: EngramLayout, qbits: dict):
         super().__init__()
@@ -1093,9 +1180,36 @@ class Block(nn.Module):
         out = hc_post_decode(h, xs, post, comb)
         return out if out is not None else _hc_post(h[None], xs[None], post[None], comb[None])[0]
 
+    def _boundary(self, xs, pre, p, branch=None):
+        """hc_mix (with branch = (h, post, comb): that branch expanded first) + hc_boundary for sublayer p:
+        (streams, xin, pre', post', comb')."""
+        from jang_tools.dsv41.metal_decode import hc_boundary_decode, hc_mix_decode
+        mixed = hc_mix_decode(xs, getattr(self, f"hc_{p}_fn"), *(branch or ()))
+        if mixed is None:
+            return None
+        norm = getattr(self, f"{p}_norm")
+        st = hc_boundary_decode(mixed[0], mixed[1], pre, getattr(self, f"hc_{p}_scale"), getattr(self, f"hc_{p}_base"),
+                                norm.weight, norm.eps, self.eps, self.hc_eps, self.iters)
+        return None if st is None else (mixed[0], *st)
+
+    def _call_hc_boundary(self, xs, segs, pre_mix, image_mask):
+        S = xs.shape[0]
+        st = self._boundary(xs, pre_mix.reshape(S, self.hc), "attn")
+        if st is None:
+            return None
+        xs, xin, a_pre, a_post, a_comb = st
+        h = self.attn(xin[None], segs)[0]
+        xs, xin, f_pre, f_post, f_comb = self._boundary(xs, a_pre, "ffn", (h, a_post, a_comb))
+        xs = self._post(self.moe(xin[None], image_mask)[0], xs, f_post, f_comb)
+        return xs[None], f_pre[None]
+
     def _call_fused_hc(self, x, segs, pre_mix, image_mask):
         S = x.shape[1]
         xs = x[0]
+        if HC_BOUNDARY and _hc_boundary_ok(self):
+            out = self._call_hc_boundary(xs, segs, pre_mix, image_mask)
+            if out is not None:
+                return out
         st = self._stage(xs, pre_mix.reshape(S, self.hc), "attn")
         if st is None:
             return None

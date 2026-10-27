@@ -89,7 +89,7 @@ identical to greedy on code (59/59) and structured (29/29) over those short runs
   the gap was dispatch count and host/GPU serialization, not the GEMVs. M5 below moves AR decode
   29.0 → 39.2 tok/s (2k context) and 26.0 → 34.3 (100k), token-identical.
 - Still true: `mx.compile` does not merge independent GEMVs; `gather_qmm` is slower than qmv at
-  M=1; `lane_qmm` (TensorFold) is 11 % slower at M=1; the MLA decode-attention kernel alone (M4) is a
+  M=1; a lane-split qmm is 11 % slower at M=1; the MLA decode-attention kernel alone (M4) is a
   wash. Each is one dispatch out of ~150 per layer; only removing most of them pays.
 - MTP (M1) still multiplies whatever AR is: a wide verify costs about one forward.
 - Prefill: the 865 pp/s figure was measured on repetitive text, where the Engram rows stay
