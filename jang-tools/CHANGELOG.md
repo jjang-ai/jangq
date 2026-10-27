@@ -1,3 +1,10 @@
+## 2.5.51 — 2026-10-27
+
+- Include the DeepSeek-V4.1-Flash-1017 runtime for JANG affine and JANGHT bundles, with native Engram, image inputs, DSML tools, numeric reasoning effort, and adaptive DSpark decoding.
+- Preserve V4.1 prompt-boundary cache state and compact 4-bit pool serialization across RAM and SSD reuse.
+- Include the V4.1 decode and prefill kernels; gains depend on bundle, hardware, sampling and workload.
+- This package release was checked with focused model-free tests and package inspection. No new full-model qualification was performed for this release.
+
 ## 2.5.50 — 2026-10-18
 
 - Include the Nemotron-3.5 Bolt and Super-VL vision runtime in published packages. This provides the C-RADIO tower, mixed-affine projector loading, and Super-VL final vision normalization required by compatible vMLX releases.
