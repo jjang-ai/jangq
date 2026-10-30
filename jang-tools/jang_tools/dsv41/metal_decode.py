@@ -95,7 +95,7 @@ def router_logits(x: mx.array, weight: mx.array):
 
 # ----------------------------------------------------------------------------- fused MoE decode
 # Two dispatches replace the ~25 of Block.moe (two gather_qmm + SwiGLU elementwise + gather_qmm +
-# reshape-sum + three shared-expert qlinear + their elementwise), mlx-serve MOE_GU / MOE_DN style:
+# reshape-sum + three shared-expert qlinear + their elementwise):
 #   moe_gu: grid (F/8 tiles, TOPK+1 slots, R rows). Slot s < TOPK is routed expert idx[r, s]
 #           (2/3-bit), slot TOPK is the shared expert (w1/w3, 8-bit). Each simdgroup computes 4 gate and
 #           4 up rows from one read of x, rounds each to bf16 as gather_qmm / qlinear do, and applies the
@@ -500,8 +500,8 @@ def moe_decode(x, idx, w, experts, shared, swiglu_limit: float, group_size: int 
 # ----------------------------------------------------------------------------- fused hyper-connections
 # Per sublayer the stock decode runs hc_mixes (astype, square, mean = 2-pass all-reduce, rsqrt, f32
 # GEMV 24 x 20480, multiply, Sinkhorn kernel), hc_pre (compiled multiply + axis reduction + cast),
-# RMSNorm and hc_post (compiled multiply, einsum GEMM, add, cast): ~14 dispatches. Here (mlx-serve
-# HC_STAGE / HC_SPLIT, oMLX K1/K2) three:
+# RMSNorm and hc_post (compiled multiply, einsum GEMM, add, cast): ~14 dispatches. Here
+# three:
 #   hc_stage: tg 0 collapses the stream with the previous pre and RMS-norms it (MLX rms_single_row /
 #             rms_looped order); tg 1 sums x^2 in MLX's row_reduce_looped order; tgs 2-7 run MLX's gemv
 #             (BM1 BN8 SM1 SN32 TM4 TN4, its choice for 24 x 20480) for the 24 mixes.

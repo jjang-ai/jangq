@@ -121,7 +121,7 @@ RMSNorm), so greedy decode is bit-equal with each flag off or on.
 |---|---|---|
 | per-layer `mx.async_eval` (<= 16 rows): the GPU runs early layers while later ones are encoded | `VMLX_DSV41_LAYER_ASYNC` | ~-0.14 ms |
 | router logits from the bf16 gate weight (MLX f32 GEMV order, no per-call f32 copy); only where MLX uses the same tiling (K < 16 E) | `VMLX_DSV41_ROUTER_GEMV` | 1 row 86 → 68 µs |
-| 6 routed + shared expert in 2 dispatches (mlx-serve `MOE_GU`/`MOE_DN`) instead of ~25 | `VMLX_DSV41_FUSED_MOE` | 1 row 0.279 → 0.226 ms |
+| 6 routed + shared expert in 2 dispatches instead of ~25 | `VMLX_DSV41_FUSED_MOE` | 1 row 0.279 → 0.226 ms |
 | hyper-connection collapse + mixes + Sinkhorn split + expand in 3 dispatches per sublayer instead of ~14; self-checks once against the stock path | `VMLX_DSV41_FUSED_HC` | 1 row 0.183 → 0.137 ms |
 
 Real model (M5 Ultra, AR greedy, all four on vs off): 2k context 29.0–29.3 → 39.1–39.2 tok/s, 256 greedy
