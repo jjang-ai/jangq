@@ -60,7 +60,7 @@ scales with rows — so eliminating the second (commit) forward ≈ 2× per step
 
 **Measured (n=80, adaptive, WITH fast path):** code **1.88× / 55.7 t/s**, structured **2.00× / 57.1**,
 low_accept **1.93× / 50.1**, prose 1.04× / 31.5. MIN 1.04× (never-below-AR PASS). Output
-identical to greedy on code (59/59) and structured (29/29) over those short runs (see the near-tie note in M1). = parity with antirez `ds4.c`
+identical to greedy on code (59/59) and structured (29/29) over those short runs (see the near-tie note in M1).
 56.8 t/s serial.
 
 ## M2 — Adaptive never-below-AR (`DSparkRunner(adaptive=True)`)
@@ -106,7 +106,7 @@ Both were measured and deleted so nothing dead stays in the runtime:
   read in place by index, fp32 accumulation, sink in the combine pass). Equivalent (cos 0.999999) but a
   wall-clock wash (31.08 vs 31.42 tok/s): attention is one of ~150 dispatches per layer, and replacing
   one dispatch with another does not move a dispatch-bound step. M5 fused the rest instead.
-- MoE expert dedup across verify rows (ds4 `moe_dedup_plan`): bit-identical, but slower than M5's fused
+- MoE expert dedup across verify rows (a per-expert row-pair plan): bit-identical, but slower than M5's fused
   MoE at 2/4/8 rows (0.351/0.509/0.794 vs 0.330/0.433/0.668 ms per layer). The fused MoE is already bound
   by the distinct experts' bytes (repeated tiles hit the GPU caches); the plan's pair loop only costs
   parallelism.
@@ -121,7 +121,7 @@ RMSNorm), so greedy decode is bit-equal with each flag off or on.
 |---|---|---|
 | per-layer `mx.async_eval` (<= 16 rows): the GPU runs early layers while later ones are encoded | `VMLX_DSV41_LAYER_ASYNC` | ~-0.14 ms |
 | router logits from the bf16 gate weight (MLX f32 GEMV order, no per-call f32 copy); only where MLX uses the same tiling (K < 16 E) | `VMLX_DSV41_ROUTER_GEMV` | 1 row 86 → 68 µs |
-| 6 routed + shared expert in 2 dispatches (mlx-serve `MOE_GU`/`MOE_DN`) instead of ~25 | `VMLX_DSV41_FUSED_MOE` | 1 row 0.279 → 0.226 ms |
+| 6 routed + shared expert in 2 dispatches instead of ~25 | `VMLX_DSV41_FUSED_MOE` | 1 row 0.279 → 0.226 ms |
 | hyper-connection collapse + mixes + Sinkhorn split + expand in 3 dispatches per sublayer instead of ~14; self-checks once against the stock path | `VMLX_DSV41_FUSED_HC` | 1 row 0.183 → 0.137 ms |
 
 Real model (M5 Ultra, AR greedy, all four on vs off): 2k context 29.0–29.3 → 39.1–39.2 tok/s, 256 greedy

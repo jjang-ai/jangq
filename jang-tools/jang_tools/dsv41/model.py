@@ -38,7 +38,7 @@ def _env_on(name: str, default: str = "1") -> bool:
 
 # Decode / DSpark verify forwards of at most this many tokens submit each layer to the GPU as soon as it
 # is built (mx.async_eval per layer) instead of building all 40 layers and then waiting, so the GPU runs
-# the early layers while Python builds the later ones (ds4 #1261, oMLX language.py). Bit-identical:
+# the early layers while Python builds the later ones. Bit-identical:
 # only the scheduling changes. VMLX_DSV41_LAYER_ASYNC=0 restores the single end-of-graph eval.
 LAYER_ASYNC = _env_on("VMLX_DSV41_LAYER_ASYNC")
 LAYER_ASYNC_MAX_ROWS = 16
@@ -46,8 +46,8 @@ LAYER_ASYNC_MAX_ROWS = 16
 # no per-call f32 copy of the 384 x 5120 weight. 1 row: bit-identical; 2-8 rows: each row exactly its
 # 1-row decode logits. VMLX_DSV41_ROUTER_GEMV=0 restores the f32-cast matmul.
 ROUTER_GEMV = _env_on("VMLX_DSV41_ROUTER_GEMV")
-# Routed + shared experts for <= 8 rows in two Metal dispatches (metal_decode.moe_decode, mlx-serve
-# MOE_GU/MOE_DN) instead of ~25. 1 row: bit-identical; 2-8 rows: each row exactly its 1-row decode.
+# Routed + shared experts for <= 8 rows in two Metal dispatches (metal_decode.moe_decode)
+# instead of ~25. 1 row: bit-identical; 2-8 rows: each row exactly its 1-row decode.
 # VMLX_DSV41_FUSED_MOE=0 restores gather_qmm + qlinear.
 FUSED_MOE = _env_on("VMLX_DSV41_FUSED_MOE")
 # Hyper-connection stage for <= 8 rows in three Metal dispatches per sublayer (metal_decode.hc_*:

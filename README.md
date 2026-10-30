@@ -24,7 +24,7 @@
 
 ---
 
-> **App Support:** [MLX Studio](https://mlx.studio) has full native JANG support. [oMLX](https://github.com/jundot/omlx) has added JANG integration ([PR #364](https://github.com/jundot/omlx/pull/364)). LM Studio, Ollama, and Inferencer do not support JANG yet — ask your favorite app's creators to add support, or use `pip install "jang[mlx]"`.
+> **App Support:** [MLX Studio](https://mlx.studio) has full native JANG support. LM Studio, Ollama, and Inferencer do not support JANG yet — ask your favorite app's creators to add support, or use `pip install "jang[mlx]"`.
 
 ---
 
