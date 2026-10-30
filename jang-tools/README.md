@@ -10,7 +10,7 @@
 
 ---
 
-> **Early Adoption:** LM Studio, Ollama, oMLX, Inferencer do **not** support JANG yet. Use **[MLX Studio](https://mlx.studio)** or `pip install "jang[mlx]"`. Ask your favorite app's creators to add JANG support!
+> **Early Adoption:** LM Studio, Ollama, Inferencer do **not** support JANG yet. Use **[MLX Studio](https://mlx.studio)** or `pip install "jang[mlx]"`. Ask your favorite app's creators to add JANG support!
 
 ---
 
