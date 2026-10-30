@@ -38,7 +38,7 @@ def _env_on(name: str, default: str = "1") -> bool:
 
 # Decode / DSpark verify forwards of at most this many tokens submit each layer to the GPU as soon as it
 # is built (mx.async_eval per layer) instead of building all 40 layers and then waiting, so the GPU runs
-# the early layers while Python builds the later ones (ds4 #1261, oMLX language.py). Bit-identical:
+# the early layers while Python builds the later ones. Bit-identical:
 # only the scheduling changes. VMLX_DSV41_LAYER_ASYNC=0 restores the single end-of-graph eval.
 LAYER_ASYNC = _env_on("VMLX_DSV41_LAYER_ASYNC")
 LAYER_ASYNC_MAX_ROWS = 16
