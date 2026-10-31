@@ -892,6 +892,23 @@ class DSparkRunner:
                     break
             n_accepted += k
             accept_ema = 0.7 * accept_ema + 0.3 * (k / max(1, W))  # update rolling acceptance
+            # The stream ends inside this step when an emitted token is an EOS or reaches max_new: commit only
+            # the tokens up to that one, so the session holds exactly what was emitted (the engine keeps the
+            # finished session as a reusable prefix: it cannot be trimmed afterwards).
+            emit_all = [p0] + draft_ids[1 : 1 + k] + ([truth[k]] if k < W and not (k > 0 and self._capture_kw) else [])
+            end = next((i + 1 for i, t in enumerate(emit_all) if eos_ids and t in eos_ids), len(emit_all))
+            end = min(end, max(1, max_new - n_emitted))
+            if end < len(emit_all) or (k == W and end < W + 1):
+                emit = emit_all[:end]
+                if self._capture_kw:
+                    m.commit_prefix(sess, ck, len(emit))
+                else:
+                    sess.restore(ck)
+                    m.forward(emit, sess, all_logits=False)
+                c += len(emit)
+                for t in emit:
+                    yield t; n_emitted += 1
+                _rec(); return
             if k == W:
                 # whole block accepted: the verify forward already wrote exactly-correct causal KV for
                 # every position (no rejected tail to undo), so skip the restore+refeed commit forward
