@@ -40,6 +40,13 @@ _OLD_TURN_END = """{%- if ns.prev_message_type == 'tool_call' and not ns_tr_out.
             {{- '<turn|>\\n' -}}
         {%- endif -%}"""
 
+# Some bundles persisted the former runtime's unconditional-open rewrite.
+# That variant also needs the next-role decision, not another blanket close.
+_UNCONDITIONAL_OPEN_TURN_END = _OLD_TURN_END.replace(
+    "{%- elif not (ns_tr_out.flag and not has_content) -%}",
+    "{%- elif not ns_tr_out.flag -%}",
+)
+
 # Google Gemma 4 canonical template, 2026-07-09. This is the model's
 # turn-boundary contract, not an instruction or a generated-output repair.
 # Reference revision: google/gemma-4-12b-it@43c9d014b231474fa7212dbb48a762566c2b255d.
@@ -77,7 +84,8 @@ def _patch_chat_template(text: str) -> str:
     """
     text = _patch_chat_template_no_thinking_tail(text)
     text = _remove_legacy_tool_choice_instruction(text)
-    text = text.replace(_OLD_TURN_END, _CANONICAL_TURN_END, 1)
+    for legacy_end in (_OLD_TURN_END, _UNCONDITIONAL_OPEN_TURN_END):
+        text = text.replace(legacy_end, _CANONICAL_TURN_END, 1)
     return text
 
 

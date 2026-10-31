@@ -35,8 +35,8 @@ FIXTURE = """{%- set ns = namespace(prev_message_type=None) -%}
 {%- endfor -%}"""
 
 
-def render(messages, **kwargs):
-    return Environment().from_string(_patch_chat_template(FIXTURE)).render(
+def render(messages, source=FIXTURE, **kwargs):
+    return Environment().from_string(_patch_chat_template(source)).render(
         messages=messages, **kwargs
     )
 
@@ -60,6 +60,17 @@ class Gemma4ChatTemplateTests(unittest.TestCase):
             {"role": "tool", "content": "result"},
             {"role": "assistant", "content": "Answer"},
         ]), "<tool_response|>Answer<turn|>\n")
+
+    def test_persisted_runtime_rewrite_closes_before_new_user(self):
+        source = FIXTURE.replace(
+            "{%- elif not (ns_tr_out.flag and not has_content) -%}",
+            "{%- elif not ns_tr_out.flag -%}",
+        )
+        self.assertEqual(render([
+            {"role": "assistant", "content": "", "result": True, "tool_calls": [{}]},
+            {"role": "tool", "content": "result"},
+            {"role": "user", "content": "Next user"},
+        ], source=source), "<tool_response|><turn|>\nNext user<turn|>\n")
 
     def test_final_tool_result_stays_open(self):
         self.assertEqual(render([
