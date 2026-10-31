@@ -369,6 +369,14 @@ GATHER_MAX_QUERIES = 8
 # cache but their 128-token windows, so each one only needs the prompt rows the last prompt token can
 # still reach through the windows above it. VMLX_DSV41_SUFFIX_PRUNE=0 runs every row through every layer.
 SUFFIX_PRUNE = _env_on("VMLX_DSV41_SUFFIX_PRUNE")
+# With suffix pruning, a forward that ends before the first row layer prune_from keeps (every non-final prefill chunk
+# but the last ~2.4k rows of a prompt) feeds nothing exact from the last KV-source layer (Model.trim_layer =
+# prune_from - 1) on: that layer runs only its cache side on every row -- the normed input, the window kv, the
+# compressor and the index keys, in the same N-row calls as the full layer -- and the forward stops there (the later
+# layers' windows restart, as pruning restarts them). Skipped: that layer's query side, index scoring, attention, wo
+# and MoE, and the one-row runs of the layers above. Logits, main_hidden and every lane at the prompt end are
+# bit-identical; a forward that reaches the kept rows runs as before. VMLX_DSV41_KV_SOURCE_TRIM=0 runs the whole stack.
+KV_SOURCE_TRIM = _env_on("VMLX_DSV41_KV_SOURCE_TRIM")
 
 
 def sparse_attention(q, kv, sink, idxs, scale, chunk=256):
@@ -539,13 +547,21 @@ class Indexer(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, args.rms_norm_eps)
 
     def __call__(self, x, qr, latent, g0, start_pos, rope: Rope, cache: LayerCache, shared: Shared):
-        B, S, _ = x.shape
-        r, end = self.ratio, start_pos + S
+        self.append_keys(latent, g0, rope, cache, shared)
+        return self.select(x, qr, start_pos, rope, shared)
+
+    def append_keys(self, latent, g0, rope: Rope, cache: LayerCache, shared: Shared):
+        """Index keys of the groups this forward completed (every row's, whatever rows the query side runs)."""
         if self.owns_k and latent is not None:
             k = self.k_norm(self.wk(latent))
-            cache.index_k.append(rope(k, (g0, r)))
+            cache.index_k.append(rope(k, (g0, self.ratio)))
         if self.owns_k:
             shared.index_k = cache.index_k
+
+    def select(self, x, qr, start_pos, rope: Rope, shared: Shared):
+        """Top-k compressed rows for the queries x / qr at positions start_pos.. (keys already appended)."""
+        B, S, _ = x.shape
+        r, end = self.ratio, start_pos + S
         T = end // r
         q = self.wq_b(qr).reshape(B, S, self.n_heads, self.head_dim)
         # the release scores in bf16 end to end; near-tied positions follow that rounding
@@ -810,6 +826,22 @@ class Attention(nn.Module):
             cache.compress_kv.append(self._rope(latent, (g0, r)))
         # T compressed rows are visible to this segment (read from shared.compress_kv by the caller)
         return T, idxs
+
+    def source_rows(self, x, seg: Seg):
+        """The cache side of this KV-source layer for every row of x [1,N,D] (the normed layer input), with the same
+        N-row calls as __call__ / _core / _compressed: the window kv (window cache), the compressor (compressed pool,
+        pending tail) and the index keys. No query side, no attention, no output (Model.__call__, KV_SOURCE_TRIM)."""
+        start, cache, shared = seg.start, seg.caches[self.layer_id], seg.shared
+        kv = self._rope(self.kv_norm(self.wkv(x)), (start, 1))
+        prev = cache.window
+        raw = kv if prev is None else mx.concatenate([prev, kv], axis=1)
+        cache.window = raw[:, -self.window:]
+        latent, g0 = self.compressor(x, start, cache)
+        shared.compress_kv = cache.compress_kv
+        if self.is_index_source:
+            self.indexer.append_keys(latent, g0, self._rope, cache, shared)
+        if latent is not None:
+            cache.compress_kv.append(self._rope(latent, (g0, self.ratio)))
 
 
 class SwitchProj(nn.Module):
@@ -1265,6 +1297,11 @@ class Block(nn.Module):
         xs = self._post(self.moe(xin[None], image_mask)[0], xs, f_post, f_comb)
         return xs[None], f_pre[None]
 
+    def source_rows(self, x, seg: Seg, pre_mix):
+        """This KV-source layer's cache side for every row (Model.__call__, KV_SOURCE_TRIM): attn_norm(hc_pre(x)) as
+        __call__ computes it, then Attention.source_rows. Returns nothing: the forward stops here."""
+        self.attn.source_rows(self.attn_norm(self.hc_pre(x, pre_mix)), seg)
+
     def __call__(self, x, segs, pre_mix, image_mask=None):
         if (FUSED_HC and x.shape[0] == 1 and x.shape[1] <= GATHER_MAX_QUERIES and self.hc == 4
                 and _hc_fused_ok(self)):
@@ -1297,6 +1334,11 @@ class Model(nn.Module):
         # First layer prompt-suffix pruning may shorten: past the last KV-source (its compressor and index
         # keys need every row) and past every Engram layer. Layers from here on keep only a window cache.
         self.prune_from = max([*args.kv_source_layer_ids, *layout.layer_ids, args.candidate_source_layer_id]) + 1
+        # The layer below prune_from, when it is the last KV source (KV_SOURCE_TRIM): a forward wholly before the rows
+        # prune_from keeps runs it only up to its cache side and stops there.
+        t = self.prune_from - 1
+        self.trim_layer = t if (t < len(self.layers) and t in args.kv_source_layer_ids
+                                and args.compress_ratios[t] > 0) else None
         if vision_args is not None:
             from jang_tools.dsv41.vision import ViT, Aligner, IMAGE, IMAGE_START, IMAGE_END, IMAGE_NEW_LINE
             self.vision = ViT(vision_args)
@@ -1340,10 +1382,12 @@ class Model(nn.Module):
         back than that. The last layer needs its window (128 rows), hence keep = 1 + (L - i) * 127 for L
         layers (layer 39: 128, layer 21: 2414). At least one row always runs, so a forward that lies
         entirely before the kept range still leaves a window row at the right position."""
-        win = self.args.sliding_window
-        keep = 1 + (len(self.layers) - layer_id) * (win - 1)
-        lo = max(seg_start, prompt_end - keep)
+        lo = max(seg_start, prompt_end - self.keep_rows(layer_id))
         return max(1, min(n, seg_start + n - lo))
+
+    def keep_rows(self, layer_id: int) -> int:
+        """Rows before the prompt end that pruned layer ``layer_id`` runs: 1 + (L - i) * (window - 1)."""
+        return 1 + (len(self.layers) - layer_id) * (self.args.sliding_window - 1)
 
     def __call__(self, tokens: mx.array, segs: list, engram_rows: dict, all_logits: bool = False,
                  images=None, image_mask: mx.array | None = None, return_hidden: bool = False,
@@ -1359,7 +1403,9 @@ class Model(nn.Module):
         prompt_end: absolute position where the prompt ends (this forward ends at or before it). The
         layers from prune_from run only the trailing rows the last prompt token still depends on
         (prune_rows); the returned logits are exact only when this forward ends at prompt_end, and
-        main_hidden only for the last 128 rows before prompt_end (rows before are zero)."""
+        main_hidden only for the last 128 rows before prompt_end (rows before are zero). A forward that ends before
+        the rows prune_from keeps stops after the cache side of the layer below it (trim_layer, KV_SOURCE_TRIM): its
+        logits are then those of that layer's input."""
         h = self.embed(tokens)
         if images:
             h = self.merge_image_embeddings(h, images)
@@ -1373,6 +1419,10 @@ class Model(nn.Module):
         prune = (SUFFIX_PRUNE and prompt_end is not None and len(segs) == 1 and not all_logits and N > 1
                  and prompt_end >= segs[0].start + N)
         seg0, cur = segs[0], N
+        # This forward ends before the first row layer prune_from keeps: nothing exact reads the trim layer's
+        # output rows or anything above them (KV_SOURCE_TRIM).
+        trim = (prune and KV_SOURCE_TRIM and self.trim_layer is not None and N > GATHER_MAX_QUERIES
+                and seg0.start + N <= prompt_end - self.keep_rows(self.prune_from))
         per_layer_async = LAYER_ASYNC and tokens.shape[-1] <= LAYER_ASYNC_MAX_ROWS
         for i, layer in enumerate(self.layers):
             if prune and i >= self.prune_from:
@@ -1405,6 +1455,13 @@ class Model(nn.Module):
                 if cur < N:  # pruned: rows before the suffix are not computed (zeros, never read)
                     mh = mx.pad(mh, [(0, 0), (N - cur, 0), (0, 0)])
                 main_hiddens.append(mh)
+            if trim and i == self.trim_layer:
+                layer.source_rows(h, seg0, pre_mix)
+                for c in seg0.caches[i + 1:]:
+                    c.window = None  # restarted, as pruning restarts a layer's window at its kept rows
+                # main_hidden of the layers not run: zeros (pruned rows are zeros anyway; never read)
+                main_hiddens += [mx.zeros((1, N, h.shape[-1]), h.dtype) for t in self.target_layer_ids if t > i]
+                break
             h, pre_mix = layer(h, segs, pre_mix, image_mask)
             if per_layer_async:
                 mx.async_eval(h, pre_mix)

@@ -82,6 +82,7 @@ the index-score kernels and suffix pruning, which is exact at the prompt end).
 | `VMLX_DSV41_ATTN_SPLIT` | on | decode / verify rows' sparse attention split by keys (`metal_decode.attend_decode`): window rows and 4-bit pool picks read by index, full fp32 sums (the gather + compiled core's matmuls round to TF32 on M5); checked once per process against `sparse_attention` | `model.py:67` |
 | `VMLX_DSV41_FAST_ROPE` | on | `(start, step)` positions through `mx.fast.rope` instead of the compiled cos/sin graph | `model.py:123` |
 | `VMLX_DSV41_SUFFIX_PRUNE` | on | prompt-suffix pruning of layers 21–39 when `prompt_end` is passed (Prompt-suffix pruning above) | `model.py:356` |
+| `VMLX_DSV41_KV_SOURCE_TRIM` | on | with suffix pruning: a forward that ends before layer 21's kept rows runs layer 20's cache side only (window kv, compressor, index keys) and stops (Prompt-suffix pruning below); bit-identical at the prompt end | `model.py:379` |
 | `VMLX_DSV41_INDEX_BF16` | on | fused index scores with bf16 operands on the M5 matrix units; off or older vMLX: fp32 operands | `model.py:393` |
 | `VMLX_DSV41_INDEX_CHUNK_EVAL` | on | long-context prefill evaluates each index query chunk's top-k before the next chunk (lower transient memory) | `model.py:399` |
 | `VMLX_DSV41_FUSED_INDEX` | on | prefill index scores through vMLX `dsa_pool_index_scores` (read per call); off or no vMLX: stock bf16 path | `model.py:500` |
@@ -186,6 +187,16 @@ window at `prompt_end` are those of a full prefill (`Model.prune_rows`, ported f
   kept range still runs its last row there. DSpark `return_hidden` rows are exact for the last 128
   positions (all the draft reads), zero before.
 - Prefix-cache snapshots are only valid at `prompt_end`. Every engine snapshot is taken there.
+- A forward that ends before layer 21's kept range (every prefill chunk but those holding the last ~2.4k
+  prompt rows) feeds nothing exact from layer 20's output on. Layer 20 then runs only its cache side on
+  every row -- `attn_norm(hc_pre(h))`, the window kv, the compressor and the index keys, the same N-row
+  calls as the full layer -- and the forward stops: no query side / index scoring / attention / wo / MoE
+  at layer 20, no one-row runs of layers 21–39, their windows restart (`Model.trim_layer`,
+  `Block.source_rows`). A forward that reaches the kept rows runs the whole layer, so every row the
+  prompt end reads is computed by the same calls as before: logits, `return_hidden` rows and every lane
+  at the prompt end are bit-identical (`tests/dsv41_kv_source_trim_test.py`). Trimming only part of a
+  chunk's rows would not be: MLX's projections round differently at other row counts.
+  `VMLX_DSV41_KV_SOURCE_TRIM=0` runs the whole stack on every forward.
 - `VMLX_DSV41_SUFFIX_PRUNE=0` disables. CPU test: `tests/test_suffix_prune.py` (tiny random model,
   three pruned layers, chunk sizes 17–256).
 
