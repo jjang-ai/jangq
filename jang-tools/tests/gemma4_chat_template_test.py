@@ -111,7 +111,62 @@ class Gemma4ChatTemplateTests(unittest.TestCase):
         self.assertEqual(_patch_chat_template(once), once)
 
     def test_existing_no_thinking_prefill_policy_is_preserved(self):
-        self.assertEqual(_patch_chat_template(_EMPTY_NO_THINK_TAIL), _SAFE_NO_THINK_TAIL)
+        for previous in [None, "tool_response", "tool_call"]:
+            values = dict(ns={"prev_message_type": previous},
+                          add_generation_prompt=True, enable_thinking=False)
+            self.assertEqual(
+                Environment().from_string(_patch_chat_template(_EMPTY_NO_THINK_TAIL)).render(**values),
+                Environment().from_string(_SAFE_NO_THINK_TAIL).render(**values),
+            )
+
+    def test_final_tool_result_uses_canonical_thinking_prefill(self):
+        # Google's canonical template opens the requested thought channel after
+        # tool results. This is a template prefix, not generated-output repair.
+        for content in ["", "Visible"]:
+            with self.subTest(content=content):
+                value = render([
+                    {"role": "assistant", "content": content,
+                     "result": True, "tool_calls": [{}]},
+                ], source=FIXTURE + _SAFE_NO_THINK_TAIL,
+                   enable_thinking=True, add_generation_prompt=True)
+                self.assertTrue(value.endswith("<|channel>thought\n"), value)
+
+    def test_thinking_prefill_is_only_for_pending_tool_continuation(self):
+        source = FIXTURE + _SAFE_NO_THINK_TAIL
+        for add_prompt in [False, True]:
+            result = render([
+                {"role": "assistant", "content": "", "result": True,
+                 "tool_calls": [{}]},
+                {"role": "user", "content": "Next user"},
+            ], source=source, enable_thinking=True, add_generation_prompt=add_prompt)
+            self.assertNotIn("<|channel>thought", result)
+        pending = render([
+            {"role": "assistant", "content": "Call", "tool_calls": [{}]},
+        ], source=source, enable_thinking=True, add_generation_prompt=True)
+        self.assertEqual(pending, "Call<|tool_response>")
+
+    def test_legacy_content_is_rendered_after_tool_results(self):
+        old_content = """    {%- set has_content = message.get('content', '') | trim | length > 0 -%}
+    {{- message.get('content', '') -}}"""
+        legacy_capture = """    {%- set captured_content -%}
+        {{- message.get('content', '') -}}
+    {%- endset -%}
+    {{- captured_content -}}
+    {%- set has_content = captured_content | trim | length > 0 -%}
+    {%- if message['tool_calls'] -%}
+        {{- '<|tool_call>call:calculate{}<tool_call|>' -}}
+    {%- endif -%}"""
+        source = FIXTURE.replace(old_content, legacy_capture) + _SAFE_NO_THINK_TAIL
+        self.assertNotEqual(source, FIXTURE + _SAFE_NO_THINK_TAIL)
+        value = render([
+            {"role": "assistant", "content": "Visible", "result": True,
+             "tool_calls": [{}]},
+        ], source=source, enable_thinking=True, add_generation_prompt=True)
+        self.assertEqual(value,
+                         '<|tool_call>call:calculate{}<tool_call|><tool_response|>'
+                         'Visible<turn|>\n<|channel>thought\n')
+        self.assertEqual(_patch_chat_template(_patch_chat_template(source)),
+                         _patch_chat_template(source))
 
 
 class Gemma4BundleTemplateTests(unittest.TestCase):
