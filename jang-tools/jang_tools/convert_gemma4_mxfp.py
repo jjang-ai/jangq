@@ -49,6 +49,7 @@ from tqdm import tqdm
 from jang_tools.calibrate import _load_bf16_tensor
 from jang_tools.capabilities import build_capabilities, verify_directory
 from jang_tools.convert import _remove_stale_jang_artifacts
+from jang_tools.gemma4_chat_template import patch_bundle_chat_template
 from jang_tools.progress import ProgressEmitter
 from jang_tools.ssm_layout import prepare_mlx_passthrough_tensor
 
@@ -275,83 +276,14 @@ def _scan_source(src: Path) -> list[tuple[str, list[int], Path]]:
     return items
 
 
-# Gemma 4's shipped chat template lists tools but has NO `tool_choice` branch,
-# so OpenAI-style `tool_choice: "required"` is not encoded in the prompt and the
-# model is never told it MUST call a tool / copy args verbatim. We inject a
-# conditional required-tool stanza (native Gemma format, not JSON), firing ONLY
-# on tool_choice==required so normal optional-tool turns are unchanged.
-_TOOL_CHOICE_ANCHOR = """        {%- endfor %}
-        {%- set ns.prev_message_type = 'tool' -%}
-    {%- endif -%}"""
-
-_TOOL_CHOICE_PATCH = """        {%- endfor %}
-        {%- set ns.prev_message_type = 'tool' -%}
-        {%- if tool_choice is defined and ((tool_choice is string and tool_choice == 'required') or (tool_choice is mapping and tool_choice.get('type') == 'required')) -%}
-            {{- '\\nTool use is REQUIRED for this turn: you must call exactly one of the declared tools. Output only the tool call, and copy every argument value verbatim \\u2014 character for character, preserving punctuation and newlines, with no added or removed whitespace.' -}}
-        {%- endif -%}
-    {%- endif -%}"""
-
-
-_EMPTY_NO_THINK_TAIL = """{%- if add_generation_prompt -%}
-    {%- if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' -%}
-        {{- '<|turn>model\\n' -}}
-        {%- if not enable_thinking | default(false) -%}
-            {{- '<|channel>thought\\n<channel|>' -}}
-        {%- endif -%}
-    {%- endif -%}
-{%- endif -%}"""
-
-_SAFE_NO_THINK_TAIL = """{%- if add_generation_prompt -%}
-    {%- if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' -%}
-        {{- '<|turn>model\\n' -}}
-    {%- endif -%}
-{%- endif -%}"""
-
-
-def _patch_chat_template_tool_choice(text: str) -> str:
-    """Inject the conditional tool_choice==required stanza (idempotent)."""
-    if "Tool use is REQUIRED" in text:
-        return text
-    if _TOOL_CHOICE_ANCHOR in text:
-        return text.replace(_TOOL_CHOICE_ANCHOR, _TOOL_CHOICE_PATCH, 1)
-    return text
-
-
-def _patch_chat_template_no_thinking_tail(text: str) -> str:
-    """Remove Gemma 4's empty no-thinking thought-channel generation prefill."""
-    return text.replace(_EMPTY_NO_THINK_TAIL, _SAFE_NO_THINK_TAIL, 1)
-
-
-def _patch_chat_template(text: str) -> str:
-    """Apply all Gemma 4 chat-template compatibility patches (idempotent)."""
-    text = _patch_chat_template_no_thinking_tail(text)
-    text = _patch_chat_template_tool_choice(text)
-    return text
-
 
 def _copy_sidecars(src: Path, out: Path) -> None:
     for file_name in SIDECAR_FILES:
         src_file = src / file_name
         if src_file.exists():
             shutil.copy2(str(src_file), str(out / file_name))
-    # Patch the jinja template (tool_choice==required + safe no-thinking
-    # generation tail) and fold it into tokenizer_config so runtimes that read
-    # tokenizer_config.chat_template get the same, patched template.
-    tok_cfg = out / "tokenizer_config.json"
-    template = out / "chat_template.jinja"
-    if template.exists():
-        patched = _patch_chat_template(template.read_text(encoding="utf-8"))
-        template.write_text(patched, encoding="utf-8")
-        if tok_cfg.exists():
-            cfg = json.loads(tok_cfg.read_text(encoding="utf-8"))
-            cfg["chat_template"] = patched
-            gen_cfg = out / "generation_config.json"
-            if gen_cfg.exists():
-                gen = json.loads(gen_cfg.read_text(encoding="utf-8"))
-                for key in ("bos_token_id", "eos_token_id", "pad_token_id"):
-                    if gen.get(key) is not None:
-                        cfg[key] = gen[key]
-            tok_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    # Both affine JANG and MXFP exports use the same template contract.
+    patch_bundle_chat_template(out)
 
 
 def parse_args(default_bits: int = 4) -> argparse.Namespace:
