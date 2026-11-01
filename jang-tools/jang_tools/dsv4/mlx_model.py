@@ -1046,7 +1046,7 @@ class DeepseekV4Cache:
     def state(self):
         """Cache state tuple — mlx_lm generate iterates this for pipelined evaluation."""
         self.flush_pool_pending()
-        local_state = None if self.local.empty() else self.local.state
+        local_state = None if self.local.empty() else self.local.state[:2]
         return (
             local_state,
             tuple(self.compressor_state[k] for k in ("buffer_kv", "buffer_gate", "pooled")),
@@ -1061,17 +1061,22 @@ class DeepseekV4Cache:
             self.local.keys = None
             self.local.values = None
         else:
-            self.local.state = local_state
+            self.local.keys, self.local.values = local_state
         self.compressor_state = dict(zip(("buffer_kv", "buffer_gate", "pooled"), compressor_state))
         self.indexer_state = dict(zip(("buffer_kv", "buffer_gate", "pooled"), indexer_state))
 
     @property
     def meta_state(self):
-        return self.local.meta_state
+        # Keep our serialized metadata stable across mlx-lm cache APIs.
+        return tuple(map(str, (
+            self.local.keep, self.local.max_size, self.local.offset, self.local._idx
+        )))
 
     @meta_state.setter
     def meta_state(self, value):
-        self.local.meta_state = value
+        self.local.keep, self.local.max_size, self.local.offset, self.local._idx = map(
+            int, value
+        )
 
     def update_and_fetch(self, keys, values):
         return self.local.update_and_fetch(keys, values)
@@ -1806,7 +1811,7 @@ class DeepseekV4Cache:
                     "DSV4 anchor local window is not canonical: "
                     f"rows={local_rows} expected={expected_local_rows}"
                 )
-            cache.local.state = local_state
+            cache.local.keys, cache.local.values = local_state
         local_meta = anchor.get("meta_state")
         if local_meta is None or len(local_meta) < 4:
             raise ValueError("DSV4 anchor is missing local rotating metadata")
