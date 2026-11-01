@@ -194,7 +194,7 @@ if nn is not None:
             sinks = self.get("sinks") if self.sink_mode != "off" else None  # Module is a dict
             windowed = (not full_attn) and self.window > 0 and L > self.window + 1
             if sinks is not None and self.sink_mode == "virtual":
-                s = sinks.astype(mx.float32)
+                s = sinks.astype(q.dtype)
                 if not windowed:
                     return mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, sinks=s)
             if not windowed and sinks is None:
@@ -216,7 +216,7 @@ if nn is not None:
                 bias = bias.astype(q.dtype)
                 kw = {}
                 if sinks is not None and self.sink_mode == "virtual":
-                    kw["sinks"] = sinks.astype(mx.float32)
+                    kw["sinks"] = sinks.astype(q.dtype)
                 outs.append(
                     mx.fast.scaled_dot_product_attention(
                         q[:, :, s0:s1], k[:, :, k0:k1], v[:, :, k0:k1], scale=self.scale, mask=bias, **kw
