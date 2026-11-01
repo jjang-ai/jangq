@@ -36,10 +36,17 @@ class Media:
 
 class MiMoV26Omni:
     def __init__(self, bundle: str | Path, model: Any, tokenizer: Any, *, vision_dtype=mx.bfloat16,
-                 merger_norm: str = "rms", audio_tokenizer_dtype=mx.float32):
+                 merger_norm: str = "rms", audio_tokenizer_dtype=mx.float32,
+                 vision_sink_mode: str = "virtual"):
+        if vision_sink_mode not in {"virtual", "key0", "off"}:
+            raise ValueError(f"unsupported vision sink mode: {vision_sink_mode}")
         self.bundle = Path(bundle)
         self.model, self.tokenizer = model, tokenizer
         self.vision_dtype, self.merger_norm = vision_dtype, merger_norm
+        # SGLang's MiMo vision FA3 path uses an extra softmax sink logit,
+        # not a bias on the first image patch. Keep key0 available for
+        # comparisons with the alternate HF/vLLM reference implementation.
+        self.vision_sink_mode = vision_sink_mode
         self.audio_tokenizer_dtype = audio_tokenizer_dtype  # fp32: bf16 codes are noisy even in the reference
         self._vt = self._vp = self._atok = self._aenc = None
 
@@ -48,6 +55,7 @@ class MiMoV26Omni:
         if self._vt is None:
             cfg = V.MiMoV26VisionConfig.from_model_dir(self.bundle)
             tower = V.MiMoVisionTower(cfg, merger_norm=self.merger_norm)
+            tower.set_sink_mode(self.vision_sink_mode)
             tower.load_source_weights(V.load_visual_weights_from_source(self.bundle), dtype=self.vision_dtype)
             self._vt, self._vp = tower, V.MiMoV26VisionProcessor.from_model_dir(self.bundle)
         return self._vt, self._vp
