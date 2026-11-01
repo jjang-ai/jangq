@@ -969,7 +969,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
     @property
     def state(self):
         self.flush_pool_pending()
-        local_state = None if self.local.empty() else self.local.state
+        local_state = None if self.local.empty() else self.local.state[:2]
         return (
             local_state,
             tuple(self.compressor_state[k] for k in _STATE_KEYS),
@@ -984,7 +984,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
             self.local.keys = None
             self.local.values = None
         else:
-            self.local.state = local_state
+            self.local.keys, self.local.values = local_state
         self.compressor_state = dict(zip(_STATE_KEYS, compressor_state))
         self.indexer_state = dict(zip(_STATE_KEYS, indexer_state))
 
@@ -992,7 +992,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
     def storage_state(self):
         """Lossless prompt/L2 state preserving native q8 pool segments."""
         self.flush_pool_pending()
-        local_state = None if self.local.empty() else self.local.state
+        local_state = None if self.local.empty() else self.local.state[:2]
         return (
             POOL_STORAGE_SCHEMA,
             local_state,
@@ -1014,7 +1014,7 @@ class PoolQuantizedV4Cache(DeepseekV4Cache):
             self.local.keys = None
             self.local.values = None
         else:
-            self.local.state = local_state
+            self.local.keys, self.local.values = local_state
         compressor = _StateProxy()
         compressor.import_storage_state(compressor_state)
         indexer = _StateProxy()
