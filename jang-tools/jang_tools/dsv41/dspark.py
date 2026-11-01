@@ -736,7 +736,7 @@ class DSparkRunner:
     PREFILL_CHUNK = 2048
 
     def prefill(self, prompt_ids, session=None, on_boundary=None, chunk_size=None,
-                clear_cache=True):
+                clear_cache=True, cuts=None, on_cut=None):
         """Forward ``prompt_ids`` into ``session`` (a runtime Session or the engine's _SeqState duck
         type) and seed the draft windows, returning (session, pending_logits, c), c = last prompt pos.
 
@@ -752,7 +752,17 @@ class DSparkRunner:
              old code snapshotted AFTER the last token, so every hit restored N tokens under an N-1
              key and re-fed the last prompt token at position N;
           3. the last prompt token in its own forward -> the pending logits for c+1.
-        Draft windows are seeded only from the last ``win`` positions (all attend can read)."""
+        Draft windows are seeded only from the last ``win`` positions (all attend can read).
+
+        ``cuts`` (absolute positions strictly inside the body, i.e. ``sess.pos < cut < N-1``) split the body
+        into segments; each segment is its own prefill (chunked from its start, ``prompt_end`` = the segment
+        end), so the state at a cut is exactly the state a prefill of the prompt up to the cut leaves, and
+        ``on_cut(sess, cut)`` sees it (the prefix cache keeps it as an extra reusable boundary). Each segment
+        seeds the draft windows from its own last ``win`` positions, so ``main_tail()`` at a cut holds the
+        positions a later prefix hit on that cut reseeds from; the windows at N-1 are the same as without
+        cuts. No cuts: the single-segment prefill above, unchanged. ``chunk_size`` may be a callable
+        ``(segment_start, segment_end) -> int`` (absolute positions; the last segment ends at N-1) choosing each
+        segment's chunk, so a prefill restored at a cut chunks its segments exactly as a cold prefill does."""
         m, ds = self.m, self.ds
         sess = session if session is not None else m.new_session()
         ds.reset_windows()
@@ -770,29 +780,37 @@ class DSparkRunner:
             raise ValueError("DSparkRunner.prefill needs at least one prompt token")
         end = start + len(ids)
         win = int(ds.stages[0].attn.win)
-        seed_from = max(start, end - win)  # first absolute position whose hidden seeds the windows
-        step = max(1, int(chunk_size or self.PREFILL_CHUNK))
         body = ids[:-1]
+        seg_ends = sorted({int(x) for x in (cuts or ()) if start < int(x) < end - 1}) + [end - 1]
         p = start
-        for i in range(0, len(body), step):
-            piece = body[i:i + step]
-            # The next forward's tokens (the next chunk, or the final prompt token): its Engram rows
-            # are read from SSD while this chunk computes (DSV41.forward engram_lookahead).
-            nxt = body[i + step:i + 2 * step] or ids[-1:]
-            kw = {"engram_lookahead": nxt} if _accepts_lookahead(m) else {}
-            if _accepts_kw(m, "prompt_end"):
-                kw["prompt_end"] = end - 1  # the body ends at the N-1 boundary (suffix pruning)
-            if p + len(piece) > seed_from:
-                logits, mh = m.forward(piece, sess, all_logits=False, return_hidden=True, **kw)
-                lo = max(0, seed_from - p)
-                ds.seed_windows(mh[None, lo:], range(p + lo, p + len(piece)))
-                mx.eval(logits, _session_arrays(sess), [st.attn.window.buf for st in ds.stages])
-            else:
-                logits = m.forward(piece, sess, all_logits=False, **kw)
-                mx.eval(logits, _session_arrays(sess))
-            p += len(piece)
-            if clear_cache and hasattr(mx, "clear_cache"):
-                mx.clear_cache()
+        for seg_end in seg_ends:
+            # First absolute position whose hidden seeds the windows: the body's last win - 1 positions (the
+            # final prompt token adds the win-th), or a cut segment's last win positions (its main_tail).
+            seed_from = max(p, end - win if seg_end == end - 1 else seg_end - win)
+            seg = body[p - start:seg_end - start]
+            step = max(1, int((chunk_size(p, seg_end) if callable(chunk_size) else chunk_size) or self.PREFILL_CHUNK))
+            for i in range(0, len(seg), step):
+                piece = seg[i:i + step]
+                # The next forward's tokens (the next chunk, or the final prompt token): its Engram rows
+                # are read from SSD while this chunk computes (DSV41.forward engram_lookahead).
+                q = p - start + len(piece)
+                nxt = body[q:q + step] or ids[-1:]
+                kw = {"engram_lookahead": nxt} if _accepts_lookahead(m) else {}
+                if _accepts_kw(m, "prompt_end"):
+                    kw["prompt_end"] = seg_end  # the segment ends here (suffix pruning)
+                if p + len(piece) > seed_from:
+                    logits, mh = m.forward(piece, sess, all_logits=False, return_hidden=True, **kw)
+                    lo = max(0, seed_from - p)
+                    ds.seed_windows(mh[None, lo:], range(p + lo, p + len(piece)))
+                    mx.eval(logits, _session_arrays(sess), [st.attn.window.buf for st in ds.stages])
+                else:
+                    logits = m.forward(piece, sess, all_logits=False, **kw)
+                    mx.eval(logits, _session_arrays(sess))
+                p += len(piece)
+                if clear_cache and hasattr(mx, "clear_cache"):
+                    mx.clear_cache()
+            if seg_end < end - 1 and on_cut is not None:
+                on_cut(sess, seg_end)  # exact state of a prefill that ends at this cut
         if on_boundary is not None:
             on_boundary(sess)  # exact N-1 prompt boundary (pos == end - 1)
         logits, mh = m.forward(ids[-1:], sess, all_logits=False, return_hidden=True)
@@ -874,6 +892,23 @@ class DSparkRunner:
                     break
             n_accepted += k
             accept_ema = 0.7 * accept_ema + 0.3 * (k / max(1, W))  # update rolling acceptance
+            # The stream ends inside this step when an emitted token is an EOS or reaches max_new: commit only
+            # the tokens up to that one, so the session holds exactly what was emitted (the engine keeps the
+            # finished session as a reusable prefix: it cannot be trimmed afterwards).
+            emit_all = [p0] + draft_ids[1 : 1 + k] + ([truth[k]] if k < W and not (k > 0 and self._capture_kw) else [])
+            end = next((i + 1 for i, t in enumerate(emit_all) if eos_ids and t in eos_ids), len(emit_all))
+            end = min(end, max(1, max_new - n_emitted))
+            if end < len(emit_all) or (k == W and end < W + 1):
+                emit = emit_all[:end]
+                if self._capture_kw:
+                    m.commit_prefix(sess, ck, len(emit))
+                else:
+                    sess.restore(ck)
+                    m.forward(emit, sess, all_logits=False)
+                c += len(emit)
+                for t in emit:
+                    yield t; n_emitted += 1
+                _rec(); return
             if k == W:
                 # whole block accepted: the verify forward already wrote exactly-correct causal KV for
                 # every position (no rejected tail to undo), so skip the restore+refeed commit forward
