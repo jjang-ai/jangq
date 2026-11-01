@@ -643,9 +643,11 @@ def test_restore_anchor_from_deltas_finalizes_both_pool_branches(monkeypatch):
     rows = tokens // 4
     cache.update_pool_view(_pool_values(rows, 32), "compressor_state")
     cache.update_pool_view(_pool_values(rows, 16, phase=0.3), "indexer_state")
-    keys = _pool_values(128, 16)[:, None]
+    # Advance the actual window to the checkpoint; meta_state is not writable
+    # on every supported mlx-lm version.
+    keys = _pool_values(tokens, 16)[:, None]
     cache.local.update_and_fetch(keys, keys)
-    cache.meta_state = (0, 128, tokens, 128)
+    assert cache.local.offset == tokens
     cache._seen_tokens = tokens
 
     records = [
@@ -667,6 +669,10 @@ def test_restore_anchor_from_deltas_finalizes_both_pool_branches(monkeypatch):
     )
     assert restored.checkpoint_tokens == tokens
     assert restored.replayed_tokens == 0
+    assert restored.cache.local.offset == tokens
+    assert tuple(map(int, restored.cache.meta_state)) == (0, 128, tokens, 128)
+    assert len(restored.cache.state[0]) == 2
+    assert mx.array_equal(restored.cache.local.keys, keys[..., -128:, :]).item()
     proxies = {id(restored.cache.compressor_state), id(restored.cache.indexer_state)}
     assert {id(p) for p in finalized} >= proxies
     assert restored.cache.compressor_state._q_rows_deferred is None
