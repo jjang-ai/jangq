@@ -144,7 +144,7 @@ class MiMoShardIndex:
         Only full-attention layers disambiguate it: each rank block is padded
         to a 128-row FP8 block on its own, so scale_rows*128 == tp*pad128(rows/tp)
         holds for exactly one tp (4 on Flash). SWA geometry is block-aligned and
-        ambiguous. Same derivation as oMLX patches/mimo_v2/fused_qkv_layout.py.
+        ambiguous.
         """
         hybrid = self.config.get("hybrid_layer_pattern") or []
         for layer, is_swa in enumerate(hybrid):

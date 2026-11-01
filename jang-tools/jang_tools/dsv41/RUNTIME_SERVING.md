@@ -177,7 +177,7 @@ they read all come from layer 20 (the last KV source; the Engram layers are 1 an
 ends at `prompt_end`, layer i only needs the trailing `1 + (40 - i) * 127` rows (layer 39: 128,
 layer 21: 2414): each window reaches 127 rows back, so a layer's first 127 kept rows see a partial
 window and the layer above starts 127 rows later. The logits at `prompt_end - 1` and every layer's
-window at `prompt_end` are those of a full prefill (`Model.prune_rows`, ported from ds4 #1272).
+window at `prompt_end` are those of a full prefill (`Model.prune_rows`).
 
 - `DSV41.forward(..., prompt_end=)`; the engine's `SingleBatchGenerator._prefill` passes the end of each
   prefill call (the N-1 prompt boundary), `DSparkRunner.prefill` the end of the prompt body. Decode,
