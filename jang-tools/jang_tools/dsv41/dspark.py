@@ -29,6 +29,7 @@ can in principle flip relative to plain AR decode.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import time
 from pathlib import Path
@@ -546,6 +547,30 @@ def _accepts_lookahead(m) -> bool:
     return _accepts_kw(m, "engram_lookahead")
 
 
+def _vl_spans(images):
+    return [(int(im.start), int(im.start) + len(im.types)) for im in images or ()]
+
+
+def _vl_chunk_len(images, pos: int, n: int) -> int:
+    """Shrink or extend a prefill chunk so it never splits an image span (the AR lane's rule)."""
+    end = pos + n
+    for s, e in _vl_spans(images):
+        if s < end < e:
+            end = s if s > pos else e
+    return max(1, end - pos)
+
+
+def _vl_chunk_images(images, pos: int, end: int):
+    """Images whose span lies in [pos, end), re-based to the chunk."""
+    out = []
+    for im, (s, e) in zip(images, _vl_spans(images)):
+        if pos <= s and e <= end:
+            out.append(dataclasses.replace(im, start=s - pos))
+        elif s < end and e > pos:
+            raise ValueError(f"DSV4.1 image span [{s}, {e}) straddles prefill chunk [{pos}, {end})")
+    return out or None
+
+
 def _session_arrays(sess):
     """Every live cache array of a runtime Session / engine _SeqState (for a per-chunk eval)."""
     out = []
@@ -736,7 +761,7 @@ class DSparkRunner:
     PREFILL_CHUNK = 2048
 
     def prefill(self, prompt_ids, session=None, on_boundary=None, chunk_size=None,
-                clear_cache=True, cuts=None, on_cut=None):
+                clear_cache=True, cuts=None, on_cut=None, images=None, token_types=None):
         """Forward ``prompt_ids`` into ``session`` (a runtime Session or the engine's _SeqState duck
         type) and seed the draft windows, returning (session, pending_logits, c), c = last prompt pos.
 
@@ -762,7 +787,14 @@ class DSparkRunner:
         positions a later prefix hit on that cut reseeds from; the windows at N-1 are the same as without
         cuts. No cuts: the single-segment prefill above, unchanged. ``chunk_size`` may be a callable
         ``(segment_start, segment_end) -> int`` (absolute positions; the last segment ends at N-1) choosing each
-        segment's chunk, so a prefill restored at a cut chunks its segments exactly as a cold prefill does."""
+        segment's chunk, so a prefill restored at a cut chunks its segments exactly as a cold prefill does.
+
+        ``images`` / ``token_types`` carry an image turn's inputs (vision.ImageInput with absolute ``start``; one
+        type per absolute position, the restored prefix included). A chunk that would split an image span stops
+        before it or takes all of it, each forward gets its own slice, and Engram lookahead is off because it reads
+        text rows only. The draft head is text-only and needs nothing from the image beyond the seeded windows."""
+        if images and cuts:
+            raise ValueError("DSparkRunner.prefill: image requests take no cuts")
         m, ds = self.m, self.ds
         sess = session if session is not None else m.new_session()
         ds.reset_windows()
@@ -789,13 +821,17 @@ class DSparkRunner:
             seed_from = max(p, end - win if seg_end == end - 1 else seg_end - win)
             seg = body[p - start:seg_end - start]
             step = max(1, int((chunk_size(p, seg_end) if callable(chunk_size) else chunk_size) or self.PREFILL_CHUNK))
-            for i in range(0, len(seg), step):
-                piece = seg[i:i + step]
+            seg_start = p
+            while p < seg_end:
+                piece = seg[p - seg_start:p - seg_start + _vl_chunk_len(images, p, step)]
                 # The next forward's tokens (the next chunk, or the final prompt token): its Engram rows
                 # are read from SSD while this chunk computes (DSV41.forward engram_lookahead).
                 q = p - start + len(piece)
                 nxt = body[q:q + step] or ids[-1:]
-                kw = {"engram_lookahead": nxt} if _accepts_lookahead(m) else {}
+                kw = {"engram_lookahead": nxt} if _accepts_lookahead(m) and not images else {}
+                if images:
+                    kw["images"] = _vl_chunk_images(images, p, p + len(piece))
+                    kw["token_types"] = list(token_types[p:p + len(piece)])
                 if _accepts_kw(m, "prompt_end"):
                     kw["prompt_end"] = seg_end  # the segment ends here (suffix pruning)
                 if p + len(piece) > seed_from:
