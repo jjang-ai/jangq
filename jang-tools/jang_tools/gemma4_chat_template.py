@@ -29,6 +29,15 @@ _SAFE_NO_THINK_TAIL = """{%- if add_generation_prompt -%}
     {%- endif -%}
 {%- endif -%}"""
 
+# Canonical Thinking On resumes a tool response on the thought channel. The
+# pre-existing no-empty-thought behavior for Thinking Off stays unchanged.
+_TOOL_THINKING_TAIL = _SAFE_NO_THINK_TAIL.replace(
+    "    {%- endif -%}\n{%- endif -%}",
+    "    {%- elif ns.prev_message_type == 'tool_response' and enable_thinking | default(false) -%}\n"
+    "        {{- '<|channel>thought\\n' -}}\n"
+    "    {%- endif -%}\n{%- endif -%}",
+)
+
 def _remove_legacy_tool_choice_instruction(text: str) -> str:
     """Undo only the exact instruction older exports injected, not user text."""
     return text.replace(_TOOL_CHOICE_PATCH, _TOOL_CHOICE_ANCHOR, 1)
@@ -73,6 +82,29 @@ def _patch_chat_template_no_thinking_tail(text: str) -> str:
     """Remove Gemma 4's empty no-thinking thought-channel generation prefill."""
     return text.replace(_EMPTY_NO_THINK_TAIL, _SAFE_NO_THINK_TAIL, 1)
 
+
+def _canonical_content_order(text: str) -> str:
+    """Move only the known legacy Gemma capture block behind its tool results.
+
+    INVARIANT: model content follows tool calls/results, as in the pinned
+    canonical template. Earlier E4B exports put it before calls, so a mixed
+    content+call turn was replayed in the wrong order. Already canonical and
+    unknown layouts are left intact; the captured content itself is unchanged.
+    """
+    begin = text.find("{%- set captured_content -%}")
+    end_marker = "{%- set has_content = captured_content | trim | length > 0 -%}"
+    end = text.find(end_marker, begin) if begin >= 0 else -1
+    call = text.find("{%- if message['tool_calls'] -%}")
+    boundary = text.find(_CANONICAL_TURN_END)
+    if not (0 <= begin < end < call < boundary):
+        return text
+    end += len(end_marker)
+    capture = text[begin:end]
+    without_capture = text[:begin] + text[end:]
+    boundary = without_capture.index(_CANONICAL_TURN_END)
+    return without_capture[:boundary] + capture + "\n\n        " + without_capture[boundary:]
+
+
 def _patch_chat_template(text: str) -> str:
     """Preserve Gemma's boundary contract without inventing tool instructions.
 
@@ -86,6 +118,8 @@ def _patch_chat_template(text: str) -> str:
     text = _remove_legacy_tool_choice_instruction(text)
     for legacy_end in (_OLD_TURN_END, _UNCONDITIONAL_OPEN_TURN_END):
         text = text.replace(legacy_end, _CANONICAL_TURN_END, 1)
+    text = _canonical_content_order(text)
+    text = text.replace(_SAFE_NO_THINK_TAIL, _TOOL_THINKING_TAIL, 1)
     return text
 
 
