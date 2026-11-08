@@ -1,0 +1,128 @@
+diff --git a/src/mflux/models/qwen21/cli/qwen21_edit_generate.py b/src/mflux/models/qwen21/cli/qwen21_edit_generate.py
+index 2d73b5c..12a1dde 100644
+--- a/src/mflux/models/qwen21/cli/qwen21_edit_generate.py
++++ b/src/mflux/models/qwen21/cli/qwen21_edit_generate.py
+@@ -6,7 +6,7 @@ from mflux.callbacks.callback_manager import CallbackManager
+ from mflux.cli.parser.parsers import CommandLineParser, lora_init_kwargs_from_args
+ from mflux.models.common.resolution.config_resolution import ConfigResolution
+ from mflux.models.qwen21.latent_creator.qwen_image21_latent_creator import QwenImage21LatentCreator
+-from mflux.models.qwen21.model.qwen21_scheduler import ViggleTurboScheduler
++from mflux.models.qwen21.model.qwen21_scheduler import Qwen21TurboScheduler, ViggleTurboScheduler  # noqa: F401
+ from mflux.models.qwen21.variants.edit.qwen_image_21_edit import QwenImage21Edit
+ from mflux.utils.dimension_resolver import DimensionResolver
+ from mflux.utils.exceptions import ModelConfigError, PromptFileReadError, StopImageGenerationException
+@@ -16,7 +16,7 @@ from mflux.utils.scale_factor import ScaleFactor
+ IGNORED_OPTIONS = {"--lora-style": "Named LoRA styles are only supported by the Flux in-context CLI; use --lora."}
+ CONDITIONAL_OPTIONS = {
+     "--scheduler": {
+-        "condition": "linear Euler or viggle_turbo scheduler only",
++        "condition": "linear Euler, viggle_turbo or qwen21_turbo scheduler only",
+         "reason": "Other scheduler values exit with an error before model loading.",
+     },
+     "--negative-prompt": {
+@@ -140,8 +140,8 @@ def main() -> None:
+         )
+     if Path(args.output).suffix.lower() not in (".png", ".webp", ".tif", ".tiff"):
+         parser.error("Qwen-Image-2.1 outputs RGBA; use PNG, WebP or TIFF to retain transparency.")
+-    if args.scheduler not in ("linear", "viggle_turbo"):
+-        parser.error("Qwen-Image-2.1 supports the default linear Euler scheduler or viggle_turbo only.")
++    if args.scheduler not in ("linear", "viggle_turbo", "qwen21_turbo"):
++        parser.error("Qwen-Image-2.1 supports the default linear Euler scheduler, viggle_turbo or qwen21_turbo only.")
+     ViggleTurboScheduler.check_args(parser, args)
+     paths = args.image_paths or []
+     if len(paths) > 10:
+@@ -185,6 +185,7 @@ def main() -> None:
+                 num_inference_steps=args.steps,
+                 guidance=guidance,
+                 image_paths=paths,
++                scheduler=None if args.scheduler == "linear" else args.scheduler,
+                 output_resolution=args.output_resolution,
+                 use_kv_cache=args.use_kv_cache,
+                 mask_image=args.mask_image,
+diff --git a/src/mflux/models/qwen21/model/qwen21_scheduler.py b/src/mflux/models/qwen21/model/qwen21_scheduler.py
+index 4c63ba1..d7b5430 100644
+--- a/src/mflux/models/qwen21/model/qwen21_scheduler.py
++++ b/src/mflux/models/qwen21/model/qwen21_scheduler.py
+@@ -71,3 +71,44 @@ class ViggleTurboScheduler(BaseScheduler):
+ 
+ register_contrib(ViggleTurboScheduler, "viggle_turbo")
+ register_contrib(ViggleTurboScheduler, "ViggleTurboScheduler")
++
++
++class Qwen21TurboScheduler(BaseScheduler):
++    """Fixed sigma grid of Qwen/Qwen-Image-2.1-Turbo (model_index.json ``sample_sigmas``).
++
++    The Turbo checkpoint is an 8-step distill of Qwen-Image-2.1. Diffusers (PR #14950) passes the
++    pipeline-configured grid to FlowMatchEulerDiscreteScheduler.set_timesteps(sigmas=...); the
++    Turbo scheduler config has shift=1.0, use_dynamic_shifting=false and shift_terminal=null, so the
++    nodes are used unchanged (no resolution shift, no terminal rescale) and a terminal 0 is appended.
++    step() is the same first-order Euler update LinearScheduler uses.
++    """
++
++    SIGMA_NODES = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
++
++    def __init__(self, config):
++        self.config = config
++        steps = config.num_inference_steps
++        if steps != len(self.SIGMA_NODES):
++            raise ValueError(
++                f"the qwen21_turbo scheduler samples Qwen-Image-2.1-Turbo on its {len(self.SIGMA_NODES)} "
++                f"distilled sigma nodes, but num_inference_steps is {steps}. Use --steps {len(self.SIGMA_NODES)}."
++            )
++        nodes = mx.array(list(self.SIGMA_NODES), dtype=mx.float32)
++        self._sigmas = mx.concatenate([nodes, mx.zeros(1, dtype=mx.float32)])
++        self._timesteps = mx.arange(steps, dtype=mx.float32)
++
++    @property
++    def sigmas(self) -> mx.array:
++        return self._sigmas
++
++    @property
++    def timesteps(self) -> mx.array:
++        return self._timesteps
++
++    def step(self, noise: mx.array, timestep: int, latents: mx.array, **kwargs) -> mx.array:
++        dt = (self._sigmas[timestep + 1] - self._sigmas[timestep]).astype(latents.dtype)
++        return latents + noise.astype(latents.dtype) * dt
++
++
++register_contrib(Qwen21TurboScheduler, "qwen21_turbo")
++register_contrib(Qwen21TurboScheduler, "Qwen21TurboScheduler")
+diff --git a/src/mflux/models/qwen21/variants/edit/qwen_image_21_edit.py b/src/mflux/models/qwen21/variants/edit/qwen_image_21_edit.py
+index 8bdaa2c..57ffec2 100644
+--- a/src/mflux/models/qwen21/variants/edit/qwen_image_21_edit.py
++++ b/src/mflux/models/qwen21/variants/edit/qwen_image_21_edit.py
+@@ -64,6 +64,7 @@ class QwenImage21Edit(nn.Module):
+         enhance_prompt: bool = False,
+         verify: bool = False,
+         verify_retries: int = 0,
++        scheduler: str | None = None,
+     ) -> GeneratedImage:
+         image_paths = image_paths or []
+         if len(image_paths) > 10:
+@@ -89,8 +90,12 @@ class QwenImage21Edit(nn.Module):
+             raise ValueError("guidance must be finite and at least 1.")
+         if guidance > 1 and negative_prompt is None:
+             raise ValueError("Provide negative_prompt (which may be empty) to enable guidance greater than 1.")
++        # A checkpoint that pins a sampling grid (Qwen-Image-2.1-Turbo: model_index.json sample_sigmas)
++        # samples on it unless the caller names another scheduler.
++        scheduler = scheduler or ("qwen21_turbo" if self._sample_sigmas() else "linear")
+         config = Config(
+             model_config=self.model_config,
++            scheduler=scheduler,
+             num_inference_steps=num_inference_steps,
+             width=width,
+             height=height,
+@@ -261,6 +266,12 @@ class QwenImage21Edit(nn.Module):
+         image.verification = {**verification, "retries": retries}
+         return image
+ 
++    def _sample_sigmas(self) -> list[float] | None:
++        index = Path(getattr(self, "_checkpoint_path", "") or ".") / "model_index.json"
++        if not index.exists():
++            return None
++        return json.loads(index.read_text()).get("sample_sigmas")
++
+     def save_model(self, base_path: str) -> None:
+         ModelSaver.save_model(self, self.bits, base_path, QwenImage21WeightDefinition)
+         destination = Path(base_path)
