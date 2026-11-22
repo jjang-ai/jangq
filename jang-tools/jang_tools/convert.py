@@ -20,7 +20,7 @@ from tqdm import tqdm
 from safetensors import safe_open
 
 from .format.spec import DEFAULT_BLOCK_SIZE
-from .format.writer import write_jang_v2_model
+from .format.writer import _save_jang_v2_shard, write_jang_v2_model
 from .architectures import detect_architecture, get_layer_config, get_skip_tensors, summarize_architecture
 from .calibrate import calibrate_from_weights, _load_bf16_tensor
 from .allocate import allocate_bits_greedy, allocate_bits_profile, summarize_allocation, JANG_PROFILES
@@ -1418,8 +1418,7 @@ def convert_model(
                 convert_model._shard_idx += 1
                 _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
                 _shard_path = output_path / _shard_name
-                from safetensors.numpy import save_file as _save_shard
-                _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+                _save_jang_v2_shard(v2_tensors, _shard_path)
                 if not hasattr(convert_model, '_shard_map'):
                     convert_model._shard_map = {}
                 for _k in v2_tensors:
@@ -1751,8 +1750,7 @@ def convert_model(
             convert_model._shard_idx += 1
             _shard_name = f"model-{convert_model._shard_idx:05d}-of-NNNNN.safetensors"
             _shard_path = output_path / _shard_name
-            from safetensors.numpy import save_file as _save_shard
-            _save_shard(v2_tensors, str(_shard_path), metadata={"format": "mlx"})
+            _save_jang_v2_shard(v2_tensors, _shard_path)
             if not hasattr(convert_model, '_shard_map'):
                 convert_model._shard_map = {}
             for _k in v2_tensors:

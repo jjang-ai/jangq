@@ -27,6 +27,15 @@ from .spec import (
 from ..quantize import QuantizedTensor
 
 
+def _save_jang_v2_shard(tensors: dict[str, np.ndarray], path: Path) -> None:
+    """Serialize packed tensors, including strided views of fused expert stacks."""
+    contiguous = {
+        name: value if value.flags.c_contiguous else np.ascontiguousarray(value)
+        for name, value in tensors.items()
+    }
+    save_file(contiguous, str(path), metadata={"format": "mlx"})
+
+
 def write_jang_v2_model(
     output_dir: str | Path,
     tensors: dict[str, np.ndarray],
@@ -154,7 +163,7 @@ def write_jang_v2_model(
 
         # CRITICAL: metadata={"format":"mlx"} tells mlx_lm to use the fast
         # loader path. Without this, speed drops 67% (50→15 tok/s).
-        save_file(shard_data, str(shard_path), metadata={"format": "mlx"})
+        _save_jang_v2_shard(shard_data, shard_path)
 
     # Rename all shard files with correct total count
     n_total_shards = preflushed_count + len(shards)
